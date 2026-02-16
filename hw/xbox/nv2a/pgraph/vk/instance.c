@@ -37,15 +37,7 @@ static char const *const validation_layers[] = {
     "VK_LAYER_KHRONOS_validation",
 };
 
-static char const *const required_instance_extensions[] = {
-    VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
-    VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
-    VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
-};
-
 static char const *const required_device_extensions[] = {
-    VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-    VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
 #ifdef WIN32
     VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
     VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
@@ -142,30 +134,6 @@ is_extension_available(VkExtensionPropertiesArray *available_extensions,
     return false;
 }
 
-static StringArray *get_required_instance_extension_names(PGRAPHState *pg)
-{
-#ifdef __ANDROID__
-    /* On Android the NV2A renderer is entirely offscreen (it exports the final
-     * frame as a GL texture via external memory interop). No Vulkan surface /
-     * swapchain is needed, so no surface-related instance extensions are
-     * required here.
-     *
-     * The capability extensions (GET_PHYSICAL_DEVICE_PROPERTIES_2, etc.) are
-     * promoted to Vulkan 1.1+ core and need not be requested as extensions
-     * when apiVersion >= 1.1. */
-    return g_array_new(FALSE, FALSE, sizeof(char *));
-#else
-    StringArray *extensions = g_array_sized_new(
-        FALSE, FALSE, sizeof(char *),
-        ARRAY_SIZE(required_instance_extensions));
-
-    g_array_append_vals(extensions, required_instance_extensions,
-                        ARRAY_SIZE(required_instance_extensions));
-
-    return extensions;
-#endif
-}
-
 static bool
 add_extension_if_available(VkExtensionPropertiesArray *available_extensions,
                            StringArray *enabled_extension_names,
@@ -222,6 +190,17 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
         return false;
     }
 
+    uint32_t instance_version = VK_API_VERSION_1_0;
+    if (vkEnumerateInstanceVersion) {
+        vkEnumerateInstanceVersion(&instance_version);
+        instance_version = MIN(instance_version, VK_API_VERSION_1_3);
+    }
+    if (instance_version < VK_API_VERSION_1_1) {
+        error_setg(errp, "Vulkan 1.1 or higher is required");
+        return false;
+    }
+    r->vk_api_version = instance_version;
+
     VkApplicationInfo app_info = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "xemu",
@@ -229,39 +208,24 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
             xemu_version_major, xemu_version_minor, xemu_version_patch),
         .pEngineName = "No Engine",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-        .apiVersion = VK_API_VERSION_1_3,
+        .apiVersion = r->vk_api_version,
     };
 
     g_autoptr(VkExtensionPropertiesArray) available_extensions =
         get_available_instance_extensions(pg);
 
     g_autoptr(StringArray) enabled_extension_names =
-        get_required_instance_extension_names(pg);
-
-    bool all_required_extensions_available = true;
-    for (int i = 0; i < enabled_extension_names->len; i++) {
-        const char *required_extension =
-            g_array_index(enabled_extension_names, const char *, i);
-        if (!is_extension_available(available_extensions, required_extension)) {
-            fprintf(stderr,
-                    "Error: Required instance extension not available: %s\n",
-                    required_extension);
-            all_required_extensions_available = false;
-        }
-    }
-
-    if (!all_required_extensions_available) {
-        error_setg(errp, "Required instance extensions not available");
-        goto error;
-    }
+        g_array_new(FALSE, FALSE, sizeof(char *));
 
     add_optional_instance_extension_names(pg, available_extensions,
                                           enabled_extension_names);
 
-    fprintf(stderr, "Enabled instance extensions:\n");
-    for (int i = 0; i < enabled_extension_names->len; i++) {
-        fprintf(stderr, "- %s\n",
-                g_array_index(enabled_extension_names, char *, i));
+    if (enabled_extension_names->len > 0) {
+        fprintf(stderr, "Enabled instance extensions:\n");
+        for (int i = 0; i < enabled_extension_names->len; i++) {
+            fprintf(stderr, "- %s\n",
+                    g_array_index(enabled_extension_names, char *, i));
+        }
     }
 
     VkInstanceCreateInfo create_info = {
@@ -322,10 +286,6 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
     }
 
     return true;
-
-error:
-    volkFinalize();
-    return false;
 }
 
 static bool is_queue_family_indicies_complete(QueueFamilyIndices indices)
@@ -427,6 +387,12 @@ static bool check_device_support_required_extensions(VkPhysicalDevice device)
 
 static bool is_device_compatible(VkPhysicalDevice device)
 {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(device, &props);
+    if (props.apiVersion < VK_API_VERSION_1_1) {
+        return false;
+    }
+
     QueueFamilyIndices indices = pgraph_vk_find_queue_families(device);
 
     return is_queue_family_indicies_complete(indices) &&
@@ -490,6 +456,7 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
     vkGetPhysicalDeviceProperties(r->physical_device, &r->device_props);
     xemu_settings_set_string(&g_config.display.vulkan.preferred_physical_device,
                              r->device_props.deviceName);
+    r->vk_api_version = MIN(r->vk_api_version, r->device_props.apiVersion);
 
     fprintf(stderr,
             "Selected physical device: %s\n"
@@ -649,7 +616,7 @@ static bool init_allocator(PGRAPHState *pg, Error **errp)
         .flags = (r->memory_budget_extension_enabled ?
                       VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT :
                       0),
-        .vulkanApiVersion = VK_API_VERSION_1_3,
+        .vulkanApiVersion = r->vk_api_version,
         .instance = r->instance,
         .physicalDevice = r->physical_device,
         .device = r->device,
