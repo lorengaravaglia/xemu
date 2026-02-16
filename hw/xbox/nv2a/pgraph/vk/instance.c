@@ -27,7 +27,6 @@
 #include <vulkan/vulkan_android.h>
 #endif
 
-#include <volk.h>
 
 #define VkExtensionPropertiesArray GArray
 #define StringArray GArray
