@@ -25,9 +25,6 @@
 #ifdef __ANDROID__
 #include <android/log.h>
 #include <vulkan/vulkan_android.h>
-#else
-#include <SDL3/SDL.h>
-#include <SDL3/SDL_vulkan.h>
 #endif
 
 #include <volk.h>
@@ -113,27 +110,6 @@ static bool check_validation_layer_support(void)
     return true;
 }
 
-#ifndef __ANDROID__
-static void create_window(PGRAPHVkState *r, Error **errp)
-{
-    r->window = SDL_CreateWindow(
-        "SDL Offscreen Window",
-        640, 480, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN);
-
-    if (r->window == NULL) {
-        error_setg(errp, "SDL_CreateWindow failed: %s", SDL_GetError());
-    }
-}
-
-static void destroy_window(PGRAPHVkState *r)
-{
-    if (r->window) {
-        SDL_DestroyWindow(r->window);
-        r->window = NULL;
-    }
-}
-#endif /* !__ANDROID__ */
-
 static VkExtensionPropertiesArray *
 get_available_instance_extensions(PGRAPHState *pg)
 {
@@ -180,20 +156,10 @@ static StringArray *get_required_instance_extension_names(PGRAPHState *pg)
      * when apiVersion >= 1.1. */
     return g_array_new(FALSE, FALSE, sizeof(char *));
 #else
-    // Add instance extensions SDL lists as required
-    Uint32 sdl_extension_count = 0;
-    const char *const *sdl_extensions =
-        SDL_Vulkan_GetInstanceExtensions(&sdl_extension_count);
-
     StringArray *extensions = g_array_sized_new(
         FALSE, FALSE, sizeof(char *),
-        sdl_extension_count + ARRAY_SIZE(required_instance_extensions));
+        ARRAY_SIZE(required_instance_extensions));
 
-    if (sdl_extension_count && sdl_extensions) {
-        g_array_append_vals(extensions, sdl_extensions, sdl_extension_count);
-    }
-
-    // Add additional required extensions
     g_array_append_vals(extensions, required_instance_extensions,
                         ARRAY_SIZE(required_instance_extensions));
 
@@ -234,13 +200,6 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
     PGRAPHVkState *r = pg->vk_renderer_state;
     VkResult result;
 
-#ifndef __ANDROID__
-    create_window(r, errp);
-    if (*errp) {
-        return false;
-    }
-#endif
-
 #ifdef __ANDROID__
     /*
      * On Android, prefer a custom Vulkan driver (e.g. Mesa Turnip loaded via
@@ -261,9 +220,6 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
 #endif
     if (result != VK_SUCCESS) {
         error_setg(errp, "volkInitialize failed");
-#ifndef __ANDROID__
-        destroy_window(r);
-#endif
         return false;
     }
 
@@ -370,9 +326,6 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
 
 error:
     volkFinalize();
-#ifndef __ANDROID__
-    destroy_window(r);
-#endif
     return false;
 }
 
@@ -811,7 +764,4 @@ void pgraph_vk_finalize_instance(PGRAPHState *pg)
     }
 
     volkFinalize();
-#ifndef __ANDROID__
-    destroy_window(r);
-#endif
 }
