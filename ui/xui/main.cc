@@ -144,8 +144,10 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
     io.IniFilename = NULL;
 
     // Setup Platform/Renderer bindings
-    ImGui_ImplSDL3_InitForOpenGL(window, sdl_gl_context);
-    ImGui_ImplOpenGL3_Init("#version 150");
+    if (window) {
+        ImGui_ImplSDL3_InitForOpenGL(window, sdl_gl_context);
+    }
+    ImGui_ImplOpenGL3_Init("#version 300 es");
     ImPlot::CreateContext();
 
 #if defined(_WIN32)
@@ -178,6 +180,11 @@ void xemu_hud_process_sdl_events(SDL_Event *event)
 
 void xemu_hud_should_capture_kbd_mouse(int *kbd, int *mouse)
 {
+    if (!ImGui::GetCurrentContext()) {
+        if (kbd) *kbd = 0;
+        if (mouse) *mouse = 0;
+        return;
+    }
     ImGuiIO& io = ImGui::GetIO();
     if (kbd) *kbd = io.WantCaptureKeyboard;
     if (mouse) *mouse = io.WantCaptureMouse;
@@ -192,7 +199,7 @@ void xemu_hud_set_framebuffer_texture(GLuint tex, bool flip)
 void xemu_hud_update(void)
 {
     ImGuiIO& io = ImGui::GetIO();
-    uint32_t now = SDL_GetTicks();
+    uint32_t now = xemu_get_ticks();
 
     g_viewport_mgr.Update();
     g_font_mgr.Update();
@@ -205,13 +212,29 @@ void xemu_hud_update(void)
 
     if (!first_boot_window.is_open) {
         int ww, wh;
-        SDL_GetWindowSizeInPixels(xemu_get_window(), &ww, &wh);
+        SDL_Window *win = xemu_get_window();
+        if (win && xemu_is_main_thread()) {
+            SDL_GetWindowSizeInPixels(win, &ww, &wh);
+        } else {
+            // Fallback for Android/headless: query current viewport
+            GLint vp[4];
+            glGetIntegerv(GL_VIEWPORT, vp);
+            ww = vp[2];
+            wh = vp[3];
+            if (ww == 0 || wh == 0) {
+                ww = 640;
+                wh = 480;
+            }
+        }
+        io.DisplaySize = ImVec2((float)ww, (float)wh);
         RenderFramebuffer(g_tex, ww, wh, g_flip_req);
     }
 
     ImGui_ImplOpenGL3_NewFrame();
     io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
-    ImGui_ImplSDL3_NewFrame();
+    if (xemu_get_window() && xemu_is_main_thread()) {
+        ImGui_ImplSDL3_NewFrame();
+    }
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     g_input_mgr.Update();

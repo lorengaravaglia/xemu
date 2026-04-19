@@ -76,6 +76,7 @@ public:
     void Draw() override;
 };
 
+#ifdef CONFIG_LIBPCAP
 class NetworkInterface
 {
 public:
@@ -98,6 +99,7 @@ public:
     void Select(NetworkInterface &iface);
     bool IsCurrent(NetworkInterface &iface);
 };
+#endif
 
 class MainMenuNetworkView : public virtual MainMenuTabView
 {
@@ -105,7 +107,9 @@ protected:
     char remote_addr[64];
     char local_addr[64];
     bool should_refresh;
+#ifdef CONFIG_LIBPCAP
     std::unique_ptr<NetworkInterfaceManager> iface_mgr;
+#endif
 
 public:
     MainMenuNetworkView();

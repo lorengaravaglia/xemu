@@ -849,6 +849,7 @@ void MainMenuAudioView::Draw()
 
 }
 
+#ifdef CONFIG_LIBPCAP
 NetworkInterface::NetworkInterface(pcap_if_t *pcap_desc, char *_friendlyname)
 {
     m_pcap_name = pcap_desc->name;
@@ -921,6 +922,7 @@ bool NetworkInterfaceManager::IsCurrent(NetworkInterface &iface)
 {
     return &iface == m_current_iface;
 }
+#endif
 
 MainMenuNetworkView::MainMenuNetworkView()
 {
@@ -971,6 +973,7 @@ void MainMenuNetworkView::Draw()
 
 void MainMenuNetworkView::DrawPcapOptions(bool appearing)
 {
+#ifdef CONFIG_LIBPCAP
     if (iface_mgr.get() == nullptr) {
         iface_mgr.reset(new NetworkInterfaceManager());
         iface_mgr->Refresh();
@@ -1025,6 +1028,9 @@ void MainMenuNetworkView::DrawPcapOptions(bool appearing)
         ImGui::PopFont();
         DrawComboChevron();
     }
+#else
+    ImGui::Text("Bridged networking support was not included in this build.");
+#endif
 }
 
 void MainMenuNetworkView::DrawNatOptions(bool appearing)

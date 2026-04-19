@@ -71,6 +71,7 @@ enum controller_state_axis_index {
 enum controller_input_device_type {
     INPUT_DEVICE_SDL_KEYBOARD,
     INPUT_DEVICE_SDL_GAMEPAD,
+    INPUT_DEVICE_ANDROID,
 };
 
 enum peripheral_type { PERIPHERAL_NONE, PERIPHERAL_XMU, PERIPHERAL_TYPE_COUNT };
@@ -125,6 +126,9 @@ extern "C" {
 extern int *g_keyboard_scancode_map[25];
 
 void xemu_input_init(void);
+#if defined(__ANDROID__) || defined(ANDROID)
+void xemu_android_input_init(void);
+#endif
 void xemu_input_process_sdl_events(const SDL_Event *event); // SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_REMOVED
 void xemu_input_update_controllers(void);
 void xemu_input_update_controller(ControllerState *state);

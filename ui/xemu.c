@@ -42,17 +42,62 @@
 #include "system/runstate.h"
 #include "system/runstate-action.h"
 #include "system/system.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include "../android/app/src/main/cpp/xemu_hud_stub.h"
+#else
 #include "xui/xemu-hud.h"
+#endif
 #include "xemu-input.h"
 #include "xemu-settings.h"
 #include "xemu-snapshots.h"
 #include "xemu-version.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include "../android/app/src/main/cpp/xemu_os_utils_android.h"
+#else
 #include "xemu-os-utils.h"
+#endif
+
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES3/gl32.h>
+#include <android/native_window.h>
+#include <android/log.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/syscall.h>
+#include <math.h>
+#include "../android/app/src/main/cpp/xemu_android.h"
+#define ALOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-android", __VA_ARGS__))
+#define ALOGE(...) ((void)__android_log_print(ANDROID_LOG_ERROR, "xemu-android", __VA_ARGS__))
+
+extern EGLDisplay __attribute__((weak)) egl_display;
+extern EGLContext __attribute__((weak)) egl_context;
+extern EGLSurface __attribute__((weak)) egl_surface;
+extern EGLConfig  __attribute__((weak)) egl_config;
+extern void __attribute__((weak)) set_egl_current(bool current);
+extern pid_t __attribute__((weak)) xemu_main_thread_id;
+extern ThreadArgs __attribute__((weak)) *g_android_args;
+extern ANativeWindow __attribute__((weak)) *xemu_android_get_window(void);
+
+bool xemu_is_main_thread(void)
+{
+#if defined(__ANDROID__) || defined(ANDROID)
+    return syscall(SYS_gettid) == xemu_main_thread_id && xemu_main_thread_id != 0;
+#else
+    return true;
+#endif
+}
+#else
+#define ALOGI(...) fprintf(stderr, __VA_ARGS__)
+#define ALOGE(...) fprintf(stderr, __VA_ARGS__)
+#endif
 
 #include "data/xemu_64x64.png.h"
 
 #include "hw/xbox/smbus.h" // For eject, drive tray
 #include "hw/xbox/nv2a/nv2a.h"
+#include "hw/core/cpu.h"
 #include "ui/xemu-notifications.h"
 
 #include <stb_image.h>
@@ -72,6 +117,15 @@
 
 uint64_t vblank_interval_ns = 16666666LL;
 bool use_vblank_timer_thread = true;
+
+uint32_t xemu_get_ticks(void)
+{
+#if defined(__ANDROID__) || defined(ANDROID)
+    return (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_REALTIME) / 1000000);
+#else
+    return (uint32_t)SDL_GetTicks();
+#endif
+}
 
 struct xemu_console {
     DisplayChangeListener dcl;
@@ -180,7 +234,7 @@ static void hide_cursor(struct xemu_console *scon)
     SDL_HideCursor();
     SDL_SetCursor(sdl_cursor_hidden);
 
-    if (!qemu_input_is_absolute(scon->dcl.con)) {
+    if (scon->real_window && !qemu_input_is_absolute(scon->dcl.con)) {
         SDL_SetWindowRelativeMouseMode(scon->real_window, true);
     }
 }
@@ -191,7 +245,7 @@ static void show_cursor(struct xemu_console *scon)
         return;
     }
 
-    if (!qemu_input_is_absolute(scon->dcl.con)) {
+    if (scon->real_window && !qemu_input_is_absolute(scon->dcl.con)) {
         SDL_SetWindowRelativeMouseMode(scon->real_window, false);
     }
 
@@ -234,7 +288,9 @@ static void mouse_mode_change(Notifier *notify, void *data)
     if (qemu_input_is_absolute(scon_list[0].dcl.con)) {
         if (!absolute_enabled) {
             absolute_enabled = 1;
-            SDL_SetWindowRelativeMouseMode(scon_list[0].real_window, false);
+            if (scon_list[0].real_window) {
+                SDL_SetWindowRelativeMouseMode(scon_list[0].real_window, false);
+            }
             absolute_mouse_grab(&scon_list[0]);
         }
     } else if (absolute_enabled) {
@@ -636,7 +692,12 @@ static void xb_surface_gl_create_texture(DisplaySurface *surface)
     switch (surface_format(surface)) {
     case PIXMAN_BE_b8g8r8x8:
     case PIXMAN_BE_b8g8r8a8:
+#if defined(__ANDROID__) || defined(ANDROID)
+        // GLES 3.0 prefers RGBA
+        surface->glformat = GL_RGBA;
+#else
         surface->glformat = GL_BGRA_EXT;
+#endif
         surface->gltype = GL_UNSIGNED_BYTE;
         break;
     case PIXMAN_BE_x8r8g8b8:
@@ -649,24 +710,55 @@ static void xb_surface_gl_create_texture(DisplaySurface *surface)
         surface->gltype = GL_UNSIGNED_SHORT_5_6_5;
         break;
     default:
-        g_assert_not_reached();
+        /* Log the unknown pixman format instead of crashing; use a safe fallback. */
+        fprintf(stderr, "xb_surface_gl_create_texture: unhandled pixman format 0x%x, using GL_RGBA fallback\n",
+                surface_format(surface));
+        surface->glformat = GL_RGBA;
+        surface->gltype = GL_UNSIGNED_BYTE;
+        break;
     }
 
     if (!surface->texture) {
         glGenTextures(1, &surface->texture);
     }
     glBindTexture(GL_TEXTURE_2D, surface->texture);
+#if defined(__ANDROID__) || defined(ANDROID)
+    // GLES doesn't have GL_UNPACK_ROW_LENGTH_EXT in standard (only some extensions)
+    // For now skip it if not supported, but xemu expects it.
+    // GLES 3.0 HAS GL_UNPACK_ROW_LENGTH.
+    glPixelStorei(GL_UNPACK_ROW_LENGTH,
+                  surface_stride(surface) / surface_bytes_per_pixel(surface));
+#else
     glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT,
                   surface_stride(surface) / surface_bytes_per_pixel(surface));
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+#endif
+
+    GLint internal_format = GL_RGB;
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (surface->glformat == GL_RGBA) internal_format = GL_RGBA;
+#endif
+
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_format,
                  surface_width(surface),
                  surface_height(surface),
                  0, surface->glformat, surface->gltype,
                  surface_data(surface));
+    
+#if defined(__ANDROID__) || defined(ANDROID)
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+#else
     glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, 0);
+#endif
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        ALOGE("xb_surface_gl_create_texture: GL error 0x%x", err);
+    }
+#endif
 }
 
 static void xb_surface_gl_destroy_texture(DisplaySurface *surface)
@@ -751,6 +843,10 @@ static void *vblank_timer_thread(void *opaque)
 {
     struct xemu_console *scon = (struct xemu_console *)opaque;
     int64_t next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+#if defined(__ANDROID__) || defined(ANDROID)
+    int frames = 0;
+    ALOGI("vblank_timer_thread starting (thread %ld)", (long)syscall(SYS_gettid));
+#endif
 
     while (!qatomic_read(&qemu_exiting)) {
         // Schedule next vblank at fixed interval (absolute deadline)
@@ -759,7 +855,11 @@ static void *vblank_timer_thread(void *opaque)
         // Wait until deadline
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (now < next_vblank) {
+#if !defined(__ANDROID__) && !defined(ANDROID)
             SDL_DelayPrecise(next_vblank - now);
+#else
+            g_usleep((next_vblank - now) / 1000);
+#endif
         } else if (now > next_vblank + vblank_interval_ns) {
             // We've fallen behind by more than one frame, reset to avoid
             // rapid-fire catch-up
@@ -767,8 +867,25 @@ static void *vblank_timer_thread(void *opaque)
         }
 
         if (!qatomic_read(&qemu_exiting)) {
+#if defined(__ANDROID__) || defined(ANDROID)
+            if (frames % 60 == 0) ALOGI("vblank_timer_thread: calling process_vblank (frame %d)", frames);
+            frames++;
+#endif
             xemu_main_loop_lock();
             process_vblank(scon);
+#if defined(__ANDROID__) || defined(ANDROID)
+            /* Every 5 seconds (300 vblanks at 60 Hz): log vCPU liveness.
+             * Reports halted/running/stopped so we can tell whether the vCPU
+             * is executing TCG code, waiting in HLT, or externally stopped. */
+            if (frames % 300 == 0) {
+                CPUState *vcpu = first_cpu;
+                if (vcpu) {
+                    ALOGI("vCPU health: halted=%u running=%d stopped=%d irq_req=0x%x",
+                          vcpu->halted, (int)vcpu->running,
+                          (int)vcpu->stopped, (unsigned)vcpu->interrupt_request);
+                }
+            }
+#endif
             xemu_main_loop_unlock();
         }
     }
@@ -802,31 +919,95 @@ static void report_stats(void)
  */
 static void gl_render_frame(struct xemu_console *scon)
 {
+    static int frames = 0;
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (frames % 60 == 0) ALOGI("Rendering frame %d", frames);
+    frames++;
+    /* Throttle state: when nv2a_get_framebuffer_surface returns 0 (no surface
+     * at pcrtc.start yet), we limit polling to ~10Hz instead of 60Hz.  The
+     * call acquires pfifo.lock, which at 60Hz starves the PFIFO thread that
+     * processes Xbox GPU commands.  When a real frame IS available (last
+     * returned non-zero) we skip the throttle and run at full rate. */
+    static GLuint s_last_tex = 0;
+    static int64_t s_last_miss_ms = 0;
+#endif
     static bool rendering;
     if (qatomic_xchg(&rendering, true) || qatomic_read(&qemu_exiting)) {
         return;
     }
 
-    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
-
     bool flip_required = false;
     bool release_surface_texture = false;
 
-    /* XXX: Note that this bypasses the usual VGA path in order to quickly
-     * get the surface. This is simple and fast, at the cost of accuracy.
-     * Ideally, this should go through the VGA code and opportunistically pull
-     * the surface like this, but handle the VGA logic as well. For now, just
-     * use this fast path to handle the common case.
-     *
-     * In the event the surface is not found in the surface cache, e.g. when
-     * the guest code isn't using HW accelerated rendering, but just blitting
-     * to the framebuffer, fall back to the VGA path.
-     */
-    GLuint tex = nv2a_get_framebuffer_surface();
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (s_last_tex == 0) {
+        int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        if (now - s_last_miss_ms < 100) {
+            /* Too soon since last miss — skip this call to avoid pfifo.lock
+             * contention.  framebuffer_in_use was never set, so no release
+             * needed; just clear the reentrance guard and return. */
+            qatomic_set(&rendering, false);
+            return;
+        }
+    }
+#endif
 
+    if (frames % 60 == 1) ALOGI("gl_render_frame: calling nv2a_get_framebuffer_surface");
+    GLuint tex = nv2a_get_framebuffer_surface();
+    if (frames % 60 == 1) ALOGI("gl_render_frame: nv2a_get_framebuffer_surface returned %d", tex);
+#if defined(__ANDROID__) || defined(ANDROID)
+    s_last_tex = tex;
+    if (tex == 0) {
+        s_last_miss_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    }
+#endif
+
+#if !defined(__ANDROID__) && !defined(ANDROID)
+    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+#else
+    if (frames % 60 == 1) ALOGI("gl_render_frame: acquiring EGL context");
+    set_egl_current(true);
+    if (frames % 60 == 1) ALOGI("gl_render_frame: context acquired");
+    
+    EGLint surface_width = 0, surface_height = 0;
+    eglQuerySurface(egl_display, egl_surface, EGL_WIDTH, &surface_width);
+    eglQuerySurface(egl_display, egl_surface, EGL_HEIGHT, &surface_height);
+    glViewport(0, 0, surface_width, surface_height);
+
+    GLenum initial_err = glGetError();
+    if (initial_err != GL_NO_ERROR) {
+        ALOGE("gl_render_frame: Residual GL error after context acquisition: 0x%x", initial_err);
+    }
+
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+        ALOGE("gl_render_frame: NO CURRENT CONTEXT after set_egl_current(true)!");
+    }
+#endif
+
+#if !defined(__ANDROID__) && !defined(ANDROID)
     assert(glGetError() == GL_NO_ERROR);
+#else
+    {
+        GLenum _err = glGetError();
+        if (_err != GL_NO_ERROR) {
+            if (frames % 60 == 1) ALOGE("gl_render_frame: residual GL error 0x%x (NV2A shared context)", _err);
+        }
+    }
+#endif
 
     if (tex == 0) {
+        if (!scon->surface) {
+            if (frames % 60 == 1) ALOGI("gl_render_frame: No surface yet, skipping texture creation");
+            goto skip_render;
+        }
+#if defined(__ANDROID__) || defined(ANDROID)
+        /*
+         * On Android the Xbox renders exclusively via NV2A (nv2a_get_framebuffer_surface).
+         * Skip the QEMU software/placeholder surface path entirely — it uses qemu_memfd_alloc
+         * which may produce an invalid pixman image on Android. Show black until NV2A renders.
+         */
+        goto skip_render;
+#endif
         xemu_main_loop_lock();
         // FIXME: Don't upload if notdirty
         xb_surface_gl_create_texture(scon->surface);
@@ -836,8 +1017,18 @@ static void gl_render_frame(struct xemu_console *scon)
         xemu_main_loop_unlock();
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Bind the EGL window surface before clearing/rendering. Must be done
+     * AFTER the tex==0 early-exit check to avoid leaving FBO 0 bound for
+     * the PGRAPH thread's glValidateProgram (which needs the NV2A FBO). */
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+#endif
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
+    GLenum post_clear_err = glGetError();
+    if (post_clear_err != GL_NO_ERROR) {
+        ALOGE("gl_render_frame: GL error after clear: 0x%x", post_clear_err);
+    }
     xemu_snapshots_set_framebuffer_texture(tex, flip_required);
     xemu_hud_set_framebuffer_texture(tex, flip_required);
 
@@ -846,12 +1037,24 @@ static void gl_render_frame(struct xemu_console *scon)
      * lock and perform rendering, but release before swap to avoid
      * possible lengthy blocking (for vsync).
      */
-    xemu_main_loop_lock();
-    xemu_hud_update();
-    xemu_main_loop_unlock();
+    if (frames % 60 == 1) ALOGI("gl_render_frame: updating HUD");
+    if (xemu_is_main_thread()) {
+        xemu_main_loop_lock();
+        xemu_hud_update();
+        xemu_main_loop_unlock();
 
-    xemu_hud_render();
+        if (frames % 60 == 1) ALOGI("gl_render_frame: rendering HUD");
+        xemu_hud_render();
+    }
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* On Android, glFinish() can stall indefinitely when sampling from a
+     * texture that was just rendered to on a different thread in the same
+     * shared EGL context (driver synchronization issue on Mali/Adreno).
+     * eglSwapBuffers handles the required flush, so glFinish() is not needed. */
+    glFlush();
+#else
     glFinish();
+#endif
 
     if (release_surface_texture) {
         xemu_main_loop_lock();
@@ -859,10 +1062,25 @@ static void gl_render_frame(struct xemu_console *scon)
         xemu_main_loop_unlock();
     }
 
-    nv2a_release_framebuffer_surface();
+    if (frames % 60 == 1) ALOGI("gl_render_frame: swapping buffers");
+#if !defined(__ANDROID__) && !defined(ANDROID)
     SDL_GL_SwapWindow(scon->real_window);
     assert(glGetError() == GL_NO_ERROR);
-
+#else
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        ALOGE("gl_render_frame: GL error before swap: 0x%x (continuing)", err);
+    }
+    eglSwapBuffers(egl_display, egl_surface);
+    set_egl_current(false);
+    if (frames % 60 == 1) ALOGI("gl_render_frame: context released");
+#endif
+skip_render:
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Release EGL context on all paths, including early-exit (goto skip_render). */
+    set_egl_current(false);
+#endif
+    nv2a_release_framebuffer_surface();
     qatomic_set(&rendering, false);
 
 #if DEBUG_XEMU_C
@@ -940,12 +1158,85 @@ static void poll_events(struct xemu_console *scon)
     }
 
     xemu_main_loop_lock();
+#if !defined(__ANDROID__) && !defined(ANDROID)
     xemu_input_update_controllers();
+#endif
     xemu_main_loop_unlock();
 }
 
 static void display_very_early_init(DisplayOptions *o)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("display_very_early_init starting on Android...");
+    ANativeWindow *window = xemu_android_get_window();
+    if (!window) {
+        ALOGE("Error: Android Native Window is NULL");
+        return;
+    }
+    egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    eglInitialize(egl_display, NULL, NULL);
+    ALOGI("EGL Initialized. Choosing config...");
+
+    EGLint attr[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_SURFACE_TYPE,    EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_STENCIL_SIZE, 8,
+        EGL_NONE
+    };
+    EGLConfig config;
+    EGLint num_configs;
+    if (!eglChooseConfig(egl_display, attr, &config, 1, &num_configs) || num_configs == 0) {
+        ALOGE("Error: eglChooseConfig failed or found no configs");
+        return;
+    }
+    egl_config = config;
+    ALOGI("eglChooseConfig success, found %d configs. Creating context...", num_configs);
+
+    /* Try GLES 3.2 first (GL_CLAMP_TO_BORDER, glProgramUniform, etc.),
+     * then fall back to 3.1 (glProgramUniform), then 3.0. */
+    static const struct { EGLint major; EGLint minor; } gles_versions[] = {
+        {3, 2}, {3, 1}, {3, 0}
+    };
+    for (int vi = 0; vi < 3 && egl_context == EGL_NO_CONTEXT; vi++) {
+        EGLint ctx_attr[] = {
+            EGL_CONTEXT_CLIENT_VERSION, gles_versions[vi].major,
+            EGL_CONTEXT_MINOR_VERSION_KHR, gles_versions[vi].minor,
+            EGL_NONE
+        };
+        egl_context = eglCreateContext(egl_display, config,
+                                       EGL_NO_CONTEXT, ctx_attr);
+        if (egl_context != EGL_NO_CONTEXT) {
+            ALOGI("eglCreateContext: using GLES %d.%d",
+                  gles_versions[vi].major, gles_versions[vi].minor);
+        }
+    }
+    if (egl_context == EGL_NO_CONTEXT) {
+        ALOGE("Error: eglCreateContext failed for all GLES versions");
+        return;
+    }
+
+    egl_surface = eglCreateWindowSurface(egl_display, config, window, NULL);
+    if (egl_surface == EGL_NO_SURFACE) {
+        ALOGE("Error: eglCreateWindowSurface failed");
+        return;
+    }
+    ALOGI("eglCreateWindowSurface success. Making current...");
+
+    set_egl_current(true);
+
+    ALOGI("eglMakeCurrent success. Initializing SDL events and haptic...");
+    ALOGI("SDL_Init skipped on Android for stability.");
+    ALOGI("Android EGL and SDL initialized successfully.");
+
+    // Initialize offscreen rendering context now
+    nv2a_context_init();
+    set_egl_current(false);
+#else
 #ifdef __linux__
     /* on Linux, SDL may use fbcon|directfb|svgalib when run without
      * accessible $DISPLAY to open X11 window.  This is often the case
@@ -1087,16 +1378,29 @@ static void display_very_early_init(DisplayOptions *o)
     // Initialize offscreen rendering context now
     nv2a_context_init();
     SDL_GL_MakeCurrent(NULL, NULL);
+#endif
 }
 
 static void display_early_init(DisplayOptions *o)
 {
+    ALOGI("display_early_init starting...");
     assert(o->type == DISPLAY_TYPE_XEMU);
     display_opengl = 1;
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
     SDL_GL_MakeCurrent(m_window, m_context);
     SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
     xemu_hud_init(m_window, m_context);
+#else
+    ALOGI("display_early_init: Making EGL context current...");
+    set_egl_current(true);
+    ALOGI("display_early_init: Initializing HUD...");
+    if (xemu_is_main_thread()) {
+        xemu_hud_init(NULL, NULL);
+    }
+    set_egl_current(false);
+#endif
+    ALOGI("display_early_init finished.");
 }
 
 static const DisplayChangeListenerOps dcl_gl_ops = {
@@ -1109,18 +1413,26 @@ static const DisplayChangeListenerOps dcl_gl_ops = {
 
 static void display_init(DisplayState *ds, DisplayOptions *o)
 {
+    ALOGI("display_init starting...");
     uint8_t data = 0;
     int i;
 
     assert(o->type == DISPLAY_TYPE_XEMU);
+#if !defined(__ANDROID__) && !defined(ANDROID)
     SDL_GL_MakeCurrent(m_window, m_context);
+#else
+    ALOGI("display_init: Making EGL context current...");
+    set_egl_current(true);
+#endif
 
     gui_fullscreen = o->has_full_screen && o->full_screen;
     gui_fullscreen |= g_config.display.window.fullscreen_on_startup;
 
+    ALOGI("display_init: Initializing consoles...");
     num_outputs = 1;
     scon_list = g_new0(struct xemu_console, num_outputs);
     for (i = 0; i < num_outputs; i++) {
+        ALOGI("display_init: Initializing console %d...", i);
         QemuConsole *con = qemu_console_lookup_by_index(i);
         assert(con != NULL);
         if (!qemu_console_is_graphic(con) &&
@@ -1134,6 +1446,7 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
         scon_list[i].kbd = qkbd_state_init(con);
         register_displaychangelistener(&scon_list[i].dcl);
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
 #if defined(SDL_VIDEO_DRIVER_WINDOWS)
         HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(scon_list[i].real_window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
         if (hwnd) {
@@ -1145,20 +1458,25 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
             qemu_console_set_window_id(con, xwindow);
         }
 #endif
+#endif
     }
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
     scon_list[0].real_window = m_window;
     scon_list[0].winctx = m_context;
+#endif
 
     mouse_mode_notifier.notify = mouse_mode_change;
     qemu_add_mouse_mode_change_notifier(&mouse_mode_notifier);
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
     sdl_cursor_hidden = SDL_CreateCursor(&data, &data, 8, 1, 0, 0);
     sdl_cursor_normal = SDL_GetCursor();
 
     // SDL_PollEvent may block during main window resize or drag operations.
     // Register event watch to handle rendering during these operations.
     SDL_AddEventWatch(event_watch_callback, &scon_list[0]);
+#endif
 
     if (use_vblank_timer_thread) {
         qemu_thread_create(&vblank_thread, "vblank-timer", vblank_timer_thread,
@@ -1169,7 +1487,12 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
     }
 
     /* Tell main thread to go ahead and create the app and enter the run loop */
+    ALOGI("display_init: Done. Releasing context and posting sem...");
+#if !defined(__ANDROID__) && !defined(ANDROID)
     SDL_GL_MakeCurrent(NULL, NULL);
+#else
+    set_egl_current(false);
+#endif
     qemu_sem_post(&display_init_sem);
 }
 
@@ -1179,11 +1502,18 @@ static void display_finalize(void)
         qemu_thread_join(&vblank_thread);
     }
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
     SDL_RemoveEventWatch(event_watch_callback, &scon_list[0]);
     SDL_GL_MakeCurrent(NULL, NULL);
     SDL_GL_DestroyContext(m_context);
     SDL_DestroyWindow(m_window);
     SDL_Quit();
+#else
+    set_egl_current(false);
+    eglDestroySurface(egl_display, egl_surface);
+    eglDestroyContext(egl_display, egl_context);
+    eglTerminate(egl_display);
+#endif
 }
 
 static QemuDisplay qemu_display_xemu = {
@@ -1194,6 +1524,10 @@ static QemuDisplay qemu_display_xemu = {
 
 static void register_xemu_display(void)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("register_xemu_display: DISPLAY_TYPE_XEMU=%d, qemu_display_xemu.type=%d",
+          (int)DISPLAY_TYPE_XEMU, (int)qemu_display_xemu.type);
+#endif
     qemu_display_register(&qemu_display_xemu);
 }
 
@@ -1204,16 +1538,27 @@ char **gArgv;
 
 static void *qemu_main(void *opaque)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    pthread_setname_np(pthread_self(), "qemu_main");
+    GMainContext *ctx = g_main_context_new();
+    g_main_context_push_thread_default(ctx);
+#endif
+    ALOGI("qemu_main thread starting (thread %ld)...", (long)gettid());
     qemu_init(gArgc, gArgv);
+    ALOGI("qemu_main: qemu_init returned. Starting main loop...");
     exit_status = qemu_main_loop();
+    ALOGI("qemu_main: main loop returned status %d", exit_status);
     qatomic_set(&qemu_exiting, true);
     bql_unlock();
     qemu_mutex_unlock_main_loop();
 
+    ALOGI("qemu_main: waiting for display_shutdown_sem...");
     qemu_sem_wait(&display_shutdown_sem);
+    ALOGI("qemu_main: performing cleanup...");
     bql_lock();
     qemu_cleanup(exit_status);
     bql_unlock();
+    ALOGI("qemu_main thread finished.");
 
     return NULL;
 }
@@ -1274,11 +1619,19 @@ static void init_sdl_app_metadata(void)
                                "https://xemu.app");
 }
 
-int main(int argc, char **argv)
+int xemu_core_main(int argc, char **argv)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    ALOGI("xemu_core_main started (thread %ld), argc=%d", (long)gettid(), argc);
+    for (int i = 0; i < argc; i++) {
+        ALOGI("  argv[%d] = %s", i, argv[i]);
+    }
     QemuThread thread;
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
     setlocale(LC_NUMERIC, "C");
+#endif
 
 #ifdef _WIN32
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
@@ -1308,10 +1661,9 @@ int main(int argc, char **argv)
     fprintf(stderr, "xemu_commit: %s\n", xemu_commit);
     fprintf(stderr, "xemu_date: %s\n", xemu_date);
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
     init_sdl_app_metadata();
-
-    gArgc = argc;
-    gArgv = argv;
+#endif
 
     for (int i = 1; i < argc; i++) {
         if (argv[i] && strcmp(argv[i], "-config_path") == 0) {
@@ -1324,16 +1676,62 @@ int main(int argc, char **argv)
         }
     }
 
+    // Create a copy of argv for QEMU without nulled arguments
+    int q_argc = 0;
+    char **q_argv = malloc(sizeof(char *) * (argc + 16)); // Extra space for Android args
+    for (int j = 0; j < argc; j++) {
+        if (argv[j] != NULL) {
+            q_argv[q_argc++] = argv[j];
+        }
+    }
+
+    gArgc = q_argc;
+    gArgv = q_argv;
+
     if (!xemu_settings_load()) {
         const char *err_msg = xemu_settings_get_error_message();
-        fprintf(stderr, "%s", err_msg);
+        ALOGE("Failed to load xemu config file: %s", err_msg);
+#if !defined(__ANDROID__) && !defined(ANDROID)
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
             "Failed to load xemu config file", err_msg,
             m_window);
-        SDL_Quit();
+#endif
         exit(1);
     }
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("Checking Android args (pointer: %p)", (void*)g_android_args);
+    if (g_android_args) {
+        ALOGI("Applying Android file overrides...");
+        if (g_android_args->mcpxPath) {
+            ALOGI("  MCPX: %s", g_android_args->mcpxPath);
+            g_config.sys.files.bootrom_path = strdup(g_android_args->mcpxPath);
+        }
+        if (g_android_args->biosPath) {
+            ALOGI("  Flash: %s", g_android_args->biosPath);
+            g_config.sys.files.flashrom_path = strdup(g_android_args->biosPath);
+        }
+        if (g_android_args->hddPath) {
+            ALOGI("  HDD: %s", g_android_args->hddPath);
+            g_config.sys.files.hdd_path = strdup(g_android_args->hddPath);
+        }
+        if (g_android_args->isoPath) {
+            ALOGI("  DVD: %s", g_android_args->isoPath);
+            xemu_settings_set_string(&g_config.sys.files.dvd_path,
+                                     g_android_args->isoPath);
+        }
+        g_config.general.show_welcome = false;
+        ALOGI("Android file overrides applied successfully. show_welcome set to false.");
+    }
+#endif
+
+#if !defined(__ANDROID__) && !defined(ANDROID)
+    /* On Android we never register the atexit save: the dvd_path is an
+     * ephemeral /proc/self/fd/N that becomes invalid in any future session,
+     * and writing it via atexit() while QEMU threads are still live corrupts
+     * the config file.  _exit() is used for clean emulation exit anyway. */
     atexit(xemu_settings_save);
+#endif
 
 #ifdef _WIN32
     if (g_config.display.setup_nvidia_profile) {
@@ -1342,12 +1740,26 @@ int main(int argc, char **argv)
 #endif
 
     display_very_early_init(NULL);
+    ALOGI("STEP: display_very_early_init returned");
+    ALOGI("display_very_early_init finished. Initializing semaphores and threads...");
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    // Explicitly register the xemu display before qemu_init() runs.
+    // This ensures dpys[DISPLAY_TYPE_XEMU] is populated even if the
+    // type_init constructor mechanism doesn't fire in time on Android.
+    ALOGI("Explicitly registering xemu display (Android path)...");
+    qemu_display_register(&qemu_display_xemu);
+    ALOGI("xemu display registered.");
+#endif
 
     qemu_sem_init(&display_init_sem, 0);
     qemu_sem_init(&display_shutdown_sem, 0);
+    ALOGI("Creating qemu_main thread...");
     qemu_thread_create(&thread, "qemu_main", qemu_main,
                        NULL, QEMU_THREAD_JOINABLE);
+    ALOGI("qemu_main thread created. Waiting for display_init_sem...");
     qemu_sem_wait(&display_init_sem);
+    ALOGI("display_init_sem posted. Continuing xemu_core_main...");
 
     gui_grab = 0;
     if (gui_fullscreen) {
@@ -1355,27 +1767,46 @@ int main(int argc, char **argv)
         set_full_screen(&scon_list[0], gui_fullscreen);
     }
 
-    /*
-     * FIXME: May want to create a callback mechanism for main QEMU thread
-     * to just run functions to avoid TLS bugs and locking issues.
-     */
     tcg_register_init_ctx();
     qemu_set_current_aio_context(qemu_get_aio_context());
 
     xemu_main_loop_lock();
-    xemu_input_init();
+    if (xemu_is_main_thread()) {
+        xemu_input_init();
+    }
     xemu_main_loop_unlock();
 
+    ALOGI("Initialization complete. Entering main render loop...");
     struct xemu_console *scon = &scon_list[0];
+    int frames = 0;
     while (!qatomic_read(&qemu_exiting)) {
-        poll_events(scon);
+        if (frames % 60 == 0) {
+            ALOGI("Main loop iteration %d", frames);
+        }
+#if !defined(__ANDROID__) && !defined(ANDROID)
+        if (xemu_is_main_thread()) {
+            poll_events(scon);
+        }
+#endif
         gl_render_frame(scon);
+        frames++;
+#if defined(__ANDROID__) || defined(ANDROID)
+        g_usleep(16000); // Throttle to ~60fps
+#endif
     }
+    ALOGI("Main loop exited. Shutting down...");
     qemu_sem_post(&display_shutdown_sem);
     qemu_thread_join(&thread);
     display_finalize();
     return exit_status;
 }
+
+#if !defined(__ANDROID__) && !defined(ANDROID)
+int main(int argc, char **argv)
+{
+    return xemu_core_main(argc, argv);
+}
+#endif
 
 void xemu_eject_disc(Error **errp)
 {

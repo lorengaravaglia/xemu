@@ -18,6 +18,7 @@
 //
 #include "notifications.hh"
 #include "common.hh"
+#include "xemu-hud.h"
 
 #include "../xemu-notifications.h"
 
@@ -40,7 +41,7 @@ void NotificationManager::QueueError(const char *msg)
 
 void NotificationManager::Draw()
 {
-    uint32_t now = SDL_GetTicks();
+    uint32_t now = xemu_get_ticks();
 
     if (m_active) {
         // Currently displaying a notification

@@ -38,6 +38,8 @@ void xemu_eject_disc(Error **errp);
 void xemu_load_disc(const char *path, Error **errp);
 void xemu_main_loop_lock(void);
 void xemu_main_loop_unlock(void);
+uint32_t xemu_get_ticks(void);
+bool xemu_is_main_thread(void);
 
 // Implemented in xemu_hud.cc
 void xemu_hud_init(SDL_Window *window, void *sdl_gl_context);

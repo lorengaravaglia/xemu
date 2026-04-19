@@ -66,7 +66,11 @@ bool CompatibilityReport::Send()
 {
 	const std::string &s = GetSerializedReport();
 
+#ifdef CONFIG_CURL
 	int res = http_post_json(compat_report_endpoint_url, s.c_str(), NULL);
+#else
+    int res = -1;
+#endif
 	if (res < 0) {
 		result_code = -1;
 		result_msg = "Failed to connect";

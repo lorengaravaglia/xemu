@@ -47,7 +47,7 @@ void DebugApuWindow::Draw()
     ImGui::Columns(2, "", false);
     ImGui::SetColumnWidth(0, 360*g_viewport_mgr.m_scale);
 
-    int now = SDL_GetTicks() % 1000;
+    int now = xemu_get_ticks() % 1000;
     float t = now/1000.0f;
     float freq = 1;
     float v = fabs(sin(M_PI*t*freq));

@@ -19,6 +19,7 @@
 #include "ui/xemu-widescreen.h"
 #include "gl-helpers.hh"
 #include "common.hh"
+#include "xemu-hud.h"
 #include "data/controller_mask.png.h"
 #include "data/controller_mask_s.png.h"
 #include "data/logo_sdf.png.h"
@@ -29,6 +30,7 @@
 #include <fpng.h>
 #include <math.h>
 #include <stdio.h>
+#include <string>
 #include <vector>
 
 #include "ui/shader/xemu-logo-frag.h"
@@ -176,10 +178,77 @@ static GLuint LoadTextureFromMemory(const unsigned char *buf, unsigned int size,
 static GLuint Shader(GLenum type, const char *src)
 {
     char err_buf[512];
+    const char *final_src = src;
+    std::string patched_src;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    fprintf(stderr, "xemu-android: Shader: Patching shader type %d\n", type);
+    std::string src_str = src;
+    
+    // Trim leading whitespace/newlines
+    size_t first_non_ws = src_str.find_first_not_of(" \t\r\n");
+    if (first_non_ws != std::string::npos) {
+        src_str.erase(0, first_non_ws);
+    }
+
+    if (src_str.find("#version") != std::string::npos) {
+        // Start with correct version
+        patched_src = "#version 300 es\n";
+        patched_src += "precision highp float;\n";
+        
+        // Add bitfieldExtract polyfill
+        patched_src += "uint bitfieldExtract(uint value, int offset, int bits) { return (value >> uint(offset)) & ((1u << uint(bits)) - 1u); }\n";
+        
+        // Add out_Color alias for GLES (only for fragment shaders)
+        if (type == GL_FRAGMENT_SHADER) {
+            patched_src += "#define out_Color fragColor\nlayout(location = 0) out vec4 fragColor;\n";
+        }
+
+        // Skip the original version line
+        size_t nl_pos = src_str.find("\n");
+        if (nl_pos != std::string::npos) {
+            patched_src += src_str.substr(nl_pos + 1);
+        } else {
+            patched_src += src_str;
+        }
+
+        // Fix common GLSL ES strictness issues
+        auto replace_all = [&](const std::string& from, const std::string& to) {
+            size_t pos = 0;
+            while ((pos = patched_src.find(from, pos)) != std::string::npos) {
+                patched_src.replace(pos, from.length(), to);
+                pos += to.length();
+            }
+        };
+
+        if (type == GL_FRAGMENT_SHADER) {
+            replace_all("out vec4 out_Color;", ""); // Remove original declaration
+        }
+        replace_all("1-t.y", "1.0-t.y");
+        replace_all("1 - t.y", "1.0 - t.y");
+        
+        // Fix global non-constant initializers (ES 3.00 strictness)
+        if (patched_src.find("vec4 fgColor            = in_ColorPrimary;") != std::string::npos) {
+            replace_all("vec4 fgColor            = in_ColorPrimary;", "vec4 fgColor;");
+            replace_all("vec4 bgColor            = in_ColorFill;", "vec4 bgColor;");
+            size_t main_pos = patched_src.find("void main()");
+            if (main_pos != std::string::npos) {
+                size_t open_brace = patched_src.find("{", main_pos);
+                if (open_brace != std::string::npos) {
+                    patched_src.insert(open_brace + 1, "\n    fgColor = in_ColorPrimary;\n    bgColor = in_ColorFill;\n");
+                }
+            }
+        }
+
+        final_src = patched_src.c_str();
+        fprintf(stderr, "xemu-android: Shader: Patched source:\n%s\n", final_src);
+    }
+#endif
+
     GLuint shader = glCreateShader(type);
     assert(shader && "Failed to create shader");
 
-    glShaderSource(shader, 1, &src, NULL);
+    glShaderSource(shader, 1, &final_src, NULL);
     glCompileShader(shader);
 
     GLint status;
@@ -190,7 +259,7 @@ static GLuint Shader(GLenum type, const char *src)
                 "Shader compilation failed: %s\n\n"
                 "[Shader Source]\n"
                 "%s\n",
-                err_buf, src);
+                err_buf, final_src);
         assert(0);
     }
 
@@ -291,7 +360,9 @@ void main() {
     s->prog = glCreateProgram();
     glAttachShader(s->prog, vert);
     glAttachShader(s->prog, frag);
+#if !defined(__ANDROID__) && !defined(ANDROID)
     glBindFragDataLocation(s->prog, 0, "out_Color");
+#endif
     glLinkProgram(s->prog);
     glUseProgram(s->prog);
 
@@ -491,7 +562,7 @@ static void RenderDukeController(float frame_x, float frame_y, uint32_t primary_
     };
 
     uint8_t alpha = 0;
-    uint32_t now = SDL_GetTicks();
+    uint32_t now = xemu_get_ticks();
     float t;
 
     glUseProgram(g_decal_shader->prog);
@@ -650,7 +721,7 @@ static void RenderControllerS(float frame_x, float frame_y, uint32_t primary_col
     };
 
     uint8_t alpha = 0;
-    uint32_t now = SDL_GetTicks();
+    uint32_t now = xemu_get_ticks();
     float t;
 
     glUseProgram(g_decal_shader->prog);

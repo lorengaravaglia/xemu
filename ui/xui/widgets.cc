@@ -531,7 +531,7 @@ void Logo()
 
     static uint32_t time_start = 0;
     static uint32_t offset = 0;
-    uint32_t now = SDL_GetTicks();
+    uint32_t now = xemu_get_ticks();
 
     if (ImGui::IsWindowAppearing()) {
         time_start = now;

@@ -19,6 +19,9 @@
 
 
 #include "qemu/osdep.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#endif
 #include "hw/qdev-core.h"
 #include "hw/qdev-properties.h"
 #include "qapi/error.h"
@@ -262,14 +265,19 @@ static const int port_map[4] = { 3, 4, 1, 2 };
 
 void xemu_input_init(void)
 {
-    if (g_config.input.background_input_capture) {
-        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    extern bool xemu_is_main_thread(void);
+    if (xemu_is_main_thread()) {
+        if (g_config.input.background_input_capture) {
+            SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+        }
     }
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
     if (!SDL_Init(SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "Failed to initialize SDL gamepad subsystem: %s\n", SDL_GetError());
         exit(1);
     }
+#endif
 
     // Create the keyboard input (always first)
     ControllerState *new_con = malloc(sizeof(ControllerState));
@@ -308,6 +316,13 @@ void xemu_input_init(void)
     }
 
     QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    extern void __attribute__((weak)) xemu_android_input_init(void);
+    if (xemu_android_input_init) {
+        xemu_android_input_init();
+    }
+#endif
 }
 
 int xemu_input_get_controller_default_bind_port(ControllerState *state, int start)
@@ -348,6 +363,9 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
 
 void xemu_input_process_sdl_events(const SDL_Event *event)
 {
+    extern bool xemu_is_main_thread(void);
+    if (!xemu_is_main_thread()) return;
+
     if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
         DPRINTF("Controller Added: %d\n", event->gdevice.which);
 
@@ -498,6 +516,9 @@ void xemu_input_update_controller(ControllerState *state)
 
 void xemu_input_update_controllers(void)
 {
+    extern bool xemu_is_main_thread(void);
+    if (!xemu_is_main_thread()) return;
+
     ControllerState *iter;
     QTAILQ_FOREACH(iter, &available_controllers, entry) {
         xemu_input_update_controller(iter);
@@ -512,7 +533,13 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
     state->buttons = 0;
     memset(state->axis, 0, sizeof(state->axis));
 
-    const bool *kbd = SDL_GetKeyboardState(NULL);
+    const bool *kbd = NULL;
+    extern SDL_Window *xemu_get_window(void);
+    if (xemu_get_window()) {
+        kbd = SDL_GetKeyboardState(NULL);
+    }
+
+    if (!kbd) return;
 
 #define KBD_STATE(btn) \
     (kbd[g_config.input.keyboard_controller_scancode_map.btn])
@@ -653,6 +680,9 @@ ControllerState *xemu_input_get_bound(int index)
 
 void xemu_input_bind(int index, ControllerState *state, int save)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    __android_log_print(ANDROID_LOG_INFO, "xemu-input", "Binding controller %s to port %d", state ? state->name : "NULL", index);
+#endif
     // FIXME: Attempt to disable rumble when unbinding so it's not left
     // in rumble mode
 
@@ -860,6 +890,9 @@ bool xemu_input_bind_xmu(int player_index, int expansion_slot_index,
 
 void xemu_input_unbind_xmu(int player_index, int expansion_slot_index)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    __android_log_print(ANDROID_LOG_INFO, "xemu-input", "Unbinding XMU from player %d slot %d", player_index, expansion_slot_index);
+#endif
     assert(player_index >= 0 && player_index < 4);
     assert(expansion_slot_index >= 0 && expansion_slot_index < 2);
 

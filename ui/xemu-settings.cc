@@ -77,6 +77,15 @@ const char *xemu_settings_get_base_path(void)
         return base_path;
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (settings_path != NULL) {
+        char *dir = g_path_get_dirname(settings_path);
+        base_path = g_strdup_printf("%s/", dir);
+        g_free(dir);
+        return base_path;
+    }
+#endif
+
     if (xemu_settings_detect_portable_mode()) {
         const char *base = SDL_GetBasePath();
         assert(base != NULL);
@@ -160,14 +169,19 @@ bool xemu_settings_load(void)
     const char *settings_path = xemu_settings_get_path();
     bool success = false;
 
+    fprintf(stderr, "xemu_settings_load: loading from %s\n", settings_path);
+
     if (qemu_access(settings_path, F_OK) == -1) {
         fprintf(stderr, "Config file not found, starting with default settings.\n");
         success = true;
     } else {
+        fprintf(stderr, "Config file found, opening...\n");
         FILE *fd = qemu_fopen(settings_path, "rb");
         if (fd) {
             const char *buf = read_file(fd);
             if (buf) {
+                fprintf(stderr, "Config file read successfully, parsing...\n");
+#if !defined(__ANDROID__) && !defined(ANDROID)
                 char *previous_numeric_locale = setlocale(LC_NUMERIC, NULL);
                 if (previous_numeric_locale) {
                     previous_numeric_locale = g_strdup(previous_numeric_locale);
@@ -175,33 +189,42 @@ bool xemu_settings_load(void)
 
                 /* Ensure numeric values are scanned with '.' radix, no grouping */
                 setlocale(LC_NUMERIC, "C");
+#endif
 
                 try {
                     config_tree.update_from_table(toml::parse(buf));
                     success = true;
+                    fprintf(stderr, "Config file parsed successfully.\n");
                 } catch (const toml::parse_error& err) {
                    std::ostringstream oss;
                    oss << "Error parsing config file at " << err.source().begin << ":\n"
                        << "    " << err.description() << "\n"
                        << "Please fix the error or delete the file to continue.\n";
                    error_msg = oss.str();
+                   fprintf(stderr, "Config parse error: %s\n", error_msg.c_str());
                 }
                 free((char*)buf);
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
                 if (previous_numeric_locale) {
                     setlocale(LC_NUMERIC, previous_numeric_locale);
                     g_free(previous_numeric_locale);
                 }
+#endif
             } else {
                 error_msg = "Failed to read config file.\n";
+                fprintf(stderr, "%s", error_msg.c_str());
             }
             fclose(fd);
         } else {
             error_msg = "Failed to open config file for reading. Check permissions.\n";
+            fprintf(stderr, "%s", error_msg.c_str());
         }
     }
 
+    fprintf(stderr, "Storing settings to struct...\n");
     config_tree.store_to_struct(&g_config);
+    fprintf(stderr, "xemu_settings_load finished, success=%d\n", success);
 
     return success;
 }
