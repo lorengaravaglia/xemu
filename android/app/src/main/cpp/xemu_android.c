@@ -1,0 +1,281 @@
+#include "qemu/osdep.h"
+#include "xemu_android.h"
+#include "ui/xemu-input.h"
+#include <pthread.h>
+#include <android/log.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <EGL/egl.h>
+
+#define LOG_TAG "xemu-android"
+#define LOGI(...) do { \
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__); \
+} while(0)
+#define LOGE(...) do { \
+    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); \
+} while(0)
+
+extern int xemu_core_main(int argc, char **argv);
+
+EGLDisplay egl_display = EGL_NO_DISPLAY;
+EGLContext egl_context = EGL_NO_CONTEXT;
+EGLSurface egl_surface = EGL_NO_SURFACE;
+EGLConfig  egl_config  = NULL;
+pid_t xemu_main_thread_id = 0;
+
+static _Thread_local bool t_egl_current = false;
+
+/* Called only from the xemu_core render thread to acquire/release the main
+ * EGL display context (egl_context + egl_surface).  NV2A PGRAPH/PFIFO threads
+ * now have their own independent EGL contexts via glo_context_create() and
+ * never call this function, so no mutex is required. */
+void set_egl_current(bool current) {
+    if (current == t_egl_current) return;
+    if (current) {
+        if (!eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context)) {
+            LOGE("set_egl_current: eglMakeCurrent failed: 0x%x", eglGetError());
+        } else {
+            t_egl_current = true;
+        }
+    } else {
+        eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        t_egl_current = false;
+    }
+}
+
+static void signal_handler(int sig) {
+    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "CRITICAL: Captured signal %d on thread %ld", sig, (long)gettid());
+    exit(sig);
+}
+
+/* SIGABRT handler: logs to logcat then re-raises so debuggerd gets a backtrace */
+static void sigabrt_handler(int sig) {
+    (void)sig;
+    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
+        "SIGABRT on tid %ld — check xemu-stdout tag above for abort message",
+        (long)gettid());
+    /* Reset to default and re-raise so Android's crash reporter fires */
+    signal(SIGABRT, SIG_DFL);
+    raise(SIGABRT);
+}
+
+static pthread_t xemu_thread;
+static pthread_t log_thread;
+static int log_pipe[2];
+static ANativeWindow *native_window = NULL;
+ThreadArgs *g_android_args = NULL;
+
+/* Pointer to the Android virtual ControllerState — set once by
+ * xemu_android_input_init(), then written by JNI input callbacks. */
+static ControllerState *g_android_controller = NULL;
+
+static void *logging_thread(void *p) {
+    char buffer[1024];
+    ssize_t n;
+    while ((n = read(log_pipe[0], buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[n] = '\0';
+        __android_log_write(ANDROID_LOG_INFO, "xemu-stdout", buffer);
+    }
+    return NULL;
+}
+
+static void setup_logging(void) {
+    signal(SIGPIPE, SIG_IGN);
+    /* Install SIGABRT handler to log the crash to logcat before re-raising.
+     * Other signals are left default so Android's crash reporter provides backtraces. */
+    signal(SIGABRT, sigabrt_handler);
+
+    pipe(log_pipe);
+    dup2(log_pipe[1], STDOUT_FILENO);
+    dup2(log_pipe[1], STDERR_FILENO);
+    /* Make stdout/stderr unbuffered so assert()/abort() messages reach the
+     * logging thread before the process crashes. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    pthread_create(&log_thread, NULL, logging_thread, NULL);
+}
+
+void xemu_android_input_init(void) {
+    LOGI("Initializing Android virtual controller...");
+    ControllerState *state = g_new0(ControllerState, 1);
+    state->type = INPUT_DEVICE_ANDROID;
+    state->name = "Android Virtual Controller";
+    g_android_controller = state;
+    xemu_input_bind(0, state, false);
+}
+
+void xemu_android_set_button(uint32_t mask, int pressed) {
+    if (!g_android_controller) return;
+    if (pressed) {
+        g_android_controller->buttons |= (uint16_t)mask;
+    } else {
+        g_android_controller->buttons &= (uint16_t)~mask;
+    }
+}
+
+void xemu_android_set_axis(int axis_index, int16_t value) {
+    if (!g_android_controller) return;
+    if (axis_index >= 0 && axis_index < CONTROLLER_AXIS__COUNT) {
+        g_android_controller->axis[axis_index] = value;
+    }
+}
+
+void xemu_android_request_exit(void) {
+    LOGI("Exit requested — terminating emulation process.");
+    /* EmulationActivity runs in :EmulationProcess (separate process from
+     * MainActivity), so _exit() here cleanly terminates emulation without
+     * affecting the main app process.
+     *
+     * We use _exit() (not exit()) deliberately: exit() runs all atexit()
+     * handlers (including xemu_settings_save) while QEMU threads are still
+     * live.  Those handlers race with active threads, corrupt global state,
+     * and write a broken config file (e.g. dvd_path=/proc/self/fd/N from
+     * the dying process) that causes a pixman use-after-free crash on the
+     * very next emulation session. */
+    _exit(0);
+}
+
+static long get_file_size(const char *filename) {
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) return -1;
+    fseek(fp, 0L, SEEK_END);
+    long size = ftell(fp);
+    fclose(fp);
+    return size;
+}
+
+/* Pin this thread to the highest-frequency CPU cores.
+ * Reads /sys/devices/system/cpu/cpuN/cpufreq/cpuinfo_max_freq for each CPU,
+ * builds a bitmask of cores at >= 80% of peak frequency, and calls
+ * sched_setaffinity via raw syscall (Bionic does not expose cpu_set_t).
+ * Silently falls back to all-cores if anything fails. */
+static void pin_to_big_cores(void) {
+    int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
+    if (ncpus <= 0 || ncpus > 64) return;
+
+    long freqs[64] = {0};
+    int valid = 0;
+    long max_freq = 0;
+    for (int i = 0; i < ncpus; i++) {
+        char path[128];
+        snprintf(path, sizeof(path),
+            "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (fscanf(f, "%ld", &freqs[i]) == 1) {
+            valid++;
+            if (freqs[i] > max_freq) max_freq = freqs[i];
+        }
+        fclose(f);
+    }
+
+    if (valid == 0 || max_freq == 0) return;
+
+    /* Use cores with at least 80% of the maximum frequency */
+    long threshold = max_freq * 80 / 100;
+    unsigned long mask = 0;
+    int big_count = 0;
+    for (int i = 0; i < ncpus; i++) {
+        if (freqs[i] >= threshold) {
+            mask |= (1UL << i);
+            big_count++;
+        }
+    }
+
+    if (big_count == 0) return;
+
+    /* Bionic doesn't expose cpu_set_t/CPU_SET — use the raw syscall with a
+     * plain unsigned long bitmask (works for up to 64 CPUs on ARM64). */
+    if (syscall(__NR_sched_setaffinity, 0, sizeof(mask), &mask) == 0) {
+        LOGI("Pinned xemu_core to %d big core(s) (max_freq=%ldkHz threshold=%ldkHz)",
+             big_count, max_freq, threshold);
+    } else {
+        LOGI("sched_setaffinity failed (errno=%d) — running on all cores", errno);
+    }
+}
+
+static void *xemu_android_thread(void *opaque) {
+    xemu_main_thread_id = gettid();
+    pthread_setname_np(pthread_self(), "xemu_core");
+
+    /* Boost priority — valid range is -20 (highest) to 19 (lowest).
+     * -10 gives the emulator thread priority over most system threads
+     * without requiring CAP_SYS_NICE (Android allows lowering nice value
+     * slightly below 0 for foreground processes). */
+    if (setpriority(PRIO_PROCESS, 0, -10) != 0) {
+        LOGI("setpriority failed (errno=%d) — running at default priority", errno);
+    }
+
+    pin_to_big_cores();
+
+    if (g_android_args->mcpxPath) {
+        LOGI("Bootrom size: %ld", get_file_size(g_android_args->mcpxPath));
+    }
+
+    /* MTTCG (thread=multi): allows I/O device threads to run in parallel
+     * with the vCPU thread, significantly improving emulation throughput.
+     * tb-size=256: 256 MB translation block cache (up from default 32 MB)
+     * reduces recompilation overhead for games with large working sets. */
+    char **argv = malloc(sizeof(char *) * 8);
+    argv[0] = strdup("xemu");
+    argv[1] = strdup("-config_path");
+    argv[2] = strdup(g_android_args->configPath);
+    argv[3] = strdup("-audio");
+    argv[4] = strdup("driver=aaudio");
+    argv[5] = strdup("-accel");
+    argv[6] = strdup("tcg,thread=multi,tb-size=256");
+    argv[7] = NULL;
+    int argc = 7;
+
+    /* Register the AAudio driver before QEMU initialises the audio subsystem */
+    extern void aaudio_register_driver(void);
+    aaudio_register_driver();
+
+    LOGI("Starting xemu core thread %ld...", (long)gettid());
+
+    int status = xemu_core_main(argc, argv);
+    LOGI("xemu core exited with status: %d", status);
+
+    return NULL;
+}
+
+void xemu_android_start(
+    const char *configPath,
+    const char *mcpxPath,
+    const char *biosPath,
+    const char *hddPath,
+    const char *isoPath,
+    ANativeWindow *window) {
+
+    if (native_window != NULL) return;
+    native_window = window;
+
+    setup_logging();
+
+    g_android_args = malloc(sizeof(ThreadArgs));
+    g_android_args->configPath = strdup(configPath);
+    g_android_args->mcpxPath = strdup(mcpxPath);
+    g_android_args->biosPath = strdup(biosPath);
+    g_android_args->hddPath = strdup(hddPath);
+    g_android_args->isoPath = (isoPath && isoPath[0]) ? strdup(isoPath) : NULL;
+    LOGI("g_android_args initialized at %p", (void*)g_android_args);
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 8 * 1024 * 1024); // 8MB
+    pthread_create(&xemu_thread, &attr, xemu_android_thread, NULL);
+    pthread_attr_destroy(&attr);
+}
+
+void xemu_android_stop(void) {
+    LOGI("Stop signal received.");
+}
+
+ANativeWindow *xemu_android_get_window(void) {
+    return native_window;
+}
