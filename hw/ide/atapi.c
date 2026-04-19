@@ -30,6 +30,9 @@
 #include "scsi/constants.h"
 #include "ide-internal.h"
 #include "trace.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#endif
 
 #define ATAPI_SECTOR_BITS (2 + BDRV_SECTOR_BITS)
 #define ATAPI_SECTOR_SIZE (1 << ATAPI_SECTOR_BITS)
@@ -180,6 +183,17 @@ void ide_atapi_cmd_ok(IDEState *s)
     s->status = READY_STAT | SEEK_STAT;
     s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
     ide_transfer_stop(s);
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        static int atapi_ok_count = 0;
+        if (atapi_ok_count < 30) {
+            __android_log_print(ANDROID_LOG_INFO, "xemu-ide",
+                "ide_atapi_cmd_ok #%d: lba=%d pkt[0]=0x%02x",
+                atapi_ok_count, s->lba, s->io_buffer[0]);
+            atapi_ok_count++;
+        }
+    }
+#endif
     ide_bus_set_irq(s->bus);
 }
 
@@ -1308,6 +1322,19 @@ void ide_atapi_cmd(IDEState *s)
     const struct AtapiCmd *cmd = &atapi_cmd_table[s->io_buffer[0]];
 
     trace_ide_atapi_cmd(s, s->io_buffer[0]);
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        static int atapi_cmd_count = 0;
+        /* Log every ATAPI packet: opcode + first 6 bytes of the 12-byte CDB */
+        __android_log_print(ANDROID_LOG_INFO, "xemu-ide",
+            "atapi_cmd #%d op=0x%02x [%02x %02x %02x %02x %02x %02x]",
+            atapi_cmd_count++,
+            s->io_buffer[0],
+            s->io_buffer[1], s->io_buffer[2], s->io_buffer[3],
+            s->io_buffer[4], s->io_buffer[5], s->io_buffer[6]);
+    }
+#endif
 
     if (trace_event_get_state_backends(TRACE_IDE_ATAPI_CMD_PACKET)) {
         g_autoptr(GString) str =

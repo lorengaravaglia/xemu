@@ -28,3 +28,9 @@ PRManagerInfoList *qmp_query_pr_managers(Error **errp)
 {
     return NULL;
 }
+
+int coroutine_fn pr_manager_execute(PRManager *pr_mgr, AioContext *ctx, int fd,
+                                    struct sg_io_hdr *hdr)
+{
+    return -ENOSYS;
+}

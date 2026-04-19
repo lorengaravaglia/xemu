@@ -143,6 +143,14 @@ static inline const char *qemu_strchrnul(const char *s, int c)
 {
     return strchrnul(s, c);
 }
+#elif defined(__ANDROID__) || defined(ANDROID)
+static inline const char *qemu_strchrnul(const char *s, int c)
+{
+    while (*s && *s != (char)c) {
+        s++;
+    }
+    return s;
+}
 #else
 const char *qemu_strchrnul(const char *s, int c);
 #endif

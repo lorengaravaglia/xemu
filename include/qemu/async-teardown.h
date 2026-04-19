@@ -15,6 +15,8 @@
 
 #ifdef CONFIG_LINUX
 void init_async_teardown(void);
+#else
+static inline void init_async_teardown(void) {}
 #endif
 
 #endif

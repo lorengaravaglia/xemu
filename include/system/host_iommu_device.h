@@ -19,7 +19,9 @@
 
 typedef union VendorCaps {
     struct iommu_hw_info_vtd vtd;
+#ifdef IOMMU_HW_INFO_TYPE_ARM_SMMUV3
     struct iommu_hw_info_arm_smmuv3 smmuv3;
+#endif
 } VendorCaps;
 
 /**

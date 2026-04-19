@@ -43,6 +43,9 @@
 #include "system/runstate.h"
 #include "ide-internal.h"
 #include "trace.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#endif
 
 /* These values were based on a Seagate ST3500418AS but have been modified
    to make more sense in QEMU */
@@ -2839,6 +2842,21 @@ void ide_bus_init_output_irq(IDEBus *bus, qemu_irq irq_out)
 void ide_bus_set_irq(IDEBus *bus)
 {
     if (!(bus->cmd & IDE_CTRL_DISABLE_IRQ)) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* One-shot log: first time an IDE IRQ fires, record which drive and
+         * whether the IRQ disable bit was clear.  Helps diagnose stalls where
+         * the Xbox kernel never receives the I/O completion interrupt. */
+        static int ide_irq_count = 0;
+        /* Log every IRQ for the first 200, then every 100th thereafter */
+        if (ide_irq_count < 200 || ide_irq_count % 100 == 0) {
+            IDEState *s = &bus->ifs[bus->unit];
+            __android_log_print(ANDROID_LOG_INFO, "xemu-ide",
+                "ide_bus_set_irq #%d: cmd=0x%x status=0x%x nsector=0x%x",
+                ide_irq_count, (unsigned)bus->cmd,
+                (unsigned)s->status, (unsigned)s->nsector);
+        }
+        ide_irq_count++;
+#endif
         qemu_irq_raise(bus->irq);
     }
 }

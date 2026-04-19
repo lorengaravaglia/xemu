@@ -1246,7 +1246,7 @@ static int hdev_get_max_hw_transfer(int fd, struct stat *st)
 /*
  * Get a sysfs attribute value as character string.
  */
-#ifdef CONFIG_LINUX
+#if defined(CONFIG_LINUX) || defined(__linux__)
 static int get_sysfs_str_val(struct stat *st, const char *attribute,
                              char **val) {
     g_autofree char *sysfspath = NULL;
@@ -1297,7 +1297,7 @@ static int get_sysfs_zoned_model(struct stat *st, BlockZoneModel *zoned)
 }
 #endif /* defined(CONFIG_BLKZONED) */
 
-#ifdef CONFIG_LINUX
+#if defined(CONFIG_LINUX) || defined(__linux__)
 /*
  * Get a sysfs attribute value as a long integer.
  */
@@ -1348,7 +1348,7 @@ static int get_sysfs_u32_val(struct stat *st, const char *attribute,
 
 static int hdev_get_max_segments(int fd, struct stat *st)
 {
-#ifdef CONFIG_LINUX
+#if defined(CONFIG_LINUX) || defined(__linux__)
     int ret;
 
     if (S_ISCHR(st->st_mode)) {
@@ -1369,7 +1369,7 @@ static int hdev_get_max_segments(int fd, struct stat *st)
  */
 static int hdev_get_pdiscard_alignment(struct stat *st, uint32_t *dalign)
 {
-#ifdef CONFIG_LINUX
+#if defined(CONFIG_LINUX) || defined(__linux__)
     /*
      * Note that Linux "discard_granularity" is QEMU "discard_alignment". Linux
      * "discard_alignment" is something else.

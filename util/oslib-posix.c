@@ -43,8 +43,9 @@
 #include "qemu/units.h"
 #include "qemu/thread-context.h"
 #include "qemu/main-loop.h"
+#include "qemu/memfd.h"
 
-#ifdef CONFIG_LINUX
+#if defined(CONFIG_LINUX) || defined(__linux__)
 #include <sys/syscall.h>
 #endif
 
@@ -984,6 +985,14 @@ void qemu_close_all_open_fd(const int *skip, unsigned int nskip)
 
 int qemu_shm_alloc(size_t size, Error **errp)
 {
+#if defined(CONFIG_LINUX) || defined(__ANDROID__)
+    int mfd = qemu_memfd_create("qemu-shm", size, false, 0, 0, NULL);
+    if (mfd >= 0) {
+        return mfd;
+    }
+#endif
+
+#ifndef __ANDROID__
     g_autoptr(GString) shm_name = g_string_new(NULL);
     int fd, oflag, cur_sequence;
     static int sequence;
@@ -1032,4 +1041,8 @@ int qemu_shm_alloc(size_t size, Error **errp)
     }
 
     return fd;
+#else
+    error_setg_errno(errp, ENOSYS, "failed to allocate shared memory");
+    return -1;
+#endif
 }

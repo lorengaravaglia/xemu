@@ -22,12 +22,15 @@
 #include "qemu/http.h"
 #include "xemu-version.h"
 
+#ifdef CONFIG_CURL
 #include <curl/curl.h>
+#endif
 #include <fcntl.h>
 
 // Ignore SSL certificate verification (for self-signed certs)
 #define ALLOW_INSECURE_HOSTS 0
 
+#ifdef CONFIG_CURL
 static bool libcurl_init_called = false;
 static bool libcurl_init_success = false;
 static char *xemu_user_agent = NULL;
@@ -79,10 +82,12 @@ static size_t http_get_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
     }
     return nmemb;
 }
+#endif
 
 int http_get(const char *url, GByteArray *response_body,
              http_progress_cb_info *progress_info, Error **errp)
 {
+#ifdef CONFIG_CURL
     if (!ensure_libcurl_initialized(errp)) {
         return -1;
     }
@@ -120,10 +125,15 @@ int http_get(const char *url, GByteArray *response_body,
     curl_easy_cleanup(curl);
 
     return http_response_code;
+#else
+    error_setg(errp, "Compiled without libcurl support");
+    return -1;
+#endif
 }
 
 int http_post_json(const char *url, const char *json_data, Error **errp)
 {
+#ifdef CONFIG_CURL
     if (!ensure_libcurl_initialized(errp)) {
         return -1;
     }
@@ -165,4 +175,8 @@ int http_post_json(const char *url, const char *json_data, Error **errp)
     curl_easy_cleanup(curl);
 
     return http_response_code;
+#else
+    error_setg(errp, "Compiled without libcurl support");
+    return -1;
+#endif
 }

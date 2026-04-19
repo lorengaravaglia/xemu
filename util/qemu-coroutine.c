@@ -20,6 +20,7 @@
 #include "qemu/coroutine-tls.h"
 #include "qemu/cutils.h"
 #include "block/aio.h"
+#define ACORO_LOG(...) fprintf(stderr, __VA_ARGS__)
 
 enum {
     COROUTINE_POOL_BATCH_MAX_SIZE = 128,
@@ -271,15 +272,26 @@ void qemu_aio_coroutine_enter(AioContext *ctx, Coroutine *co)
          * cause us to enter it twice, potentially even after the coroutine has
          * been deleted */
         if (scheduled) {
-            fprintf(stderr,
-                    "%s: Co-routine was already scheduled in '%s'\n",
-                    __func__, scheduled);
+            ACORO_LOG("%s: Co-routine was already scheduled in '%s'\n",
+                      __func__, scheduled);
             abort();
         }
 
         if (to->caller) {
-            fprintf(stderr, "Co-routine re-entered recursively\n");
+            ACORO_LOG("Co-routine re-entered recursively\n");
             abort();
+        }
+
+        if (unlikely(from == to)) {
+            /*
+             * Self-entry: the coroutine being entered is already the current
+             * coroutine on this thread. This can happen when qemu_in_coroutine()
+             * returns false (co->caller was cleared by yield before t_current
+             * was updated) and aio_co_enter calls us directly. The coroutine
+             * is already running — skip the entry.
+             */
+            ACORO_LOG("%s: skipping self-entry of coroutine %p\n", __func__, to);
+            continue;
         }
 
         to->caller = from;
@@ -306,6 +318,7 @@ void qemu_aio_coroutine_enter(AioContext *ctx, Coroutine *co)
             coroutine_delete(to);
             break;
         default:
+            ACORO_LOG("qemu_coroutine_switch returned unexpected value %d\n", (int)ret);
             abort();
         }
     }
@@ -331,7 +344,7 @@ void coroutine_fn qemu_coroutine_yield(void)
     trace_qemu_coroutine_yield(self, to);
 
     if (!to) {
-        fprintf(stderr, "Co-routine is yielding to no one\n");
+        ACORO_LOG("Co-routine is yielding to no one\n");
         abort();
     }
 

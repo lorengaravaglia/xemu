@@ -201,7 +201,8 @@ int qemu_init_main_loop(Error **errp)
     int ret;
     GSource *src;
 
-#ifdef XBOX
+#if defined(XBOX) || defined(__ANDROID__) || defined(ANDROID)
+    fprintf(stderr, "xemu-vl: qemu_init_main_loop: creating thread-default context (thread %ld)\n", (long)gettid());
     qemu_main_context = g_main_context_new();
     assert(qemu_main_context != NULL);
     g_main_context_push_thread_default(qemu_main_context);
@@ -224,7 +225,7 @@ int qemu_init_main_loop(Error **errp)
     gpollfds = g_array_new(FALSE, FALSE, sizeof(GPollFD));
     src = aio_get_g_source(qemu_aio_context);
     g_source_set_name(src, "aio-context");
-#ifdef XBOX
+#if defined(XBOX) || defined(__ANDROID__) || defined(ANDROID)
     g_source_attach(src, qemu_main_context);
 #else
     g_source_attach(src, NULL);
@@ -232,7 +233,7 @@ int qemu_init_main_loop(Error **errp)
     g_source_unref(src);
     src = iohandler_get_g_source();
     g_source_set_name(src, "io-handler");
-#ifdef XBOX
+#if defined(XBOX) || defined(__ANDROID__) || defined(ANDROID)
     g_source_attach(src, qemu_main_context);
 #else
     g_source_attach(src, NULL);
@@ -308,7 +309,7 @@ static int glib_n_poll_fds;
 
 static void glib_pollfds_fill(int64_t *cur_timeout)
 {
-#ifdef XBOX
+#if defined(XBOX) || defined(__ANDROID__) || defined(ANDROID)
     GMainContext *context = g_main_context_get_thread_default();
 #else
     GMainContext *context = g_main_context_default();
@@ -341,7 +342,7 @@ static void glib_pollfds_fill(int64_t *cur_timeout)
 
 static void glib_pollfds_poll(void)
 {
-#ifdef XBOX
+#if defined(XBOX) || defined(__ANDROID__) || defined(ANDROID)
     GMainContext *context = g_main_context_get_thread_default();
 #else
     GMainContext *context = g_main_context_default();
@@ -357,7 +358,7 @@ static void glib_pollfds_poll(void)
 
 static int os_host_main_loop_wait(int64_t timeout)
 {
-#ifdef XBOX
+#if defined(XBOX) || defined(__ANDROID__) || defined(ANDROID)
     GMainContext *context = g_main_context_get_thread_default();
 #else
     GMainContext *context = g_main_context_default();
@@ -383,7 +384,6 @@ static int os_host_main_loop_wait(int64_t timeout)
     bql_lock();
 
     glib_pollfds_poll();
-
     g_main_context_release(context);
 
     return ret;
@@ -533,7 +533,7 @@ static void pollfds_poll(GArray *pollfds, int nfds, fd_set *rfds,
 
 static int os_host_main_loop_wait(int64_t timeout)
 {
-#ifdef XBOX
+#if defined(XBOX) || defined(__ANDROID__) || defined(ANDROID)
     GMainContext *context = g_main_context_get_thread_default();
 #else
     GMainContext *context = g_main_context_default();
@@ -682,6 +682,11 @@ void main_loop_wait(int nonblocking)
          */
         icount_start_warp_timer();
     }
+#if defined(__ANDROID__) || defined(ANDROID)
+    // Log very occasionally
+    static int log_count = 0;
+    if (log_count++ % 10000 == 0) fprintf(stderr, "xemu-vl: main_loop_wait: running all timers\n");
+#endif
     qemu_clock_run_all_timers();
 }
 

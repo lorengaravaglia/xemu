@@ -899,9 +899,15 @@ int qemu_main_loop(void)
 {
     int status = EXIT_SUCCESS;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    fprintf(stderr, "xemu-vl: qemu_main_loop entry\n");
+#endif
     while (!main_loop_should_exit(&status)) {
         main_loop_wait(false);
     }
+#if defined(__ANDROID__) || defined(ANDROID)
+    fprintf(stderr, "xemu-vl: qemu_main_loop exit status %d\n", status);
+#endif
     return status;
 }
 

@@ -319,4 +319,12 @@
 #define IDENT_DESCR_TGT_DESCR_SIZE 32
 #define XCOPY_BLK2BLK_SEG_DESC_SIZE 28
 
+/* Missing in some environments like Android */
+#ifndef SG_ERR_DRIVER_TIMEOUT
+#define SG_ERR_DRIVER_TIMEOUT  0x06
+#endif
+#ifndef SG_ERR_DRIVER_SENSE
+#define SG_ERR_DRIVER_SENSE    0x08
+#endif
+
 #endif

@@ -2948,8 +2948,16 @@ static const char *get_eeprom_path(void)
     return path;
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "xemu-vl", __VA_ARGS__)
+#endif
+
 void qemu_init(int argc, char **argv)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init entry");
+#endif
     QemuOpts *opts;
     QemuOpts *icount_opts = NULL, *accel_opts = NULL;
     QemuOptsList *olist;
@@ -2963,6 +2971,9 @@ void qemu_init(int argc, char **argv)
 
     // init earlier because it's needed for eeprom generation
     qcrypto_init(&error_fatal);
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init: qcrypto_init success");
+#endif
 
     //
     // FIXME: This is a hack to get QEMU to load correct machine and properties
@@ -2982,8 +2993,18 @@ void qemu_init(int argc, char **argv)
     char *bootrom_arg = NULL;
     const char *bootrom_path = g_config.sys.files.bootrom_path;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init: bootrom_path = %s", bootrom_path);
+#endif
+
     if (strlen(bootrom_path) > 0) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        ALOGI("qemu_init: calling get_image_size for bootrom");
+#endif
         int bootrom_size = get_image_size(bootrom_path, NULL);
+#if defined(__ANDROID__) || defined(ANDROID)
+        ALOGI("qemu_init: bootrom_size = %d", bootrom_size);
+#endif
         if (bootrom_size < 0) {
             char *msg = g_strdup_printf("Failed to open BootROM file '%s'. "
                                         "Please check machine settings.",
@@ -3028,7 +3049,13 @@ void qemu_init(int argc, char **argv)
     }
 
     const char *eeprom_path = get_eeprom_path();
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init: eeprom_path = %s", eeprom_path ? eeprom_path : "NULL");
+#endif
     if (eeprom_path) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        ALOGI("qemu_init: eeprom_path is valid, adding smbus-storage");
+#endif
         fake_argv[fake_argc++] = strdup("-device");
         char *escaped_eeprom_path = strdup_double_commas(eeprom_path);
         fake_argv[fake_argc++] = g_strdup_printf("smbus-storage,file=%s",
@@ -3039,6 +3066,9 @@ void qemu_init(int argc, char **argv)
     }
 
     const char *flashrom_path = g_config.sys.files.flashrom_path;
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init: flashrom_path = %s", flashrom_path);
+#endif
     if (g_config.general.show_welcome) {
         // Don't display an error if this is the first boot. Give user a chance
         // to configure the path.
@@ -3054,10 +3084,16 @@ void qemu_init(int argc, char **argv)
     }
 
     int mem = ((int)g_config.sys.mem_limit + 1) * 64;
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init: mem = %d", mem);
+#endif
     fake_argv[fake_argc++] = strdup("-m");
     fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
 
     const char *hdd_path = g_config.sys.files.hdd_path;
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init: hdd_path = %s", hdd_path);
+#endif
     if (strlen(hdd_path) > 0) {
         if (xemu_check_file(hdd_path)) {
             char *msg = g_strdup_printf("Failed to open hard disk image file '%s'. Please check machine settings.", hdd_path);
@@ -3086,6 +3122,21 @@ void qemu_init(int argc, char **argv)
         }
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (dvd_path && dvd_path[0]) {
+        ALOGI("DVD path from config: '%s'", dvd_path);
+        /* Verify the fd-based path is actually readable before handing it to
+         * QEMU's block layer, which prints no useful error on open failure. */
+        if (access(dvd_path, R_OK) == 0) {
+            ALOGI("DVD path access check: OK (file is readable)");
+        } else {
+            ALOGI("DVD path access check: FAILED (errno=%d) — disc will not load", errno);
+        }
+    } else {
+        ALOGI("DVD path is empty — booting without disc");
+    }
+#endif
+
     // Always populate DVD drive. If disc path is the empty string, drive is
     // connected but no media present.
     fake_argv[fake_argc++] = strdup("-drive");
@@ -3112,6 +3163,12 @@ void qemu_init(int argc, char **argv)
         printf("%s ", fake_argv[i]);
     }
     printf("\n");
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Echo the full command line to the xemu-vl tag so it's easy to grep. */
+    for (int i = 0; i < fake_argc; i++) {
+        ALOGI("fake_argv[%d]: %s", i, fake_argv[i]);
+    }
+#endif
 
     argc = fake_argc;
     argv = fake_argv;
@@ -4024,6 +4081,9 @@ void qemu_init(int argc, char **argv)
     trace_init_file();
 
     qemu_init_main_loop(&error_fatal);
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init: qemu_init_main_loop success");
+#endif
     cpu_timers_init();
 
     user_register_global_props();
@@ -4118,6 +4178,9 @@ void qemu_init(int argc, char **argv)
         qmp_x_exit_preconfig(&error_fatal);
     }
     qemu_init_displays();
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI("qemu_init: qemu_init_displays success");
+#endif
     accel_setup_post(current_machine);
     if (migrate_mode() != MIG_MODE_CPR_EXEC) {
         os_setup_post();
