@@ -24,7 +24,7 @@ if get_option('tcg_interpreter')
 endif
 
 tcg_ss.add(when: libdw, if_true: files('debuginfo.c'))
-if host_os == 'linux'
+if host_os == 'linux' or host_os == 'android'
   tcg_ss.add(files('perf.c'))
 endif
 

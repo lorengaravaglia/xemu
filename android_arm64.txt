@@ -1,0 +1,40 @@
+[constants]
+ndk_path = '/Users/lorengaravaglia/Library/Android/sdk/ndk/29.0.14206865'
+toolchain = ndk_path + '/toolchains/llvm/prebuilt/darwin-x86_64/bin/'
+api = '28'
+
+[binaries]
+c = toolchain + 'aarch64-linux-android' + api + '-clang'
+cpp = toolchain + 'aarch64-linux-android' + api + '-clang++'
+ar = toolchain + 'llvm-ar'
+strip = toolchain + 'llvm-strip'
+nm = toolchain + 'llvm-nm'
+pkg-config = 'pkg-config'
+cmake = 'cmake'
+ninja = 'ninja'
+
+# NATIVE binaries for your Mac (Build Machine)
+# This prevents the "compiler for language c not found" error
+c_FOR_BUILD = 'cc'
+cpp_FOR_BUILD = 'c++'
+ar_FOR_BUILD = 'ar'
+nm_FOR_BUILD = 'nm'
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'armv8-a'
+endian = 'little'
+
+[properties]
+pkg_config_libdir = '/Users/lorengaravaglia/projects/vcpkg/installed/arm64-android/lib/pkgconfig:/Users/lorengaravaglia/projects/vcpkg/installed/arm64-android/share/pkgconfig'
+cmake_system_name = 'Android'
+cmake_android_ndk = ndk_path
+cmake_android_arch_abi = 'arm64-v8a'
+cmake_android_native_api_level = api
+cmake_make_program = 'ninja'
+
+[built-in options]
+c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack']
+cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack']
+b_staticpic = true

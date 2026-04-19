@@ -1,6 +1,6 @@
 project('qemu', ['c', 'cpp'], meson_version: '>=1.5.0',
         default_options: ['warning_level=1', 'c_std=gnu11', 'cpp_std=c++17', 'b_colorout=auto',
-                          'b_staticpic=false', 'stdsplit=false', 'optimization=2', 'b_pie=true'],
+                          'b_staticpic=true', 'stdsplit=false', 'optimization=2', 'b_pie=true'],
         version: files('QEMU_VERSION'))
 
 meson.add_devenv({ 'MESON_BUILD_ROOT' : meson.project_build_root() })
@@ -25,6 +25,7 @@ ss = import('sourceset')
 fs = import('fs')
 
 host_os = host_machine.system()
+message('Host OS is: ' + host_os)
 config_host = keyval.load(meson.current_build_dir() / 'config-host.mak')
 
 # Temporary directory used for files created while
@@ -767,6 +768,11 @@ warn_flags = [
   '-Wno-string-plus-int',
   '-Wno-tautological-type-limit-compare',
   '-Wno-typedef-redefinition',
+  '-Wno-nullability-completeness',
+  '-Wno-deprecated-literal-operator',
+  '-Wno-unused-function',
+  '-Wno-unused-variable',
+  '-Wno-unused-private-field',
 ]
 
 if host_os != 'darwin'
@@ -1388,7 +1394,7 @@ rt = not_found
 if host_os != 'windows'
   have_shm_open = cc.has_function('shm_open')
   if not have_shm_open
-    rt = cc.find_library('rt', required: true)
+    rt = cc.find_library('rt', required: false)
   endif
 endif
 
@@ -1450,39 +1456,46 @@ if not get_option('blkio').auto() or have_block
                      method: 'pkg-config',
                      required: get_option('blkio'))
 endif
-curl = dependency('libcurl', version: '>=7.29.0',
-                  method: 'pkg-config',
-                  required: false)
-if not curl.found()
-  if host_os == 'windows'
-    curl_platform_opts = ['schannel=enabled', 'sspi=enabled']
-  elif host_os == 'darwin'
-    curl_platform_opts = ['secure-transport=enabled']
-  else
-    curl_platform_opts = ['openssl=enabled']
+curl = not_found
+if not get_option('curl').disabled()
+  curl = dependency('libcurl', version: '>=7.29.0',
+                    method: 'pkg-config',
+                    required: get_option('curl'))
+  if not curl.found()
+    if cc.has_header('android/api-level.h')
+      message('Curl not found for Android, skipping subproject fallback.')
+    else
+      if host_os == 'windows'
+        curl_platform_opts = ['schannel=enabled', 'sspi=enabled']
+      elif host_os == 'darwin'
+        curl_platform_opts = ['secure-transport=enabled']
+      else
+        curl_platform_opts = ['openssl=enabled']
+      endif
+      curl_sub = subproject('curl',
+        default_options: [
+          'ssl=enabled',
+          'http=enabled',
+          'ftp=enabled',
+          'dict=disabled',
+          'file=disabled',
+          'gopher=disabled',
+          'imap=disabled',
+          'ldap=disabled',
+          'ldaps=disabled',
+          'mqtt=disabled',
+          'pop3=disabled',
+          'rtmp=disabled',
+          'rtsp=disabled',
+          'smb=disabled',
+          'smtp=disabled',
+          'telnet=disabled',
+          'tftp=disabled',
+          'default_library=static',
+        ] + curl_platform_opts)
+      curl = curl_sub.get_variable('curl_dep')
+    endif
   endif
-  curl_sub = subproject('curl',
-    default_options: [
-      'ssl=enabled',
-      'http=enabled',
-      'ftp=enabled',
-      'dict=disabled',
-      'file=disabled',
-      'gopher=disabled',
-      'imap=disabled',
-      'ldap=disabled',
-      'ldaps=disabled',
-      'mqtt=disabled',
-      'pop3=disabled',
-      'rtmp=disabled',
-      'rtsp=disabled',
-      'smb=disabled',
-      'smtp=disabled',
-      'telnet=disabled',
-      'tftp=disabled',
-      'default_library=static',
-    ] + curl_platform_opts)
-  curl = curl_sub.get_variable('curl_dep')
 endif
 libudev = not_found
 if host_os == 'linux' and (have_system or have_tools)
@@ -1619,7 +1632,7 @@ if have_system and get_option('curses').allowed()
       if cc.links('''
         #include <iconv.h>
         int main(void) {
-          iconv_t conv = iconv_open("WCHAR_T", "UCS-2");
+          iconv_t conv = iconv_open("UTF-8", "UTF-8");
           return conv != (iconv_t) -1;
         }''', args: link_args, dependencies: glib)
         iconv = declare_dependency(link_args: link_args, dependencies: glib)
@@ -1859,8 +1872,12 @@ if not get_option('opengl').auto() or have_system or have_vhost_user_gpu
     opengl_libs=['-framework', 'OpenGL']
   elif host_os == 'windows'
     opengl_libs=['-lopengl32', '-lgdi32']
-  elif host_os == 'linux'
-    opengl_libs=['-lGL']
+  elif host_os == 'linux' or host_os == 'android'
+    if cc.has_header('android/api-level.h')
+      opengl_libs=['-lGLESv3']
+    else
+      opengl_libs=['-lGL']
+    endif
   else
     error('Unknown GL platform')
   endif
@@ -2189,7 +2206,7 @@ if not get_option('usb_redir').auto() or have_system
                         version: '>=0.6', method: 'pkg-config')
 endif
 libusb = not_found
-if not get_option('libusb').auto() or have_system
+if (not get_option('libusb').auto() or have_system) and not cc.has_header('android/api-level.h')
   libusb = dependency('libusb-1.0', required: get_option('libusb').enabled(),
                       version: '>=1.0.13', method: 'pkg-config')
 endif
@@ -2357,8 +2374,13 @@ libglslang = not_found
 
 if host_os == 'windows'
   vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_WIN32_KHR'])
-elif host_os == 'linux'
-  vulkan = dependency('vulkan')
+elif host_os == 'linux' or host_os == 'android'
+  vulkan = dependency('vulkan', required: false)
+  if host_os == 'android' and not vulkan.found()
+    if cc.has_header('vulkan/vulkan.h')
+      vulkan = declare_dependency()
+    endif
+  endif
 endif
 
 if vulkan.found()
@@ -2366,7 +2388,22 @@ if vulkan.found()
   if not libglslang.found()
     # FIXME: Get spirv-tools to enable opt.
     glslang_opts = cmake.subproject_options()
-    glslang_opts.add_cmake_defines({'ENABLE_OPT': false, 'ENABLE_HLSL': false})
+    glslang_cmake_defines = {
+      'ENABLE_OPT': false,
+      'ENABLE_HLSL': false,
+      'ENABLE_GLSLANG_BINARIES': false,
+      'GLSLANG_TESTS': false,
+      'BUILD_EXTERNAL': false,
+      'BUILD_WERROR': false
+    }
+    # Some NDK environments report 'linux' instead of 'android'
+    if host_os == 'android' or host_os == 'linux'
+      # Additional check: are we using the Android NDK?
+      if cc.has_header('android/api-level.h')
+        glslang_cmake_defines += {'ANDROID': true, 'CMAKE_SYSTEM_NAME': 'Android'}
+      endif
+    endif
+    glslang_opts.add_cmake_defines(glslang_cmake_defines)
     glslang_subpro = cmake.subproject('glslang', options: glslang_opts)
     libglslang = declare_dependency(link_with: [
           glslang_subpro.target('glslang'),
@@ -2400,7 +2437,7 @@ if host_os == 'windows'
   libpcap = declare_dependency(include_directories: 'winpcap-loader/include',
                                link_args: ['-lws2_32'])
 else
-  libpcap = dependency('libpcap', method: 'pkg-config', required: true)
+  libpcap = dependency('libpcap', method: 'pkg-config', required: false)
 endif
 
 libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
@@ -2408,6 +2445,7 @@ libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
 imgui_proj = subproject('imgui', required: true,
                          default_options: [
                            'default_library=static',
+                           'werror=false',
                            'dx9=disabled',
                            'dx10=disabled',
                            'dx11=disabled',
@@ -2504,6 +2542,8 @@ else
 endif
 
 dbus_display = get_option('dbus_display') \
+  .require(not cc.has_header('android/api-level.h'),
+           error_message: 'dbus-display is not supported on Android') \
   .require(gio.version().version_compare('>=2.64'),
            error_message: '-display dbus requires glib>=2.64') \
   .require(gdbus_codegen.found(),
@@ -2617,7 +2657,7 @@ config_host_data.set('CONFIG_FDT', fdt.found())
 config_host_data.set('CONFIG_FUZZ', get_option('fuzzing'))
 config_host_data.set('CONFIG_GCOV', get_option('b_coverage'))
 config_host_data.set('CONFIG_LIBUDEV', libudev.found())
-config_host_data.set('CONFIG_LINUX', host_os == 'linux')
+config_host_data.set('CONFIG_LINUX', host_os == 'linux' or host_os == 'android')
 config_host_data.set('CONFIG_POSIX', host_os != 'windows')
 config_host_data.set('CONFIG_WIN32', host_os == 'windows')
 config_host_data.set('CONFIG_LZO', lzo.found())
@@ -2665,6 +2705,7 @@ if numa.found()
                                        dependencies: numa))
 endif
 config_host_data.set('CONFIG_OPENGL', opengl.found())
+config_host_data.set('CONFIG_LIBPCAP', libpcap.found())
 config_host_data.set('CONFIG_VULKAN', vulkan.found())
 config_host_data.set('CONFIG_PLUGIN', get_option('plugins'))
 config_host_data.set('CONFIG_RBD', rbd.found())
@@ -3461,7 +3502,7 @@ host_kconfig = \
   (have_vhost_vdpa ? ['CONFIG_VHOST_VDPA=y'] : []) + \
   (have_vhost_kernel ? ['CONFIG_VHOST_KERNEL=y'] : []) + \
   (have_virtfs ? ['CONFIG_VIRTFS=y'] : []) + \
-  (host_os == 'linux' ? ['CONFIG_LINUX=y'] : []) + \
+  (host_os == 'linux' or host_os == 'android' ? ['CONFIG_LINUX=y'] : []) + \
   (multiprocess_allowed ? ['CONFIG_MULTIPROCESS_ALLOWED=y'] : []) + \
   (vfio_user_server_allowed ? ['CONFIG_VFIO_USER_SERVER_ALLOWED=y'] : []) + \
   (hv_balloon ? ['CONFIG_HV_BALLOON_POSSIBLE=y'] : []) + \
@@ -3660,9 +3701,16 @@ if have_libvduse
   libvduse = libvduse_proj.get_variable('libvduse_dep')
 endif
 
-tomlplusplus = dependency('tomlplusplus', fallback: ['tomlplusplus', 'tomlplusplus_dep'], default_options: ['default_library=static'])
+tomlplusplus = dependency('tomlplusplus', fallback: ['tomlplusplus', 'tomlplusplus_dep'], default_options: ['default_library=static', 'werror=false'])
 
-xxhash = dependency('libxxhash', fallback: ['xxhash', 'xxhash_dep'], default_options: ['default_library=static'])
+xxhash = not_found
+if not cc.has_header('android/api-level.h')
+  xxhash = dependency('libxxhash', fallback: ['xxhash', 'xxhash_dep'], default_options: ['default_library=static'])
+endif
+if not xxhash.found()
+  xxhash_proj = subproject('xxhash', default_options: ['default_library=static'])
+  xxhash = xxhash_proj.get_variable('xxhash_dep')
+endif
 
 #####################
 # Generated sources #

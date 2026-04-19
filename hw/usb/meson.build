@@ -59,7 +59,7 @@ endif
 
 # U2F
 system_ss.add(when: 'CONFIG_USB_U2F', if_true: files('u2f.c'))
-if host_os == 'linux'
+if host_os == 'linux' or host_os == 'android'
   system_ss.add(when: 'CONFIG_USB_U2F', if_true: [libudev, files('u2f-passthru.c')])
 endif
 if u2f.found()

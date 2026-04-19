@@ -79,7 +79,7 @@ endif
 if have_system
   util_ss.add(files('crc-ccitt.c'))
   util_ss.add(when: gio, if_true: files('dbus.c'))
-  if host_os == 'linux'
+  if host_os == 'linux' or host_os == 'android'
     util_ss.add(files('userfaultfd.c'))
   endif
 endif
@@ -142,4 +142,6 @@ elif cpu == 's390x'
   util_ss.add(files('s390x_pci_mmio.c'))
 endif
 util_ss.add(files('sha1.c','rc4.c'))
-util_ss.add([curl, files('http.c')])
+if curl.found()
+  util_ss.add(files('http.c'))
+endif

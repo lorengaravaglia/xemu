@@ -17,7 +17,7 @@ if host_os != 'windows'
     system_ss.add([files('hostmem-shm.c'), rt])
   endif
 endif
-if host_os == 'linux'
+if host_os == 'linux' or host_os == 'android'
   system_ss.add(files('hostmem-memfd.c'))
   system_ss.add(files('host_iommu_device.c'))
 endif
