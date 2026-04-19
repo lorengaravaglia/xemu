@@ -305,10 +305,10 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
             VSH_VERSION_XVS, (uint32_t *)state->programmable.program_data,
             state->programmable.program_length, header, body);
         if (!state->point_params_enable) {
-            mstring_append_fmt(body, "  oPts.x = %f * %d;\n",
-                               state->point_size <= 0.f ? 1.f :
-                                                          state->point_size,
-                               state->surface_scale_factor);
+            mstring_append_fmt(body, "  oPts.x = %f;\n",
+                               (state->point_size <= 0.f ? 1.f :
+                                                           state->point_size) *
+                               (float)state->surface_scale_factor);
         }
     }
 

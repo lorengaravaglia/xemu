@@ -22,6 +22,12 @@
 #include <math.h>
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#define ALOGI_PGRAPH(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
+#else
+#define ALOGI_PGRAPH(...) ((void)0)
+#endif
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-settings.h"
 #include "util.h"
@@ -100,6 +106,19 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         if (!(pg->pending_interrupts & NV_PGRAPH_INTR_CONTEXT_SWITCH)) {
             pg->waiting_for_context_switch = false;
         }
+        {
+            uint32_t _isr_pc = 0;
+#if defined(__ANDROID__) || defined(ANDROID)
+            CPUState *_vcpu = first_cpu;
+            if (_vcpu) {
+                CPUX86State *_env = cpu_env(_vcpu);
+                _isr_pc = (uint32_t)(_env->segs[R_CS].base + _env->eip);
+            }
+#endif
+            ALOGI_PGRAPH("pgraph: NV_PGRAPH_INTR write val=0x%x pending_now=0x%x waiting_for_nop=%d PC=0x%08x",
+                         (unsigned)val, (unsigned)pg->pending_interrupts,
+                         (int)pg->waiting_for_nop, _isr_pc);
+        }
         pfifo_kick(d);
         break;
     case NV_PGRAPH_INTR_EN:
@@ -113,6 +132,9 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                               NV_PGRAPH_SURFACE_READ_3D)+1)
                         % PG_GET_MASK(NV_PGRAPH_SURFACE,
                                    NV_PGRAPH_SURFACE_MODULO_3D) );
+            ALOGI_PGRAPH("pgraph: INCREMENT_READ_3D -> READ_3D=%u WRITE_3D=%u (flip complete)",
+                         (unsigned)PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D),
+                         (unsigned)PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D));
             nv2a_profile_increment();
             pfifo_kick(d);
         }
@@ -828,6 +850,7 @@ DEF_METHOD(NV097, NO_OPERATION)
      * of the parameter. It's possible a debug register enables this,
      * but nothing obvious sticks out. Weird.
      */
+    ALOGI_PGRAPH("pgraph: NV097_NO_OPERATION param=0x%x", (unsigned)parameter);
     if (parameter == 0) {
         return;
     }
@@ -858,6 +881,7 @@ DEF_METHOD(NV097, NO_OPERATION)
 
 DEF_METHOD(NV097, WAIT_FOR_IDLE)
 {
+    ALOGI_PGRAPH("pgraph: NV097_WAIT_FOR_IDLE");
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
 }
 
@@ -895,12 +919,18 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
         PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D);
 
     trace_nv2a_pgraph_flip_increment_write(old, new);
+    ALOGI_PGRAPH("pgraph: FLIP_INCREMENT_WRITE %u->%u (READ_3D=%u)",
+                 (unsigned)old, (unsigned)new,
+                 (unsigned)PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D));
     pg->frame_time++;
 }
 
 DEF_METHOD(NV097, FLIP_STALL)
 {
     trace_nv2a_pgraph_flip_stall();
+    ALOGI_PGRAPH("pgraph: FLIP_STALL (READ_3D=%u WRITE_3D=%u)",
+                 (unsigned)PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D),
+                 (unsigned)PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D));
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
     d->pgraph.renderer->ops.flip_stall(d);
     nv2a_profile_flip_stall();
@@ -2845,6 +2875,9 @@ DEF_METHOD(NV097, SET_SEMAPHORE_OFFSET)
 
 DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
 {
+    ALOGI_PGRAPH("pgraph: BACK_END_WRITE_SEMAPHORE_RELEASE param=0x%x offset=0x%x",
+                 (unsigned)parameter,
+                 (unsigned)pgraph_reg_r(pg, NV_PGRAPH_SEMAPHOREOFFSET));
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
 
     //qemu_mutex_unlock(&d->pgraph.lock);

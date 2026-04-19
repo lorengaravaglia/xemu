@@ -193,7 +193,9 @@ static uint8_t *render_geom_shader_triangles(int width, int height)
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
+#if !defined(__ANDROID__) && !defined(ANDROID)
     glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
+#endif
     glViewport(0, 0, width, height);
     check_gl_error("state setup");
 
@@ -205,7 +207,9 @@ static uint8_t *render_geom_shader_triangles(int width, int height)
     glDrawArrays(GL_TRIANGLE_STRIP, 3, 4);
     glDrawArrays(GL_TRIANGLE_FAN, 7, 4);
     check_gl_error("glDrawArrays");
+#if !defined(__ANDROID__) && !defined(ANDROID)
     glFinish(); // glFinish should be unnecessary
+#endif
 
     void *pixels = g_malloc(width * height * 4);
     assert(pixels != NULL);
@@ -335,6 +339,16 @@ static void determine_triangle_winding_order(uint8_t *pixels, int width,
 
 void pgraph_gl_determine_gpu_properties(void)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    // On Android, we may not have geometry shader support (GLES 3.0).
+    // Use defaults.
+    pgraph_gl_gpu_properties.geom_shader_winding.tri = 0;
+    pgraph_gl_gpu_properties.geom_shader_winding.tri_strip0 = 0;
+    pgraph_gl_gpu_properties.geom_shader_winding.tri_strip1 = 0;
+    pgraph_gl_gpu_properties.geom_shader_winding.tri_fan = 0;
+    fprintf(stderr, "Android: Skipping GL geometry shader winding determination, using defaults.\n");
+    return;
+#endif
     const int width = 640;
     const int height = 480;
 

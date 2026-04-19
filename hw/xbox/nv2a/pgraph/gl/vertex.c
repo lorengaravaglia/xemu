@@ -103,7 +103,12 @@ void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
             gl_type = GL_UNSIGNED_BYTE;
             gl_normalize = GL_TRUE;
             // http://www.opengl.org/registry/specs/ARB/vertex_array_bgra.txt
+            // GL_BGRA as attrib size requires ARB_vertex_array_bgra (desktop GL only)
+#if defined(__ANDROID__) || defined(ANDROID)
+            gl_count = 4;
+#else
             gl_count = GL_BGRA;
+#endif
             break;
         case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_OGL:
             gl_type = GL_UNSIGNED_BYTE;
@@ -267,7 +272,14 @@ void pgraph_gl_init_buffers(NV2AState *d)
 
     GLint max_vertex_attributes;
     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &max_vertex_attributes);
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (max_vertex_attributes < NV2A_VERTEXSHADER_ATTRIBUTES) {
+        fprintf(stderr, "pgraph_gl_init_buffers: GL_MAX_VERTEX_ATTRIBS=%d < required %d\n",
+                max_vertex_attributes, NV2A_VERTEXSHADER_ATTRIBUTES);
+    }
+#else
     assert(max_vertex_attributes >= NV2A_VERTEXSHADER_ATTRIBUTES);
+#endif
 
     glGenBuffers(NV2A_VERTEXSHADER_ATTRIBUTES, r->gl_inline_buffer);
     glGenBuffers(1, &r->gl_inline_array_buffer);
@@ -280,7 +292,17 @@ void pgraph_gl_init_buffers(NV2AState *d)
     glGenVertexArrays(1, &r->gl_vertex_array);
     glBindVertexArray(r->gl_vertex_array);
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        GLenum _err = glGetError();
+        if (_err != GL_NO_ERROR) {
+            fprintf(stderr, "pgraph_gl_init_buffers: GL error 0x%x (vram buf size=%zu)\n",
+                    _err, (size_t)memory_region_size(d->vram));
+        }
+    }
+#else
     assert(glGetError() == GL_NO_ERROR);
+#endif
 }
 
 void pgraph_gl_finalize_buffers(PGRAPHState *pg)

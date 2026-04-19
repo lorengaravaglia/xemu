@@ -26,6 +26,11 @@
 #include "debug.h"
 #include "renderer.h"
 
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#define ALOGI_SURF(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
+#endif
+
 static void surface_download(NV2AState *d, SurfaceBinding *surface, bool force);
 static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
                                        bool swizzle, bool flip, bool downscale,
@@ -233,22 +238,49 @@ static void render_surface_to(NV2AState *d, SurfaceBinding *surface,
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, gl_target,
                            gl_texture, 0);
     glDrawBuffers(1, draw_buffers);
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
+            fprintf(stderr,
+                    "nv2a: render_surface_to: framebuffer incomplete 0x%x"
+                    " gl_texture=%u gl_target=0x%x\n",
+                    fb_status, gl_texture, gl_target);
+        }
+        glGetError(); /* clear any pending error */
+    }
+#else
     assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
     assert(glGetError() == GL_NO_ERROR);
+#endif
 
     float color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* GL_CLAMP_TO_BORDER requires GLES 3.2 or EXT_texture_border_clamp */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    (void)color;
+#else
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, color);
+#endif
 
     glBindVertexArray(r->s2t_rndr.vao);
     glBindBuffer(GL_ARRAY_BUFFER, r->s2t_rndr.vbo);
     glUseProgram(r->s2t_rndr.prog);
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* glProgramUniform* requires GLES 3.1+; glUniform* works on all GLES 3.0+
+     * since glUseProgram is already called above. */
+    glUniform1i(r->s2t_rndr.tex_loc, texture_unit);
+    glUniform2f(r->s2t_rndr.surface_size_loc, width, height);
+#else
     glProgramUniform1i(r->s2t_rndr.prog, r->s2t_rndr.tex_loc,
                        texture_unit);
     glProgramUniform2f(r->s2t_rndr.prog,
                        r->s2t_rndr.surface_size_loc, width, height);
+#endif
 
     glViewport(0, 0, width, height);
     glColorMask(true, true, true, true);
@@ -258,7 +290,9 @@ static void render_surface_to(NV2AState *d, SurfaceBinding *surface,
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
+#if !defined(__ANDROID__) && !defined(ANDROID)
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+#endif
     glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -333,13 +367,28 @@ void pgraph_gl_render_surface_to_texture(NV2AState *d, SurfaceBinding *surface,
     unsigned int width = texture_shape->width, height = texture_shape->height;
     pgraph_apply_scaling_factor(pg, &width, &height);
 
+    /* Use a GLES-compatible format for texture creation */
+    GLenum tex_fmt = f->gl_format;
+    GLenum tex_type = f->gl_type;
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (tex_fmt == GL_BGRA) {
+        tex_fmt = GL_RGBA;
+        if (tex_type == GL_UNSIGNED_INT_8_8_8_8_REV) {
+            tex_type = GL_UNSIGNED_BYTE;
+        }
+    }
+    if (tex_type == GL_UNSIGNED_SHORT_1_5_5_5_REV) {
+        tex_type = GL_UNSIGNED_SHORT_5_5_5_1;
+    }
+#endif
+
     glActiveTexture(GL_TEXTURE0 + texture_unit);
     glBindTexture(texture->gl_target, texture->gl_texture);
     glTexParameteri(texture->gl_target, GL_TEXTURE_BASE_LEVEL, 0);
     glTexParameteri(texture->gl_target, GL_TEXTURE_MAX_LEVEL, 0);
     glTexParameteri(texture->gl_target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexImage2D(texture->gl_target, 0, f->gl_internal_format, width, height, 0,
-                 f->gl_format, f->gl_type, NULL);
+                 tex_fmt, tex_type, NULL);
     glBindTexture(texture->gl_target, 0);
     render_surface_to(d, surface, texture_unit, texture->gl_target,
                              texture->gl_texture, width, height);
@@ -648,8 +697,24 @@ static void bind_current_surface(NV2AState *d)
     }
 
     if (r->color_binding || r->zeta_binding) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        GLenum fbo_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (fbo_status != GL_FRAMEBUFFER_COMPLETE) {
+            ALOGI_SURF("bind_current_surface: FBO incomplete 0x%x "
+                       "(color_buf=%u color_ifmt=0x%x color_fmt=0x%x color_type=0x%x "
+                       "zeta_buf=%u zeta_attach=0x%x)",
+                       (unsigned)fbo_status,
+                       r->color_binding ? r->color_binding->gl_buffer : 0,
+                       r->color_binding ? (unsigned)r->color_binding->fmt.gl_internal_format : 0,
+                       r->color_binding ? (unsigned)r->color_binding->fmt.gl_format : 0,
+                       r->color_binding ? (unsigned)r->color_binding->fmt.gl_type : 0,
+                       r->zeta_binding  ? r->zeta_binding->gl_buffer : 0,
+                       r->zeta_binding  ? (unsigned)r->zeta_binding->fmt.gl_attachment : 0);
+        }
+#else
         assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
                GL_FRAMEBUFFER_COMPLETE);
+#endif
     }
 }
 
@@ -873,6 +938,30 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         return;
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        static unsigned int s_upload_count = 0;
+        s_upload_count++;
+        if (s_upload_count <= 10 || s_upload_count % 50 == 1) {
+            uint8_t *vram_start = (uint8_t*)d->vram_ptr + surface->vram_addr;
+            /* Sample center pixel too */
+            unsigned int cx = surface->width / 2;
+            unsigned int cy = surface->height / 2;
+            unsigned int center_off = cy * surface->pitch + cx * surface->fmt.bytes_per_pixel;
+            uint8_t *center = vram_start + center_off;
+            ALOGI_SURF("upload_surface_data #%u: %s vram=0x%x %dx%d draw_dirty=%d "
+                       "first=[%02x %02x %02x %02x] center=[%02x %02x %02x %02x]",
+                       s_upload_count,
+                       surface->color ? "COLOR" : "ZETA",
+                       (unsigned)surface->vram_addr,
+                       surface->width, surface->height,
+                       (int)surface->draw_dirty,
+                       vram_start[0], vram_start[1], vram_start[2], vram_start[3],
+                       center[0], center[1], center[2], center[3]);
+        }
+    }
+#endif
+
     nv2a_profile_inc_counter(NV2A_PROF_SURF_UPLOAD);
 
     trace_nv2a_pgraph_surface_upload(
@@ -956,9 +1045,36 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     }
 
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* The BGRA→RGBA format substitution (see surface_get_current_surface) stores
+     * CPU-written VRAM bytes [B,G,R,A] as [R,G,B,A] via GL_RGBA+GL_UNSIGNED_BYTE,
+     * swapping R and B.  Correct by swapping bytes 0 and 2 of each pixel so that
+     * the sampled texture has correct channel order. This only affects CPU-written
+     * surfaces (upload_pending=true); GPU-rendered FBO content is already RGBA-correct
+     * and does not go through this upload path. */
+    if (surface->fmt.gl_format == GL_RGBA &&
+        surface->fmt.gl_type == GL_UNSIGNED_BYTE &&
+        surface->fmt.bytes_per_pixel == 4 &&
+        gl_read_buf != NULL) {
+        uint8_t *swapped = g_malloc(width * height * 4);
+        for (unsigned int i = 0; i < width * height; i++) {
+            swapped[i*4+0] = gl_read_buf[i*4+2]; /* B_vram → R slot */
+            swapped[i*4+1] = gl_read_buf[i*4+1]; /* G unchanged */
+            swapped[i*4+2] = gl_read_buf[i*4+0]; /* R_vram → B slot */
+            swapped[i*4+3] = gl_read_buf[i*4+3]; /* A unchanged */
+        }
+        glTexImage2D(GL_TEXTURE_2D, 0, surface->fmt.gl_internal_format, width,
+                     height, 0, surface->fmt.gl_format, surface->fmt.gl_type, swapped);
+        g_free(swapped);
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, surface->fmt.gl_internal_format, width,
+                     height, 0, surface->fmt.gl_format, surface->fmt.gl_type, gl_read_buf);
+    }
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, surface->fmt.gl_internal_format, width,
                  height, 0, surface->fmt.gl_format, surface->fmt.gl_type,
                  gl_read_buf);
+#endif
     glPixelStorei(GL_UNPACK_ALIGNMENT, prev_unpack_alignment);
     if (optimal_buf != buf) {
         g_free(optimal_buf);
@@ -1027,6 +1143,24 @@ static void populate_surface_binding_entry_sized(NV2AState *d, bool color,
                     pg->surface_shape.color_format);
             abort();
         }
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* GLES 3.0 does not support GL_BGRA as an external format or
+         * GL_UNSIGNED_INT_8_8_8_8_REV / GL_UNSIGNED_SHORT_1_5_5_5_REV.
+         * Remap to the closest supported combination so framebuffers complete.
+         * R and B channels will be swapped visually but rendering won't crash. */
+        if (fmt.gl_format == GL_BGRA) {
+            fmt.gl_format = GL_RGBA;
+            if (fmt.gl_type == GL_UNSIGNED_INT_8_8_8_8_REV) {
+                fmt.gl_type = GL_UNSIGNED_BYTE;
+            }
+        }
+        if (fmt.gl_type == GL_UNSIGNED_SHORT_1_5_5_5_REV) {
+            fmt.gl_type = GL_UNSIGNED_SHORT_5_5_5_1;
+        }
+        if (fmt.gl_type == GL_UNSIGNED_SHORT_4_4_4_4_REV) {
+            fmt.gl_type = GL_UNSIGNED_SHORT_4_4_4_4;
+        }
+#endif
     } else {
         surface = &pg->surface_zeta;
         dma_address = pg->dma_zeta;
@@ -1268,8 +1402,23 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
 
         glFramebufferTexture2D(GL_FRAMEBUFFER, entry.fmt.gl_attachment,
                                GL_TEXTURE_2D, found->gl_buffer, 0);
+#if defined(__ANDROID__) || defined(ANDROID)
+        {
+            GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
+                fprintf(stderr,
+                        "nv2a: framebuffer incomplete: 0x%x"
+                        " (color=%d fmt.gl_internal=0x%x"
+                        " fmt.gl_format=0x%x fmt.gl_type=0x%x)\n",
+                        fb_status, (int)color,
+                        entry.fmt.gl_internal_format,
+                        entry.fmt.gl_format, entry.fmt.gl_type);
+            }
+        }
+#else
         assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
                GL_FRAMEBUFFER_COMPLETE);
+#endif
 
         surface->buffer_dirty = false;
     }

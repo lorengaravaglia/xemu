@@ -20,12 +20,19 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/timer.h"
 #include "hw/display/vga_int.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/util.h"
 #include "renderer.h"
 
 #include <math.h>
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#define ALOGI_DISP(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
+#else
+#define ALOGI_DISP(...) ((void)0)
+#endif
 
 void pgraph_gl_init_display(NV2AState *d)
 {
@@ -103,7 +110,16 @@ void pgraph_gl_init_display(NV2AState *d)
     glBufferData(GL_ARRAY_BUFFER, 0, NULL, GL_STATIC_DRAW);
     glGenFramebuffers(1, &r->disp_rndr.fbo);
     glGenTextures(1, &r->disp_rndr.pvideo_tex);
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        GLenum _err = glGetError();
+        if (_err != GL_NO_ERROR) {
+            fprintf(stderr, "pgraph_gl_init_display: GL error 0x%x\n", _err);
+        }
+    }
+#else
     assert(glGetError() == GL_NO_ERROR);
+#endif
 
     glo_set_current(g_nv2a_context_render);
 }
@@ -178,7 +194,27 @@ static void render_display_pvideo_overlay(NV2AState *d)
     // implicit stop.
     bool enabled = (d->pvideo.regs[NV_PVIDEO_BUFFER] & NV_PVIDEO_BUFFER_0_USE)
         && d->pvideo.regs[NV_PVIDEO_SIZE_IN] != 0xFFFFFFFF;
-    glUniform1ui(r->disp_rndr.pvideo_enable_loc, enabled);
+    glUniform1i(r->disp_rndr.pvideo_enable_loc, enabled ? 1 : 0);
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        static bool s_pvideo_last_enabled = false;
+        static int s_pvideo_log_count = 0;
+        if (enabled != s_pvideo_last_enabled || (enabled && s_pvideo_log_count % 30 == 0)) {
+            ALOGI_DISP("pvideo_overlay: enabled=%d buf=0x%x size_in=0x%x size_out=0x%x "
+                       "fmt=0x%x base=0x%x offset=0x%x enable_loc=%d",
+                       (int)enabled,
+                       (unsigned)d->pvideo.regs[NV_PVIDEO_BUFFER],
+                       (unsigned)d->pvideo.regs[NV_PVIDEO_SIZE_IN],
+                       (unsigned)d->pvideo.regs[NV_PVIDEO_SIZE_OUT],
+                       (unsigned)d->pvideo.regs[NV_PVIDEO_FORMAT],
+                       (unsigned)d->pvideo.regs[NV_PVIDEO_BASE],
+                       (unsigned)d->pvideo.regs[NV_PVIDEO_OFFSET],
+                       r->disp_rndr.pvideo_enable_loc);
+            s_pvideo_last_enabled = enabled;
+        }
+        if (enabled) { s_pvideo_log_count++; }
+    }
+#endif
     if (!enabled) {
         return;
     }
@@ -239,8 +275,8 @@ static void render_display_pvideo_overlay(NV2AState *d)
 
     unsigned int color_key_enabled =
         GET_MASK(d->pvideo.regs[NV_PVIDEO_FORMAT], NV_PVIDEO_FORMAT_DISPLAY);
-    glUniform1ui(r->disp_rndr.pvideo_color_key_enable_loc,
-                 color_key_enabled);
+    glUniform1i(r->disp_rndr.pvideo_color_key_enable_loc,
+                color_key_enabled ? 1 : 0);
 
     unsigned int color_key = d->pvideo.regs[NV_PVIDEO_COLOR_KEY] & 0xFFFFFF;
     glUniform3f(r->disp_rndr.pvideo_color_key_loc,
@@ -336,13 +372,33 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
         GL_TEXTURE_2D, r->gl_display_buffer, 0);
     GLenum DrawBuffers[1] = {GL_COLOR_ATTACHMENT0};
     glDrawBuffers(1, DrawBuffers);
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        GLenum disp_fbo_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (disp_fbo_status != GL_FRAMEBUFFER_COMPLETE) {
+            ALOGI_DISP("render_display: FBO incomplete 0x%x "
+                       "(disp_buf=%u ifmt=0x%x fmt=0x%x type=0x%x)",
+                       (unsigned)disp_fbo_status,
+                       r->gl_display_buffer,
+                       (unsigned)r->gl_display_buffer_internal_format,
+                       (unsigned)r->gl_display_buffer_format,
+                       (unsigned)r->gl_display_buffer_type);
+        }
+    }
+#else
     assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+#endif
 
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
     glBindVertexArray(r->disp_rndr.vao);
     glBindBuffer(GL_ARRAY_BUFFER, r->disp_rndr.vbo);
     glUseProgram(r->disp_rndr.prog);
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* glProgramUniform1i requires GLES 3.1+; use glUniform1i since glUseProgram is already called */
+    glUniform1i(r->disp_rndr.tex_loc, 0);
+#else
     glProgramUniform1i(r->disp_rndr.prog, r->disp_rndr.tex_loc, 0);
+#endif
     glUniform2f(r->disp_rndr.display_size_loc, width, height);
     glUniform1f(r->disp_rndr.line_offset_loc, line_offset);
     render_display_pvideo_overlay(d);
@@ -354,7 +410,9 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
+#if !defined(__ANDROID__) && !defined(ANDROID)
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+#endif
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -368,7 +426,13 @@ static void gl_fence(void)
     GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     int result = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT,
                                          (GLuint64)(5000000000));
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (result != GL_CONDITION_SATISFIED && result != GL_ALREADY_SIGNALED) {
+        ALOGI_DISP("gl_fence: glClientWaitSync returned 0x%x (timeout or error), continuing", result);
+    }
+#else
     assert(result == GL_CONDITION_SATISFIED || result == GL_ALREADY_SIGNALED);
+#endif
     glDeleteSync(fence);
 }
 
@@ -378,6 +442,18 @@ void pgraph_gl_sync(NV2AState *d)
     d->vga.get_params(&d->vga, &vga_display_params);
 
     SurfaceBinding *surface = pgraph_gl_surface_get_within(d, d->pcrtc.start + vga_display_params.line_offset);
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        PGRAPHGLState *r_s = d->pgraph.gl_renderer_state;
+        ALOGI_DISP("pgraph_gl_sync: pcrtc.start=0x%x surface=%p "
+                   "color_binding=%p color_vram=0x%x draw_dirty=%d upload_pending=%d",
+                   (unsigned)d->pcrtc.start, (void*)surface,
+                   (void*)(r_s ? r_s->color_binding : NULL),
+                   (r_s && r_s->color_binding) ? (unsigned)r_s->color_binding->vram_addr : 0,
+                   (r_s && r_s->color_binding) ? (int)r_s->color_binding->draw_dirty : -1,
+                   surface ? (int)surface->upload_pending : -1);
+    }
+#endif
     if (surface == NULL || !surface->color || !surface->width || !surface->height) {
         qemu_event_set(&d->pgraph.sync_complete);
         return;
@@ -386,15 +462,153 @@ void pgraph_gl_sync(NV2AState *d)
     /* FIXME: Sanity check surface dimensions */
 
     /* Wait for queued commands to complete */
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        int64_t _t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        pgraph_gl_upload_surface_data(d, surface, !tcg_enabled());
+        int64_t _dt = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - _t0;
+        if (_dt > 50) {
+            ALOGI_DISP("pgraph_gl_sync: upload_surface_data took %"PRId64"ms", _dt);
+        }
+    }
+    {
+        int64_t _t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        gl_fence();
+        int64_t _dt = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - _t0;
+        if (_dt > 50) {
+            ALOGI_DISP("pgraph_gl_sync: gl_fence#1 took %"PRId64"ms", _dt);
+        }
+    }
+    {
+        GLenum _err = glGetError();
+        if (_err != GL_NO_ERROR) {
+            ALOGI_DISP("pgraph_gl_sync: GL error 0x%x after upload+fence, continuing",
+                  (unsigned)_err);
+            while (glGetError() != GL_NO_ERROR) {} /* drain */
+        }
+    }
+#else
     pgraph_gl_upload_surface_data(d, surface, !tcg_enabled());
     gl_fence();
     assert(glGetError() == GL_NO_ERROR);
+#endif
 
     /* Render framebuffer in display context */
-    glo_set_current(g_nv2a_context_display);
+    {
+#if defined(__ANDROID__) || defined(ANDROID)
+        int64_t _t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+#endif
+        glo_set_current(g_nv2a_context_display);
+#if defined(__ANDROID__) || defined(ANDROID)
+        int64_t _dt = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - _t0;
+        if (_dt > 50) {
+            ALOGI_DISP("pgraph_gl_sync: glo_set_current(display) took %"PRId64"ms", _dt);
+        }
+    }
+#endif
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Before render_display: sample center pixel of surface->gl_buffer
+     * to determine whether NV2A has rendered any content into the surface. */
+    {
+        PGRAPHGLState *r_pre = d->pgraph.gl_renderer_state;
+        static int s_pre_count = 0;
+        if (++s_pre_count <= 3000 && s_pre_count % 10 == 1) {
+            unsigned int vw = 0, vh = 0;
+            VGADisplayParams vdp2;
+            d->vga.get_resolution(&d->vga, (int*)&vw, (int*)&vh);
+            d->vga.get_params(&d->vga, &vdp2);
+            int lo = vdp2.line_offset ? (int)(surface->pitch / vdp2.line_offset) : 1;
+
+            GLuint tmp_fbo2;
+            glGenFramebuffers(1, &tmp_fbo2);
+            glBindFramebuffer(GL_FRAMEBUFFER, tmp_fbo2);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, surface->gl_buffer, 0);
+            unsigned char px2[4] = {0};
+            unsigned char px_upper[4] = {0};  /* upper-center ~25% down */
+            unsigned char px_logo[4] = {0};   /* ~33% from left, 40% from top */
+            GLenum fbo2_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if (fbo2_status == GL_FRAMEBUFFER_COMPLETE) {
+                glReadPixels((GLint)(surface->width / 2), (GLint)(surface->height / 2),
+                             1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px2);
+                glReadPixels((GLint)(surface->width / 2), (GLint)(surface->height / 4),
+                             1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px_upper);
+                glReadPixels((GLint)(surface->width / 3), (GLint)(surface->height * 2 / 5),
+                             1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px_logo);
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &tmp_fbo2);
+            ALOGI_DISP("pre-render: surface->gl_buffer=%u %dx%d fmt=0x%x "
+                       "fbo_status=0x%x center_px=(%d,%d,%d,%d) "
+                       "upper_px=(%d,%d,%d,%d) logo_px=(%d,%d,%d,%d) "
+                       "vga=%ux%u lo=%d disp_prog=%u",
+                       surface->gl_buffer, surface->width, surface->height,
+                       (unsigned)surface->fmt.gl_format,
+                       (unsigned)fbo2_status,
+                       px2[0], px2[1], px2[2], px2[3],
+                       px_upper[0], px_upper[1], px_upper[2], px_upper[3],
+                       px_logo[0], px_logo[1], px_logo[2], px_logo[3],
+                       vw, vh, lo, r_pre->disp_rndr.prog);
+        }
+    }
+#endif
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        int64_t _t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        render_display(d, surface);
+        int64_t _dt = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - _t0;
+        if (_dt > 50) {
+            ALOGI_DISP("pgraph_gl_sync: render_display took %"PRId64"ms", _dt);
+        }
+    }
+    {
+        int64_t _t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        gl_fence();
+        int64_t _dt = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - _t0;
+        if (_dt > 50) {
+            ALOGI_DISP("pgraph_gl_sync: gl_fence#2 took %"PRId64"ms", _dt);
+        }
+    }
+    {
+        GLenum _err2 = glGetError();
+        if (_err2 != GL_NO_ERROR) {
+            ALOGI_DISP("pgraph_gl_sync: GL error 0x%x after render_display+fence",
+                       (unsigned)_err2);
+            while (glGetError() != GL_NO_ERROR) {}
+        }
+    }
+#else
     render_display(d, surface);
     gl_fence();
     assert(glGetError() == GL_NO_ERROR);
+#endif
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Sample center pixel of gl_display_buffer to detect black output */
+    {
+        PGRAPHGLState *r2 = d->pgraph.gl_renderer_state;
+        static int s_sync_count = 0;
+        if (++s_sync_count <= 3000 && s_sync_count % 10 == 1) {
+            /* Read from the display buffer via a temp FBO */
+            GLuint tmp_fbo;
+            glGenFramebuffers(1, &tmp_fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, tmp_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, r2->gl_display_buffer, 0);
+            unsigned char px[4] = {0};
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+                glReadPixels(r2->gl_display_buffer_width/2,
+                             r2->gl_display_buffer_height/2,
+                             1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &tmp_fbo);
+            ALOGI_DISP("pgraph_gl_sync: display_buffer=%u %dx%d center_pixel=(%d,%d,%d,%d)",
+                       r2->gl_display_buffer,
+                       r2->gl_display_buffer_width, r2->gl_display_buffer_height,
+                       px[0], px[1], px[2], px[3]);
+        }
+    }
+#endif
 
     /* Switch back to original context */
     glo_set_current(g_nv2a_context_render);
@@ -416,6 +630,12 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d)
 
     SurfaceBinding *surface = pgraph_gl_surface_get_within(
         d, d->pcrtc.start + vga_display_params.line_offset);
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI_DISP("get_framebuffer_surface: pcrtc.start=0x%x surface=%p color=%d fmt=0x%x",
+          (unsigned)d->pcrtc.start, (void*)surface,
+          surface ? (int)surface->color : -1,
+          surface ? (unsigned)surface->fmt.gl_format : 0);
+#endif
     if (surface == NULL || !surface->color) {
         qemu_mutex_unlock(&d->pfifo.lock);
         return 0;
@@ -434,7 +654,13 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d)
     qatomic_set(&pg->sync_pending, true);
     pfifo_kick(d);
     qemu_mutex_unlock(&d->pfifo.lock);
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI_DISP("get_framebuffer_surface: waiting for sync_complete...");
+#endif
     qemu_event_wait(&d->pgraph.sync_complete);
+#if defined(__ANDROID__) || defined(ANDROID)
+    ALOGI_DISP("get_framebuffer_surface: sync_complete received, returning %d", r->gl_display_buffer);
+#endif
 
     return r->gl_display_buffer;
 }

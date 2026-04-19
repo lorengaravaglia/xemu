@@ -20,6 +20,12 @@
  */
 
 #include "nv2a_int.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#define ALOGI_PFIFO(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
+#else
+#define ALOGI_PFIFO(...) ((void)0)
+#endif
 
 typedef struct RAMHTEntry {
     uint32_t handle;
@@ -129,8 +135,19 @@ static bool pfifo_stall_for_flip(NV2AState *d)
     if (qatomic_read(&d->pgraph.waiting_for_flip)) {
         qemu_mutex_lock(&d->pgraph.lock);
         if (!is_flip_stall_complete(d)) {
+            static unsigned s_stall_count = 0;
+            s_stall_count++;
+            if (s_stall_count <= 3 || s_stall_count % 1000 == 0) {
+                ALOGI_PFIFO("pfifo: stalling for flip #%u (READ_3D=%u WRITE_3D=%u)",
+                    s_stall_count,
+                    (unsigned)GET_MASK(pgraph_reg_r(&d->pgraph, NV_PGRAPH_SURFACE),
+                                       NV_PGRAPH_SURFACE_READ_3D),
+                    (unsigned)GET_MASK(pgraph_reg_r(&d->pgraph, NV_PGRAPH_SURFACE),
+                                       NV_PGRAPH_SURFACE_WRITE_3D));
+            }
             should_stall = true;
         } else {
+            ALOGI_PFIFO("pfifo: flip stall complete");
             d->pgraph.waiting_for_flip = false;
         }
         qemu_mutex_unlock(&d->pgraph.lock);
@@ -291,10 +308,28 @@ static void pfifo_run_pusher(NV2AState *d)
     hwaddr dma_len;
     uint8_t *dma = nv_dma_map(d, dma_instance, &dma_len);
 
+    if (pfifo_pusher_should_stall(d)) {
+        static unsigned s_pusher_stall_count = 0;
+        s_pusher_stall_count++;
+        if (s_pusher_stall_count <= 3 || s_pusher_stall_count % 1000 == 0) {
+            ALOGI_PFIFO("pfifo: pusher blocked #%u (waiting_for_nop=%d can_fifo=%d)",
+                s_pusher_stall_count,
+                (int)qatomic_read(&d->pgraph.waiting_for_nop),
+                (int)can_fifo_access(d));
+        }
+    }
+
     while (!pfifo_pusher_should_stall(d)) {
         uint32_t dma_get_v = *dma_get;
         uint32_t dma_put_v = *dma_put;
-        if (dma_get_v == dma_put_v) break;
+        if (dma_get_v == dma_put_v) {
+            static unsigned s_empty_count = 0;
+            s_empty_count++;
+            if (s_empty_count <= 3 || s_empty_count % 1000 == 0) {
+                ALOGI_PFIFO("pfifo: pusher idle (dma_get=dma_put=0x%x) #%u", dma_get_v, s_empty_count);
+            }
+            break;
+        }
         if (dma_get_v >= dma_len) {
             assert(false);
             SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR,
@@ -340,6 +375,17 @@ static void pfifo_run_pusher(NV2AState *d)
                                  MIN(method_count, num_words_available),
                                  num_words_available);
             if (num_words_processed < 0) {
+                static unsigned s_puller_stall_count = 0;
+                s_puller_stall_count++;
+                if (s_puller_stall_count <= 3 || s_puller_stall_count % 1000 == 0) {
+                    ALOGI_PFIFO("pfifo: puller stalled #%u (waiting_for_nop=%d waiting_for_flip=%d can_fifo=%d) method=0x%x dma_get=0x%x",
+                        s_puller_stall_count,
+                        (int)qatomic_read(&d->pgraph.waiting_for_nop),
+                        (int)qatomic_read(&d->pgraph.waiting_for_flip),
+                        (int)can_fifo_access(d),
+                        (unsigned)method,
+                        (unsigned)(*dma_get));
+                }
                 break;
             }
 

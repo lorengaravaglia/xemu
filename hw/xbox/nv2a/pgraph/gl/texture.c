@@ -20,6 +20,9 @@
  */
 
 #include "qemu/fast-hash.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#endif
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "hw/xbox/nv2a/pgraph/s3tc.h"
@@ -152,8 +155,11 @@ static void apply_texture_parameters(PGRAPHGLState *r,
     }
     if (lod_bias != binding->lod_bias) {
         binding->lod_bias = lod_bias;
+#if !defined(__ANDROID__) && !defined(ANDROID)
+        /* GL_TEXTURE_LOD_BIAS is not available in GLES 3.0 */
         glTexParameterf(binding->gl_target, GL_TEXTURE_LOD_BIAS,
                         pgraph_convert_lod_bias_to_float(lod_bias));
+#endif
     }
 
     /* Texture wrapping */
@@ -193,8 +199,11 @@ static void apply_texture_parameters(PGRAPHGLState *r,
             /* FIXME: Color channels might be wrong order */
             GLfloat gl_border_color[4];
             pgraph_argb_pack32_to_rgba_float(border_color, gl_border_color);
+#if !defined(__ANDROID__) && !defined(ANDROID)
+            /* GL_TEXTURE_BORDER_COLOR requires GLES 3.2 */
             glTexParameterfv(binding->gl_target, GL_TEXTURE_BORDER_COLOR,
                              gl_border_color);
+#endif
 
             binding->border_color_set = true;
             binding->border_color = border_color;
@@ -217,7 +226,10 @@ void pgraph_gl_bind_textures(NV2AState *d)
         glActiveTexture(GL_TEXTURE0 + i);
         if (!enabled) {
             glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+#if !defined(__ANDROID__) && !defined(ANDROID)
+            /* GL_TEXTURE_1D does not exist in GLES 3.0 */
             glBindTexture(GL_TEXTURE_1D, 0);
+#endif
             glBindTexture(GL_TEXTURE_2D, 0);
             glBindTexture(GL_TEXTURE_3D, 0);
             continue;
@@ -421,6 +433,59 @@ gl_internal_format_to_s3tc_enum(GLint gl_internal_format)
     }
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/* Expand A4R4G4B4 (16-bit, little-endian ARGB nibble order) to RGBA8.
+ * The Android code path replaces GL_UNSIGNED_SHORT_4_4_4_4_REV with
+ * GL_UNSIGNED_SHORT_4_4_4_4, which completely scrambles the nibble order
+ * (alpha ends up reading the blue nibble).  Instead, expand manually so
+ * each channel lands in the correct RGBA8 position. */
+static uint8_t *expand_a4r4g4b4_to_rgba8(const uint8_t *src, size_t pixel_count)
+{
+    uint8_t *dst = (uint8_t *)g_malloc(pixel_count * 4);
+    for (size_t i = 0; i < pixel_count; i++) {
+        /* 16-bit little-endian: byte[0]=G[7:4]B[3:0], byte[1]=A[7:4]R[3:0] */
+        uint8_t lo = src[i * 2];
+        uint8_t hi = src[i * 2 + 1];
+        uint8_t a4 = (hi >> 4) & 0xF;
+        uint8_t r4 = (hi >> 0) & 0xF;
+        uint8_t g4 = (lo >> 4) & 0xF;
+        uint8_t b4 = (lo >> 0) & 0xF;
+        /* Expand each 4-bit nibble to 8-bit by replication (0xF→0xFF, 0x0→0x00) */
+        dst[i * 4 + 0] = r4 | (r4 << 4);
+        dst[i * 4 + 1] = g4 | (g4 << 4);
+        dst[i * 4 + 2] = b4 | (b4 << 4);
+        dst[i * 4 + 3] = a4 | (a4 << 4);
+    }
+    return dst;
+}
+
+/* Expand single-channel A8 data to RGBA8 with data in alpha channel.
+ * Works around a GLES driver bug where GL_TEXTURE_SWIZZLE_A = GL_RED on a
+ * GL_R8 texture silently fails, causing texture.a to always return 1.0
+ * (the GL_R8 default for the missing alpha component) instead of the stored
+ * value.  The font glyph alpha mask becomes all-opaque, rendering solid
+ * colored boxes instead of correctly shaped letter glyphs. */
+static uint8_t *expand_a8_to_rgba8(const uint8_t *src, size_t pixel_count)
+{
+    /* Log first few pixels so we can verify the A8 data is non-trivial */
+    {
+        size_t n = pixel_count < 16 ? pixel_count : 16;
+        char buf[64]; int pos = 0;
+        for (size_t k = 0; k < n; k++) pos += snprintf(buf+pos, sizeof(buf)-pos, "%u ", src[k]);
+        __android_log_print(ANDROID_LOG_INFO, "xemu-tex",
+            "expand_a8 px_count=%zu first_bytes: %s", pixel_count, buf);
+    }
+    uint8_t *dst = (uint8_t *)g_malloc(pixel_count * 4);
+    for (size_t i = 0; i < pixel_count; i++) {
+        dst[i * 4 + 0] = 0xFF;   /* R = white */
+        dst[i * 4 + 1] = 0xFF;   /* G = white */
+        dst[i * 4 + 2] = 0xFF;   /* B = white */
+        dst[i * 4 + 3] = src[i]; /* A = original A8 value */
+    }
+    return dst;
+}
+#endif
+
 static void upload_gl_texture(GLenum gl_target,
                               const TextureShape s,
                               const uint8_t *texture_data,
@@ -428,6 +493,87 @@ static void upload_gl_texture(GLenum gl_target,
 {
     ColorFormatInfo f = kelvin_color_format_gl_map[s.color_format];
     nv2a_profile_inc_counter(NV2A_PROF_TEX_UPLOAD);
+
+    /* GLES 3.0 does not support GL_BGRA as an external format, and does not
+     * have GL_UNSIGNED_INT_8_8_8_8_REV or GL_UNSIGNED_INT_8_8_8_8.
+     * On little-endian ARM, GL_RGBA/GL_UNSIGNED_INT_8_8_8_8_REV is byte-
+     * identical to GL_RGBA/GL_UNSIGNED_BYTE, so the substitution is lossless.
+     * GL_BGRA → GL_RGBA causes an R/B swap that will be corrected by the
+     * texture swizzle masks already present in kelvin_color_format_gl_map. */
+#if defined(__ANDROID__) || defined(ANDROID)
+    GLenum tex_gl_format = f.gl_format;
+    GLenum tex_gl_type   = f.gl_type;
+    if (tex_gl_format == GL_BGRA) {
+        tex_gl_format = GL_RGBA;
+        /* GLES 3.0 requires the internal format's base format to match the
+         * external format.  GL_RGB8 / GL_RGB5 have base format GL_RGB, which
+         * is incompatible with GL_RGBA — glTexImage2D would silently fail
+         * (GL_INVALID_OPERATION).  Upgrade to GL_RGBA8 so the call succeeds.
+         * (X8R8G8B8 textures end up with alpha from the unused X byte.) */
+        if (f.gl_internal_format == GL_RGB8 ||
+            f.gl_internal_format == GL_RGB5) {
+            f.gl_internal_format = GL_RGBA8;
+        }
+    }
+    if (tex_gl_type == GL_UNSIGNED_INT_8_8_8_8_REV ||
+        tex_gl_type == GL_UNSIGNED_INT_8_8_8_8) {
+        tex_gl_type = GL_UNSIGNED_BYTE;
+    }
+    if (tex_gl_type == GL_UNSIGNED_SHORT_1_5_5_5_REV) {
+        tex_gl_type = GL_UNSIGNED_SHORT_5_5_5_1;
+    }
+    /* Detect A4R4G4B4 before type substitution so we can expand manually.
+     * GL_UNSIGNED_SHORT_4_4_4_4_REV is not valid in GLES 3.0 and replacing
+     * it with GL_UNSIGNED_SHORT_4_4_4_4 scrambles the nibble order: the alpha
+     * channel ends up receiving the blue nibble.  Expand to RGBA8 instead. */
+    bool is_a4r4g4b4_expand = (f.gl_internal_format == GL_RGBA4 &&
+                                f.gl_type == GL_UNSIGNED_SHORT_4_4_4_4_REV);
+    if (is_a4r4g4b4_expand) {
+        f.gl_internal_format = GL_RGBA8;
+        tex_gl_format = GL_RGBA;
+        tex_gl_type = GL_UNSIGNED_BYTE;
+        f.gl_swizzle_mask[0] = f.gl_swizzle_mask[1] =
+        f.gl_swizzle_mask[2] = f.gl_swizzle_mask[3] = 0;
+    } else if (tex_gl_type == GL_UNSIGNED_SHORT_4_4_4_4_REV) {
+        tex_gl_type = GL_UNSIGNED_SHORT_4_4_4_4;
+    }
+    /* Detect A8-style formats (SZ_A8, LU_IMAGE_A8) where the stored single
+     * byte is the alpha value but is uploaded as GL_R8.  GL_TEXTURE_SWIZZLE_A
+     * = GL_RED is supposed to redirect .a reads to the R channel, but some
+     * GLES drivers silently ignore the alpha swizzle and return 1.0 for .a
+     * on GL_R8 textures.  Work around by expanding data to RGBA8 at upload
+     * time so the alpha ends up in the native .a position. */
+    bool is_a8_expand = (f.gl_format == GL_RED &&
+                         f.gl_swizzle_mask[0] == GL_ONE &&
+                         f.gl_swizzle_mask[3] == GL_RED);
+    if (is_a8_expand) {
+        tex_gl_format = GL_RGBA;
+        f.gl_internal_format = GL_RGBA8;
+        /* Alpha is now in the correct channel — no swizzle needed. */
+        f.gl_swizzle_mask[0] = f.gl_swizzle_mask[1] =
+        f.gl_swizzle_mask[2] = f.gl_swizzle_mask[3] = 0;
+    }
+    /* Always log A8 expansions; log first 500 uploads for general diagnosis. */
+    if (is_a8_expand) {
+        __android_log_print(ANDROID_LOG_INFO, "xemu-tex",
+            "TEX-A8 color_fmt=0x%x w=%u h=%u gl_int=0x%x gl_fmt=0x%x",
+            (unsigned)s.color_format, s.width, s.height,
+            (unsigned)f.gl_internal_format, (unsigned)tex_gl_format);
+    } else {
+        static int tex_log_cnt = 0;
+        if (tex_log_cnt < 500) {
+            __android_log_print(ANDROID_LOG_INFO, "xemu-tex",
+                "TEX[%d] color_fmt=0x%x w=%u h=%u gl_int=0x%x gl_fmt=0x%x",
+                tex_log_cnt++, (unsigned)s.color_format,
+                s.width, s.height,
+                (unsigned)f.gl_internal_format, (unsigned)tex_gl_format);
+        }
+    }
+#else
+    bool is_a8_expand = false;
+    GLenum tex_gl_format = f.gl_format;
+    GLenum tex_gl_type   = f.gl_type;
+#endif
 
     unsigned int adjusted_width = s.width;
     unsigned int adjusted_height = s.height;
@@ -452,15 +598,35 @@ static void upload_gl_texture(GLenum gl_target,
             uint8_t *converted = pgraph_convert_texture_data(
                 s, texture_data, palette_data, adjusted_width, adjusted_height, 1,
                 adjusted_pitch, 0, NULL);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH,
-                          converted ? 0 : adjusted_pitch / f.bytes_per_pixel);
-            glTexImage2D(GL_TEXTURE_2D, 0, f.gl_internal_format,
-                         adjusted_width, adjusted_height, 0,
-                         f.gl_format, f.gl_type,
-                         converted ? converted : texture_data);
-
-            if (converted) {
-              g_free(converted);
+            if (is_a4r4g4b4_expand) {
+                const uint8_t *src = converted ? converted : texture_data;
+                uint8_t *rgba = expand_a4r4g4b4_to_rgba8(src,
+                                    (size_t)adjusted_width * adjusted_height);
+                if (converted) { g_free(converted); }
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                glTexImage2D(GL_TEXTURE_2D, 0, f.gl_internal_format,
+                             adjusted_width, adjusted_height, 0,
+                             tex_gl_format, tex_gl_type, rgba);
+                g_free(rgba);
+            } else if (is_a8_expand) {
+                /* A8 workaround: expand single-channel to RGBA8 (alpha in .a) */
+                const uint8_t *src = converted ? converted : texture_data;
+                uint8_t *rgba = expand_a8_to_rgba8(src,
+                                    (size_t)adjusted_width * adjusted_height);
+                if (converted) { g_free(converted); }
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                glTexImage2D(GL_TEXTURE_2D, 0, f.gl_internal_format,
+                             adjusted_width, adjusted_height, 0,
+                             tex_gl_format, tex_gl_type, rgba);
+                g_free(rgba);
+            } else {
+                glPixelStorei(GL_UNPACK_ROW_LENGTH,
+                              converted ? 0 : adjusted_pitch / f.bytes_per_pixel);
+                glTexImage2D(GL_TEXTURE_2D, 0, f.gl_internal_format,
+                             adjusted_width, adjusted_height, 0,
+                             tex_gl_format, tex_gl_type,
+                             converted ? converted : texture_data);
+                if (converted) { g_free(converted); }
             }
 
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
@@ -508,7 +674,7 @@ static void upload_gl_texture(GLenum gl_target,
                 }
 
                 glTexImage2D(gl_target, level, GL_RGBA, tex_width, tex_height, 0,
-                             GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, converted);
+                             GL_RGBA, GL_UNSIGNED_BYTE, converted);
                 g_free(converted);
                 if (s.cubemap && adjusted_width != s.width) {
                     glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
@@ -541,9 +707,26 @@ static void upload_gl_texture(GLenum gl_target,
                     pixel_data += 4 * f.bytes_per_pixel + 4 * pitch;
                 }
 
-                glTexImage2D(gl_target, level, f.gl_internal_format, tex_width,
-                             tex_height, 0, f.gl_format, f.gl_type,
-                             pixel_data);
+                if (is_a4r4g4b4_expand) {
+                    uint8_t *rgba = expand_a4r4g4b4_to_rgba8(pixel_data,
+                                        (size_t)tex_width * tex_height);
+                    glTexImage2D(gl_target, level, f.gl_internal_format,
+                                 tex_width, tex_height, 0,
+                                 tex_gl_format, tex_gl_type, rgba);
+                    g_free(rgba);
+                } else if (is_a8_expand) {
+                    /* A8 workaround: expand single-channel to RGBA8 */
+                    uint8_t *rgba = expand_a8_to_rgba8(pixel_data,
+                                        (size_t)tex_width * tex_height);
+                    glTexImage2D(gl_target, level, f.gl_internal_format,
+                                 tex_width, tex_height, 0,
+                                 tex_gl_format, tex_gl_type, rgba);
+                    g_free(rgba);
+                } else {
+                    glTexImage2D(gl_target, level, f.gl_internal_format,
+                                 tex_width, tex_height, 0,
+                                 tex_gl_format, tex_gl_type, pixel_data);
+                }
                 if (s.cubemap && s.border) {
                     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
                 }
@@ -593,7 +776,7 @@ static void upload_gl_texture(GLenum gl_target,
 
                 glTexImage3D(gl_target, level,  GL_RGBA8,
                              width, height, depth, 0,
-                             GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                             GL_RGBA, GL_UNSIGNED_BYTE,
                              converted);
 
                 g_free(converted);
@@ -616,7 +799,7 @@ static void upload_gl_texture(GLenum gl_target,
 
                 glTexImage3D(gl_target, level, f.gl_internal_format,
                              width, height, depth, 0,
-                             f.gl_format, f.gl_type,
+                             tex_gl_format, tex_gl_type,
                              converted ? converted : unswizzled);
 
                 if (converted) {
@@ -644,6 +827,21 @@ static TextureBinding* generate_texture(const TextureShape s,
                                         const uint8_t *palette_data)
 {
     ColorFormatInfo f = kelvin_color_format_gl_map[s.color_format];
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* upload_gl_texture() converts GL_BGRA→GL_RGBA for GLES, swapping Xbox_B
+     * into texture.r and Xbox_R into texture.b.  This affects all formats that
+     * use GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV (A8R8G8B8, X8R8G8B8, both SZ
+     * and LU_IMAGE variants).  Apply a corrective swizzle so shaders see the
+     * correct channels.  Excluded: B8G8R8A8 (no REV suffix) and A4R4G4B4
+     * (manually expanded in upload_gl_texture, swizzle reset to 0 there). */
+    if (f.gl_format == GL_BGRA &&
+        f.gl_type == GL_UNSIGNED_INT_8_8_8_8_REV) {
+        f.gl_swizzle_mask[0] = GL_BLUE;
+        f.gl_swizzle_mask[1] = GL_GREEN;
+        f.gl_swizzle_mask[2] = GL_RED;
+        f.gl_swizzle_mask[3] = GL_ALPHA;
+    }
+#endif
 
     /* Create a new opengl texture */
     GLuint gl_texture;
@@ -736,8 +934,17 @@ static TextureBinding* generate_texture(const TextureShape s,
 
     if (f.gl_swizzle_mask[0] != 0 || f.gl_swizzle_mask[1] != 0
         || f.gl_swizzle_mask[2] != 0 || f.gl_swizzle_mask[3] != 0) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* GL_TEXTURE_SWIZZLE_RGBA (set-all-at-once) requires GLES 3.1+;
+         * use individual swizzle params available in GLES 3.0 */
+        glTexParameteri(gl_target, GL_TEXTURE_SWIZZLE_R, f.gl_swizzle_mask[0]);
+        glTexParameteri(gl_target, GL_TEXTURE_SWIZZLE_G, f.gl_swizzle_mask[1]);
+        glTexParameteri(gl_target, GL_TEXTURE_SWIZZLE_B, f.gl_swizzle_mask[2]);
+        glTexParameteri(gl_target, GL_TEXTURE_SWIZZLE_A, f.gl_swizzle_mask[3]);
+#else
         glTexParameteriv(gl_target, GL_TEXTURE_SWIZZLE_RGBA,
                          (const GLint *)f.gl_swizzle_mask);
+#endif
     }
 
     TextureBinding* ret = (TextureBinding *)g_malloc(sizeof(TextureBinding));

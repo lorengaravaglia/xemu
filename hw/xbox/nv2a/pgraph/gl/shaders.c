@@ -29,6 +29,169 @@
 #include "debug.h"
 #include "renderer.h"
 
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#define ALOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
+
+static int g_has_geometry_shaders = -1;
+static int g_gles_minor = -1; /* cached GLES minor version: 0 = 3.0, 1 = 3.1, 2 = 3.2 */
+
+static bool check_geometry_shader_support(void)
+{
+    if (g_has_geometry_shaders == -1) {
+        GLuint test = glCreateShader(GL_GEOMETRY_SHADER);
+        if (test == 0) {
+            glGetError(); /* clear GL_INVALID_ENUM */
+            g_has_geometry_shaders = 0;
+            ALOGI("Geometry shaders not supported (GLES < 3.2), skipping");
+        } else {
+            glDeleteShader(test);
+            g_has_geometry_shaders = 1;
+            ALOGI("Geometry shaders supported");
+        }
+    }
+    return g_has_geometry_shaders == 1;
+}
+
+static int get_gles_minor(void)
+{
+    if (g_gles_minor == -1) {
+        GLint minor = 0;
+        glGetIntegerv(GL_MINOR_VERSION, &minor);
+        g_gles_minor = minor;
+        ALOGI("GLES 3.%d detected", minor);
+    }
+    return g_gles_minor;
+}
+#endif
+
+static void replace_all_gstring(GString *s, const char *from, const char *to) {
+    g_string_replace(s, from, to, 0);
+}
+
+static char *patch_shader_source(const char *src, GLenum type) {
+    if (!src) return NULL;
+
+    const char *p = src;
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    int gles_minor = get_gles_minor();
+    bool gles31 = (gles_minor >= 1);
+    bool gles32 = (gles_minor >= 2);
+    bool is_geom = (type == GL_GEOMETRY_SHADER);
+#endif
+
+    GString *patched = NULL;
+    if (strstr(p, "#version") == p) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* Use the highest version that matches the device capability so that
+         * 'precise' and 'fma' are core features (added in GLSL ES 3.20).
+         * On GLES 3.1 they require GL_EXT_gpu_shader5 which many devices
+         * do not expose, so upgrading to 320 es is the reliable fix. */
+        const char *ver_str;
+        if (gles32) {
+            ver_str = "#version 320 es\n";
+        } else if (gles31) {
+            ver_str = "#version 310 es\n";
+        } else {
+            ver_str = "#version 300 es\n";
+        }
+        patched = g_string_new(ver_str);
+
+        /* Geometry shaders on GLES 3.1 need extension enables for geometry
+         * stage, 'precise', and fma() (all core in GLES 3.2). */
+        if (is_geom && !gles32) {
+            g_string_append(patched,
+                "#extension GL_EXT_geometry_shader : enable\n"
+                "#extension GL_EXT_gpu_shader5 : enable\n");
+        }
+
+        g_string_append(patched, "precision highp float;\nprecision highp int;\n");
+        if (!gles31) {
+            /* bitfieldExtract polyfill: not a built-in until GLSL ES 3.10 */
+            g_string_append(patched,
+                "int bitfieldExtract(int value, int offset, int bits) {\n"
+                "    int mask = (1 << bits) - 1;\n"
+                "    int raw = (value >> offset) & mask;\n"
+                "    int signBit = 1 << (bits - 1);\n"
+                "    return (raw ^ signBit) - signBit;\n"
+                "}\n");
+            /* fma polyfill: not a built-in until GLSL ES 3.10 */
+            g_string_append(patched,
+                "float fma(float a, float b, float c) { return a * b + c; }\n"
+                "vec2  fma(vec2  a, vec2  b, vec2  c) { return a * b + c; }\n"
+                "vec3  fma(vec3  a, vec3  b, vec3  c) { return a * b + c; }\n"
+                "vec4  fma(vec4  a, vec4  b, vec4  c) { return a * b + c; }\n");
+        }
+        if (type == GL_FRAGMENT_SHADER) {
+            /* psh.c shaders declare and use fragColor directly.
+             * display.c/surface.c shaders use out_Color — remap via #define. */
+            if (strstr(p, "fragColor") != NULL) {
+                g_string_append(patched, "#define out_Color fragColor\n");
+            } else {
+                g_string_append(patched,
+                    "#define out_Color fragColor\n"
+                    "layout(location = 0) out vec4 fragColor;\n");
+            }
+        }
+#else
+        patched = g_string_new("#version 300 es\nprecision highp float;\n");
+        if (type == GL_FRAGMENT_SHADER) {
+            g_string_append(patched, "#define out_Color fragColor\nlayout(location = 0) out vec4 fragColor;\n");
+        }
+#endif
+        const char *nl = strchr(p, '\n');
+        if (nl) {
+            g_string_append(patched, nl + 1);
+        } else {
+            g_string_append(patched, p);
+        }
+    } else {
+        patched = g_string_new(src);
+    }
+
+    if (type == GL_FRAGMENT_SHADER) {
+        replace_all_gstring(patched, "layout(location = 0) out vec4 out_Color;", "");
+        replace_all_gstring(patched, "out vec4 out_Color;", "");
+        replace_all_gstring(patched, "textureSize(tex, 0)", "vec2(textureSize(tex, 0))");
+        replace_all_gstring(patched, "textureSize(pvideo_tex, 0)", "vec2(textureSize(pvideo_tex, 0))");
+        replace_all_gstring(patched, "1.0f", "1.0");
+    }
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Fix uint/int type mismatches — GLSL ES strict about these.
+     * uintBitsToFloat() requires genUType; hex literals without 'u' are int. */
+    replace_all_gstring(patched, "floatBitsToUint(t) == 0",  "floatBitsToUint(t) == 0u");
+    replace_all_gstring(patched, "uintBitsToFloat(0x1F800000)", "uintBitsToFloat(0x1F800000u)");
+    replace_all_gstring(patched, "uintBitsToFloat(0x5F800000)", "uintBitsToFloat(0x5F800000u)");
+    replace_all_gstring(patched, "uintBitsToFloat(0xDF800000)", "uintBitsToFloat(0xDF800000u)");
+    replace_all_gstring(patched, "uintBitsToFloat(0x9F800000)", "uintBitsToFloat(0x9F800000u)");
+    /* textureSize() returns ivec2/ivec3; cast to vec2 for float arithmetic */
+    replace_all_gstring(patched, "textureSize(texSamp0, 0)", "vec2(textureSize(texSamp0, 0))");
+    replace_all_gstring(patched, "textureSize(texSamp1, 0)", "vec2(textureSize(texSamp1, 0))");
+    replace_all_gstring(patched, "textureSize(texSamp2, 0)", "vec2(textureSize(texSamp2, 0))");
+    replace_all_gstring(patched, "textureSize(texSamp3, 0)", "vec2(textureSize(texSamp3, 0))");
+    if (!gles32) {
+        /* 'precise' qualifier is core only in GLSL ES 3.20; requires
+         * GL_EXT_gpu_shader5 on 3.10 and is unavailable on 3.00.
+         * Strip it unconditionally on < 3.2 — it is only a precision hint. */
+        replace_all_gstring(patched, "precise ", "");
+    }
+    if (is_geom) {
+        /* GL_OES_geometry_point_size is not universally supported on GLES 3.2
+         * devices. Reading gl_in[].gl_PointSize without it is a compile error.
+         * Remove the passthrough assignment — point size is irrelevant for
+         * triangle geometry shaders and writing gl_PointSize output (without
+         * reading gl_in) is still valid in GLES 3.2 core. */
+        replace_all_gstring(patched,
+            "  gl_PointSize = gl_in[index].gl_PointSize;\n", "");
+    }
+#endif
+
+    return g_string_free(patched, FALSE);
+}
+
 static GLenum get_gl_primitive_mode(enum ShaderPolygonMode polygon_mode, enum ShaderPrimitiveMode primitive_mode)
 {
     switch (primitive_mode) {
@@ -66,8 +229,15 @@ static GLuint create_gl_shader(GLenum gl_shader_type,
 
     NV2A_DPRINTF("compile new %s, code:\n%s\n", name, code);
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    char *patched_code = patch_shader_source(code, gl_shader_type);
+    const char *final_code = patched_code;
+#else
+    const char *final_code = code;
+#endif
+
     GLuint shader = glCreateShader(gl_shader_type);
-    glShaderSource(shader, 1, &code, 0);
+    glShaderSource(shader, 1, &final_code, 0);
     glCompileShader(shader);
 
     /* Check it compiled */
@@ -79,13 +249,50 @@ static GLuint create_gl_shader(GLenum gl_shader_type,
         glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
         log = g_malloc(log_length * sizeof(GLchar));
         glGetShaderInfoLog(shader, log_length, NULL, log);
-        fprintf(stderr, "%s\n\n" "nv2a: %s compilation failed: %s\n", code, name, log);
+        fprintf(stderr, "%s\n\n" "nv2a: %s compilation failed: %s\n", final_code, name, log);
+#if defined(__ANDROID__) || defined(ANDROID)
+        __android_log_print(ANDROID_LOG_FATAL, "xemu-pgraph",
+                            "nv2a: %s compilation failed: %s\nSHADER:\n%.2000s", name, log, final_code);
+#endif
         g_free(log);
 
+#if defined(__ANDROID__) || defined(ANDROID)
+        g_free(patched_code);
+#endif
         NV2A_GL_DGROUP_END();
         abort();
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Log texture-sampling fragment shaders: emit the first texture() call
+     * site and everything after (the combiner logic), up to 2000 chars.
+     * Also emit the last 500 chars (final output assignment). */
+    if (gl_shader_type == GL_FRAGMENT_SHADER) {
+        /* Match any texture sampling: texture(), textureProj(), or texSamp */
+        const char *tex_site = strstr(final_code, "texSamp");
+        if (tex_site) {
+            static int frag_tex_cnt = 0;
+            if (frag_tex_cnt < 80) {
+                int n = frag_tex_cnt++;
+                /* Find first actual sampling call for anchor */
+                const char *call = strstr(final_code, "texture(");
+                const char *proj = strstr(final_code, "textureProj(");
+                if (!call || (proj && proj < call)) call = proj;
+                if (!call) call = tex_site;
+                const char *start = (call > final_code + 100)
+                                    ? call - 100 : final_code;
+                __android_log_print(ANDROID_LOG_INFO, "xemu-psh",
+                    "FRAG-TEX[%d]A: %.2000s", n, start);
+                /* Also log the tail (final output assignment) */
+                size_t len = strlen(final_code);
+                const char *tail = (len > 800) ? final_code + len - 800 : final_code;
+                __android_log_print(ANDROID_LOG_INFO, "xemu-psh",
+                    "FRAG-TEX[%d]B(tail): %.800s", n, tail);
+            }
+        }
+    }
+    g_free(patched_code);
+#endif
     NV2A_GL_DGROUP_END();
 
     return shader;
@@ -197,6 +404,11 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
     ShaderModuleCacheKey key;
 
     bool need_geometry_shader = pgraph_glsl_need_geom(&state->geom);
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (need_geometry_shader && !check_geometry_shader_support()) {
+        need_geometry_shader = false;
+    }
+#endif
     if (need_geometry_shader) {
         memset(&key, 0, sizeof(key));
         key.kind = GL_GEOMETRY_SHADER;
@@ -225,6 +437,10 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
         GLchar log[2048];
         glGetProgramInfoLog(program, 2048, NULL, log);
         fprintf(stderr, "nv2a: shader linking failed: %s\n", log);
+#if defined(__ANDROID__) || defined(ANDROID)
+        __android_log_print(ANDROID_LOG_FATAL, "xemu-pgraph",
+                            "nv2a: shader linking failed: %s", log);
+#endif
         abort();
     }
 
@@ -245,6 +461,10 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
         GLchar log[1024];
         glGetProgramInfoLog(program, 1024, NULL, log);
         fprintf(stderr, "nv2a: shader validation failed: %s\n", log);
+#if defined(__ANDROID__) || defined(ANDROID)
+        __android_log_print(ANDROID_LOG_FATAL, "xemu-pgraph",
+                            "nv2a: shader validation failed: %s", log);
+#endif
         abort();
     }
 
@@ -306,7 +526,11 @@ void pgraph_gl_shader_write_cache_reload_list(PGRAPHState *pg)
 
 bool pgraph_gl_shader_load_from_memory(ShaderBinding *binding)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    glGetError(); /* clear any pending GL error before shader load */
+#else
     assert(glGetError() == GL_NO_ERROR);
+#endif
 
     if (!binding->program) {
         return false;
@@ -680,9 +904,26 @@ void pgraph_gl_shader_cache_to_disk(ShaderBinding *binding)
 
     binding->program = g_malloc(program_size);
     GLsizei program_size_copied;
+    /* Drain any accumulated GL errors before calling glGetProgramBinary so the
+     * post-call check only catches errors from this specific call. */
+#if defined(__ANDROID__) || defined(ANDROID)
+    while (glGetError() != GL_NO_ERROR) {}
+#endif
     glGetProgramBinary(binding->gl_program, program_size, &program_size_copied,
                        &binding->program_format, binding->program);
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        GLenum _err = glGetError();
+        if (_err != GL_NO_ERROR) {
+            ALOGI("pgraph_gl_shader_cache_to_disk: glGetProgramBinary error 0x%x, skipping cache", (unsigned)_err);
+            g_free(binding->program);
+            binding->program = NULL;
+            return;
+        }
+    }
+#else
     assert(glGetError() == GL_NO_ERROR);
+#endif
 
     binding->program_size = program_size_copied;
     binding->cached = true;
@@ -703,6 +944,53 @@ static void apply_uniform_updates(const UniformInfo *info, int *locs,
 
         void *value = (char*)values + info[i].val_offs;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* GLES drivers may reject bulk array uploads when only a subset of
+         * elements are "active" (used by the shader). The spec guarantees
+         * location[n] = location[0] + n for arrays, so upload element-by-
+         * element: active elements succeed, inactive ones produce
+         * GL_INVALID_OPERATION which we drain silently. */
+        for (size_t j = 0; j < info[i].count; j++) {
+            void *elem = (char*)value + j * info[i].size;
+            int loc = locs[i] + (int)j;
+            switch (info[i].type) {
+            case UniformElementType_uint:
+                glUniform1uiv(loc, 1, elem);
+                break;
+            case UniformElementType_int:
+                glUniform1iv(loc, 1, elem);
+                break;
+            case UniformElementType_ivec2:
+                glUniform2iv(loc, 1, elem);
+                break;
+            case UniformElementType_ivec4:
+                glUniform4iv(loc, 1, elem);
+                break;
+            case UniformElementType_float:
+                glUniform1fv(loc, 1, elem);
+                break;
+            case UniformElementType_vec2:
+                glUniform2fv(loc, 1, elem);
+                break;
+            case UniformElementType_vec3:
+                glUniform3fv(loc, 1, elem);
+                break;
+            case UniformElementType_vec4:
+                glUniform4fv(loc, 1, elem);
+                break;
+            case UniformElementType_mat2:
+                glUniformMatrix2fv(loc, 1, GL_FALSE, elem);
+                break;
+            default:
+                g_assert_not_reached();
+            }
+            GLenum _err = glGetError();
+            if (_err != GL_NO_ERROR && _err != GL_INVALID_OPERATION) {
+                ALOGI("uniform error: idx %d[%zu] name %s err 0x%x",
+                      i, j, info[i].name, (unsigned)_err);
+            }
+        }
+#else
         switch (info[i].type) {
         case UniformElementType_uint:
             glUniform1uiv(locs[i], info[i].count, value);
@@ -734,6 +1022,7 @@ static void apply_uniform_updates(const UniformInfo *info, int *locs,
         default:
             g_assert_not_reached();
         }
+#endif
     }
 
     assert(glGetError() == GL_NO_ERROR);
@@ -813,6 +1102,14 @@ void pgraph_gl_bind_shaders(PGRAPHState *pg)
 update_uniforms:
     assert(r->shader_binding);
     assert(r->shader_binding->initialized);
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* On Android all GL "contexts" share the same EGL context. The render
+     * thread's blit in xemu_hud_render() calls glUseProgram(s_blit_prog)
+     * which persists when PGRAPH runs if the shader binding hasn't changed
+     * (the glUseProgram above is skipped). Always re-bind the NV2A shader
+     * before updating uniforms to avoid targeting the wrong program. */
+    glUseProgram(r->shader_binding->gl_program);
+#endif
     update_shader_uniforms(pg, r->shader_binding);
 }
 
@@ -821,27 +1118,45 @@ GLuint pgraph_gl_compile_shader(const char *vs_src, const char *fs_src)
     GLint status;
     char err_buf[512];
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    char *patched_vs = patch_shader_source(vs_src, GL_VERTEX_SHADER);
+    char *patched_fs = patch_shader_source(fs_src, GL_FRAGMENT_SHADER);
+    const char *final_vs = patched_vs;
+    const char *final_fs = patched_fs;
+#else
+    const char *final_vs = vs_src;
+    const char *final_fs = fs_src;
+#endif
+
     // Compile vertex shader
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vs, 1, &vs_src, NULL);
+    glShaderSource(vs, 1, &final_vs, NULL);
     glCompileShader(vs);
     glGetShaderiv(vs, GL_COMPILE_STATUS, &status);
     if (status != GL_TRUE) {
         glGetShaderInfoLog(vs, sizeof(err_buf), NULL, err_buf);
         err_buf[sizeof(err_buf)-1] = '\0';
-        fprintf(stderr, "Vertex shader compilation failed: %s\n", err_buf);
+        fprintf(stderr, "%s\n\n" "Vertex shader compilation failed: %s\n", final_vs, err_buf);
+#if defined(__ANDROID__) || defined(ANDROID)
+        g_free(patched_vs);
+        g_free(patched_fs);
+#endif
         exit(1);
     }
 
     // Compile fragment shader
     GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fs, 1, &fs_src, NULL);
+    glShaderSource(fs, 1, &final_fs, NULL);
     glCompileShader(fs);
     glGetShaderiv(fs, GL_COMPILE_STATUS, &status);
     if (status != GL_TRUE) {
         glGetShaderInfoLog(fs, sizeof(err_buf), NULL, err_buf);
         err_buf[sizeof(err_buf)-1] = '\0';
-        fprintf(stderr, "Fragment shader compilation failed: %s\n", err_buf);
+        fprintf(stderr, "%s\n\n" "Fragment shader compilation failed: %s\n", final_fs, err_buf);
+#if defined(__ANDROID__) || defined(ANDROID)
+        g_free(patched_vs);
+        g_free(patched_fs);
+#endif
         exit(1);
     }
 
@@ -850,11 +1165,27 @@ GLuint pgraph_gl_compile_shader(const char *vs_src, const char *fs_src)
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
     glLinkProgram(prog);
+    glGetProgramiv(prog, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+        glGetProgramInfoLog(prog, sizeof(err_buf), NULL, err_buf);
+        err_buf[sizeof(err_buf)-1] = '\0';
+        fprintf(stderr, "nv2a: program link failed: %s\n", err_buf);
+#if defined(__ANDROID__) || defined(ANDROID)
+        g_free(patched_vs);
+        g_free(patched_fs);
+#endif
+        exit(1);
+    }
     glUseProgram(prog);
 
     // Flag shaders for deletion (will still be retained for lifetime of prog)
     glDeleteShader(vs);
     glDeleteShader(fs);
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    g_free(patched_vs);
+    g_free(patched_fs);
+#endif
 
     return prog;
 }

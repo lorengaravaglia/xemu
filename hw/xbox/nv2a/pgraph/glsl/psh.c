@@ -27,6 +27,9 @@
  */
 
 #include "qemu/osdep.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#endif
 #include "hw/xbox/nv2a/debug.h"
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
 #include "psh.h"
@@ -724,7 +727,7 @@ static void psh_append_shadowmap(const struct PixelShader *ps, int i, bool compa
     if (extract_msb_24b) {
         mstring_append_fmt(vars,
                            "vec4 t%d_depth = vec4(float(t%d_depth_raw.x >> 8) "
-                           "/ 0xFFFFFF, 1.0, 0.0, 0.0);\n",
+                           "/ float(0xFFFFFF), 1.0, 0.0, 0.0);\n",
                            i, i);
     }
 
@@ -733,13 +736,13 @@ static void psh_append_shadowmap(const struct PixelShader *ps, int i, bool compa
         mstring_append_fmt(
             vars,
             "float t%d_max_depth;\n"
-            "if (t%d_depth.y > 0) {\n"
-            "  t%d_max_depth = 0xFFFFFF;\n"
+            "if (t%d_depth.y > 0.0) {\n"
+            "  t%d_max_depth = float(0xFFFFFF);\n"
             "} else {\n"
-            "  t%d_max_depth = t%d_depth.z > 0 ? 511.9375 : 0xFFFF;\n"
+            "  t%d_max_depth = t%d_depth.z > 0.0 ? 511.9375 : float(0xFFFF);\n"
             "}\n"
             "t%d_depth.x *= t%d_max_depth;\n"
-            "pT%d.z = clamp(pT%d.z / pT%d.w, 0, t%d_max_depth);\n"
+            "pT%d.z = clamp(pT%d.z / pT%d.w, 0.0, t%d_max_depth);\n"
             "vec4 t%d = vec4(t%d_depth.x %s pT%d.z ? 1.0 : 0.0);\n",
             i, i, i, i, i,
             i, i, i, i, i, i,
@@ -869,8 +872,8 @@ static MString* psh_convert(struct PixelShader *ps)
         "               else return (x)/127.0;\n"
         "}\n"
         "float sign3_to_0_to_1(float x) {\n"
-        "    if (x >= 0) return x/2;\n"
-        "           else return 1+x/2;\n"
+        "    if (x >= 0.0) return x/2.0;\n"
+        "            else return 1.0+x/2.0;\n"
         "}\n"
         "vec3 dotmap_zero_to_one(vec4 col) {\n"
         "    return col.rgb;\n"
@@ -998,7 +1001,7 @@ static MString* psh_convert(struct PixelShader *ps)
     if (ps->state->z_perspective) {
         mstring_append(
             clip,
-            "vec2 unscaled_xy = gl_FragCoord.xy / surfaceScale;\n"
+            "vec2 unscaled_xy = gl_FragCoord.xy / vec2(surfaceScale);\n"
             "precise float bc0 = area(unscaled_xy, vtxPos1.xy, vtxPos2.xy);\n"
             "precise float bc1 = area(unscaled_xy, vtxPos2.xy, vtxPos0.xy);\n"
             "precise float bc2 = area(unscaled_xy, vtxPos0.xy, vtxPos1.xy);\n"
@@ -1032,7 +1035,7 @@ static MString* psh_convert(struct PixelShader *ps)
     } else {
         mstring_append(
             clip,
-            "vec2 unscaled_xy = gl_FragCoord.xy / surfaceScale;\n"
+            "vec2 unscaled_xy = gl_FragCoord.xy / vec2(surfaceScale);\n"
             "precise float bc0 = area(unscaled_xy, vtxPos1.xy, vtxPos2.xy);\n"
             "precise float bc1 = area(unscaled_xy, vtxPos2.xy, vtxPos0.xy);\n"
             "precise float bc2 = area(unscaled_xy, vtxPos0.xy, vtxPos1.xy);\n"
@@ -1279,7 +1282,7 @@ static MString* psh_convert(struct PixelShader *ps)
                 i, i-2, i-1, i);
             mstring_append_fmt(vars, "vec3 e_%d = vec3(pT%d.w, pT%d.w, pT%d.w);\n",
                 i, i-2, i-1, i);
-            mstring_append_fmt(vars, "vec3 rv_%d = 2*n_%d*dot(n_%d,e_%d)/dot(n_%d,n_%d) - e_%d;\n",
+            mstring_append_fmt(vars, "vec3 rv_%d = 2.0*n_%d*dot(n_%d,e_%d)/dot(n_%d,n_%d) - e_%d;\n",
                 i, i, i, i, i, i, i);
             apply_border_adjustment(ps, vars, i, "rv_%d");
             if (!ps->state->tex_cubemap[i]) {
@@ -1440,6 +1443,19 @@ static MString* psh_convert(struct PixelShader *ps)
         add_final_stage_code(ps, ps->final_input);
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        static int psh_log_cnt = 0;
+        if (psh_log_cnt < 80) {
+            __android_log_print(ANDROID_LOG_INFO, "xemu-psh",
+                "PSH[%d] alpha_test=%d alpha_func=%d tex_mode0=%d tex_mode1=%d smooth=%d",
+                psh_log_cnt++,
+                (int)ps->state->alpha_test, (int)ps->state->alpha_func,
+                (int)ps->tex_modes[0], (int)ps->tex_modes[1],
+                (int)ps->state->smooth_shading);
+        }
+    }
+#endif
     if (ps->state->alpha_test && ps->state->alpha_func != ALPHA_FUNC_ALWAYS) {
         if (ps->state->alpha_func == ALPHA_FUNC_NEVER) {
             mstring_append(ps->code, "discard;\n");

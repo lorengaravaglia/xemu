@@ -28,11 +28,101 @@
 
 #include "gloffscreen.h"
 
+#if defined(__ANDROID__) || defined(ANDROID)
+
+#include <EGL/egl.h>
+#include <android/log.h>
+
+/* These globals are defined in xemu_android.c / ui/xemu.c */
+extern EGLDisplay egl_display;
+extern EGLContext egl_context; /* main display context — used as share group parent */
+extern EGLConfig  egl_config;
+
+struct _GloContext {
+    EGLContext egl_ctx;
+    EGLSurface egl_pbuf;
+};
+
+/* Create an offscreen OpenGL context that shares resources with the main
+ * display context.  Each NV2A context gets its own real EGL context and a
+ * 1×1 pbuffer surface so it can be made current on any thread independently,
+ * without blocking the xemu_core render thread. */
+GloContext *glo_context_create(void)
+{
+    GloContext *context = (GloContext *)malloc(sizeof(GloContext));
+    assert(context != NULL);
+
+    /* Create a new GLES 3 context sharing objects with the main EGL context */
+    EGLint ctx_attrs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        EGL_NONE
+    };
+    context->egl_ctx = eglCreateContext(egl_display, egl_config,
+                                        egl_context, ctx_attrs);
+    if (context->egl_ctx == EGL_NO_CONTEXT) {
+        fprintf(stderr, "glo_context_create: eglCreateContext failed: 0x%x\n",
+                eglGetError());
+        free(context);
+        return NULL;
+    }
+
+    /* Create a 1×1 pbuffer surface for offscreen rendering */
+    EGLint pb_attrs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    context->egl_pbuf = eglCreatePbufferSurface(egl_display, egl_config,
+                                                pb_attrs);
+    if (context->egl_pbuf == EGL_NO_SURFACE) {
+        fprintf(stderr,
+                "glo_context_create: eglCreatePbufferSurface failed: 0x%x\n",
+                eglGetError());
+        eglDestroyContext(egl_display, context->egl_ctx);
+        free(context);
+        return NULL;
+    }
+
+    /* Make the new context current on the calling thread (matches desktop
+     * SDL behaviour where glo_context_create also makes it current). */
+    if (!eglMakeCurrent(egl_display, context->egl_pbuf, context->egl_pbuf,
+                        context->egl_ctx)) {
+        fprintf(stderr, "glo_context_create: eglMakeCurrent failed: 0x%x\n",
+                eglGetError());
+    }
+
+    return context;
+}
+
+/* Set current context — directly calls eglMakeCurrent; no shared mutex
+ * needed since each NV2A GloContext is an independent EGL context. */
+void glo_set_current(GloContext *context)
+{
+    if (context == NULL) {
+        eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
+    } else {
+        if (!eglMakeCurrent(egl_display, context->egl_pbuf, context->egl_pbuf,
+                            context->egl_ctx)) {
+            fprintf(stderr, "glo_set_current: eglMakeCurrent failed: 0x%x\n",
+                    eglGetError());
+        }
+    }
+}
+
+/* Destroy a previously created OpenGL context */
+void glo_context_destroy(GloContext *context)
+{
+    if (!context) return;
+    glo_set_current(NULL);
+    eglDestroySurface(egl_display, context->egl_pbuf);
+    eglDestroyContext(egl_display, context->egl_ctx);
+    free(context);
+}
+
+#else /* !ANDROID — desktop SDL path */
+
 #include <SDL3/SDL.h>
 
 struct _GloContext {
     SDL_Window    *window;
-    SDL_GLContext gl_context;
+    SDL_GLContext  gl_context;
 };
 
 /* Create an OpenGL context */
@@ -97,3 +187,5 @@ void glo_context_destroy(GloContext *context)
     glo_set_current(NULL);
     free(context);
 }
+
+#endif /* ANDROID */

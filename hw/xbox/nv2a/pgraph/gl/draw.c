@@ -23,6 +23,9 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "debug.h"
 #include "renderer.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#endif
 
 void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
 {
@@ -47,7 +50,11 @@ void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
         if (parameter & NV097_CLEAR_SURFACE_Z) {
             gl_mask |= GL_DEPTH_BUFFER_BIT;
             glDepthMask(GL_TRUE);
+#if defined(__ANDROID__) || defined(ANDROID)
+            glClearDepthf(gl_clear_depth);
+#else
             glClearDepth(gl_clear_depth);
+#endif
         }
         if (parameter & NV097_CLEAR_SURFACE_STENCIL) {
             gl_mask |= GL_STENCIL_BUFFER_BIT;
@@ -160,6 +167,44 @@ void pgraph_gl_draw_begin(NV2AState *d)
     pgraph_gl_bind_textures(d);
     pgraph_gl_bind_shaders(pg);
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        bool at_en = !!(control_0 & NV_PGRAPH_CONTROL_0_ALPHATESTENABLE);
+        static int drawlog = 0;
+        /* Log unique (at, fmt0, fmt1) combinations — deduplicate repetitions */
+        static unsigned int last_fmt0, last_fmt1, last_at;
+        static bool first_draw = true;
+        unsigned int fmt0 = 0, w0 = 0, h0 = 0;
+        unsigned int fmt1 = 0, w1 = 0, h1 = 0;
+        bool tex0_en = pgraph_is_texture_enabled(pg, 0);
+        bool tex1_en = pgraph_is_texture_enabled(pg, 1);
+        if (tex0_en) {
+            TextureShape ts0 = pgraph_get_texture_shape(pg, 0);
+            fmt0 = ts0.color_format; w0 = ts0.width; h0 = ts0.height;
+        }
+        if (tex1_en) {
+            TextureShape ts1 = pgraph_get_texture_shape(pg, 1);
+            fmt1 = ts1.color_format; w1 = ts1.width; h1 = ts1.height;
+        }
+        bool changed = first_draw || (fmt0 != last_fmt0) || (fmt1 != last_fmt1)
+                       || ((unsigned)at_en != last_at);
+        if (changed) {
+            uint32_t alpha_ref = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0),
+                                          NV_PGRAPH_CONTROL_0_ALPHAREF);
+            uint32_t blend_reg = pgraph_reg_r(pg, NV_PGRAPH_BLEND);
+            uint32_t sf = GET_MASK(blend_reg, NV_PGRAPH_BLEND_SFACTOR);
+            uint32_t df = GET_MASK(blend_reg, NV_PGRAPH_BLEND_DFACTOR);
+            __android_log_print(ANDROID_LOG_INFO, "xemu-draw",
+                "DRAW[%d] at=%d aref=%u sf=%u df=%u tex0=0x%x%s%ux%u tex1=0x%x%s%ux%u",
+                drawlog++, (int)at_en, alpha_ref, sf, df,
+                fmt0, tex0_en ? " " : "! ", w0, h0,
+                fmt1, tex1_en ? " " : "! ", w1, h1);
+            last_fmt0 = fmt0; last_fmt1 = fmt1; last_at = (unsigned)at_en;
+            first_draw = false;
+        }
+    }
+#endif
+
     glColorMask(mask_red, mask_green, mask_blue, mask_alpha);
     glDepthMask(!!(control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE));
     glStencilMask(GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
@@ -210,8 +255,10 @@ void pgraph_gl_draw_begin(NV2AState *d)
 
     /* Polygon offset is handled in geometry and fragment shaders explicitly */
     glDisable(GL_POLYGON_OFFSET_FILL);
+#if !defined(__ANDROID__) && !defined(ANDROID)
     glDisable(GL_POLYGON_OFFSET_LINE);
     glDisable(GL_POLYGON_OFFSET_POINT);
+#endif
 
     /* Depth testing */
     if (depth_test) {
@@ -225,10 +272,12 @@ void pgraph_gl_draw_begin(NV2AState *d)
         glDisable(GL_DEPTH_TEST);
     }
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
     glEnable(GL_DEPTH_CLAMP);
 
     /* Set first vertex convention to match Vulkan default */
     glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
+#endif
 
     if (stencil_test) {
         glEnable(GL_STENCIL_TEST);
@@ -274,25 +323,34 @@ void pgraph_gl_draw_begin(NV2AState *d)
         glDisable(GL_DITHER);
     }
 
+#if !defined(__ANDROID__) && !defined(ANDROID)
+    /* In GLES, gl_PointSize is always active when written; this cap doesn't exist */
     glEnable(GL_PROGRAM_POINT_SIZE);
+#endif
 
     bool anti_aliasing = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_ANTIALIASING), NV_PGRAPH_ANTIALIASING_ENABLE);
 
     /* Edge Antialiasing */
     if (!anti_aliasing && pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
                               NV_PGRAPH_SETUPRASTER_LINESMOOTHENABLE) {
+#if !defined(__ANDROID__) && !defined(ANDROID)
         glEnable(GL_LINE_SMOOTH);
+#endif
         glLineWidth(MIN(r->supported_smooth_line_width_range[1], pg->surface_scale_factor));
     } else {
+#if !defined(__ANDROID__) && !defined(ANDROID)
         glDisable(GL_LINE_SMOOTH);
+#endif
         glLineWidth(MIN(r->supported_aliased_line_width_range[1], pg->surface_scale_factor));
     }
+#if !defined(__ANDROID__) && !defined(ANDROID)
     if (!anti_aliasing && pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
                               NV_PGRAPH_SETUPRASTER_POLYSMOOTHENABLE) {
         glEnable(GL_POLYGON_SMOOTH);
     } else {
         glDisable(GL_POLYGON_SMOOTH);
     }
+#endif
 
     unsigned int vp_width = pg->surface_binding_dim.width,
                  vp_height = pg->surface_binding_dim.height;
@@ -326,7 +384,12 @@ void pgraph_gl_draw_begin(NV2AState *d)
         glGenQueries(1, &gl_query);
         r->gl_zpass_pixel_count_queries[
             r->gl_zpass_pixel_count_query_count - 1] = gl_query;
+/* GL_SAMPLES_PASSED requires desktop GL or GLES 3.2; use ANY_SAMPLES_PASSED on GLES 3.0 */
+#if defined(__ANDROID__) || defined(ANDROID)
+        glBeginQuery(GL_ANY_SAMPLES_PASSED, gl_query);
+#else
         glBeginQuery(GL_SAMPLES_PASSED, gl_query);
+#endif
     }
 }
 
@@ -363,7 +426,11 @@ void pgraph_gl_draw_end(NV2AState *d)
     /* End of visibility testing */
     if (pg->zpass_pixel_count_enable) {
         nv2a_profile_inc_counter(NV2A_PROF_QUERY);
+#if defined(__ANDROID__) || defined(ANDROID)
+        glEndQuery(GL_ANY_SAMPLES_PASSED);
+#else
         glEndQuery(GL_SAMPLES_PASSED);
+#endif
     }
 
     pg->draw_time++;
@@ -399,10 +466,19 @@ void pgraph_gl_flush_draw(NV2AState *d)
                                       pg->draw_arrays_max_count - 1,
                                       false, 0,
                                       pg->draw_arrays_max_count - 1);
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* glMultiDrawArrays requires GL_EXT_multi_draw_arrays on GLES */
+        for (int i = 0; i < pg->draw_arrays_length; i++) {
+            glDrawArrays(r->shader_binding->gl_primitive_mode,
+                         pg->draw_arrays_start[i],
+                         pg->draw_arrays_count[i]);
+        }
+#else
         glMultiDrawArrays(r->shader_binding->gl_primitive_mode,
                           pg->draw_arrays_start,
                           pg->draw_arrays_count,
                           pg->draw_arrays_length);
+#endif
     } else if (pg->inline_elements_length) {
         NV2A_GL_DPRINTF(false, "Inline Elements");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ELEMENTS);

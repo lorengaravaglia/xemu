@@ -50,7 +50,11 @@ static const GLenum pgraph_texture_addr_gl_map[] = {
     GL_REPEAT,
     GL_MIRRORED_REPEAT,
     GL_CLAMP_TO_EDGE,
+#if defined(__ANDROID__) || defined(ANDROID)
+    GL_CLAMP_TO_EDGE,  /* GL_CLAMP_TO_BORDER requires GLES 3.2 */
+#else
     GL_CLAMP_TO_BORDER,
+#endif
     GL_CLAMP_TO_EDGE, /* Approximate GL_CLAMP */
 };
 
