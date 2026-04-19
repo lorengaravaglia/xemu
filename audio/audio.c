@@ -1988,6 +1988,7 @@ void audio_create_pdos(Audiodev *dev)
         break
 
         CASE(NONE, none, );
+        CASE(AAUDIO, aaudio, );
 #ifdef CONFIG_AUDIO_ALSA
         CASE(ALSA, alsa, Alsa);
 #endif

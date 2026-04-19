@@ -473,6 +473,7 @@
 ##
 { 'enum': 'AudiodevDriver',
   'data': [ 'none',
+            'aaudio',
             { 'name': 'alsa', 'if': 'CONFIG_AUDIO_ALSA' },
             { 'name': 'coreaudio', 'if': 'CONFIG_AUDIO_COREAUDIO' },
             { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' },
@@ -508,6 +509,7 @@
   'discriminator': 'driver',
   'data': {
     'none':      'AudiodevGenericOptions',
+    'aaudio':    'AudiodevGenericOptions',
     'alsa':      { 'type': 'AudiodevAlsaOptions',
                    'if': 'CONFIG_AUDIO_ALSA' },
     'coreaudio': { 'type': 'AudiodevCoreaudioOptions',
