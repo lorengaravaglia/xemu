@@ -342,8 +342,7 @@ As of April 2026, the Android port boots the Xbox BIOS, completes the boot anima
 | Feature | Notes |
 |---------|-------|
 | Shader cache persistence | Shaders recompile on every launch. Cache writeback path exists; needs Android file path wired in |
-| Redundant sync elimination | `get_framebuffer_surface()` is called at the host render rate (~60fps) even when TCG produces <1fps. Should only sync after a completed Xbox frame (FLIP boundary) |
-| Android lifecycle (surface recreation) | `xemu_android_start()` returns immediately if `native_window != NULL`. EGL surface must be destroyed/recreated on `surfaceDestroyed`/`surfaceCreated` without restarting emulation |
+| Background idle threads | When backgrounded, `vm_stop()` halts the vCPU and NV2A PGRAPH (no draw calls, no audio). Two lightweight threads remain active: the render thread spins at 60fps checking `xemu_android_surface_valid()==false` and returning immediately; `vblank_timer_thread` fires every ~200ms. Neither does meaningful work but both consume small amounts of battery. Fix: block the render thread on a condition variable when paused+no-surface; gate `vblank_timer_thread` on VM runstate. |
 | Aspect ratio / display scaling | Xbox renders 640×480; device screen may be a different aspect. No letterboxing/pillarboxing yet |
 | Save states | Not tested on Android |
 

@@ -35,6 +35,16 @@ void xemu_android_start(
 
 void xemu_android_stop(void);
 ANativeWindow *xemu_android_get_window(void);
+
+/* Surface lifecycle — called from JNI on the Java main thread. */
+void xemu_android_surface_destroyed(void);
+void xemu_android_surface_created(ANativeWindow *window);
+
+/* Called from display_very_early_init() after initial EGL surface creation. */
+void xemu_android_surface_mark_valid(void);
+
+/* Returns true if egl_surface is valid and the render thread may use it. */
+bool xemu_android_surface_valid(void);
 void xemu_android_input_init(void);
 
 /* Called from JNI input thread to update the virtual controller state.
@@ -45,6 +55,14 @@ void xemu_android_set_axis(int axis_index, int16_t value);
 
 /* Terminate the emulation process and return to MainActivity. */
 void xemu_android_request_exit(void);
+
+/* Pause/resume the QEMU VM (stops TCG, PFIFO, PGRAPH, audio).
+ * Defined in ui/xemu.c — linked into the final .so via Meson objects. */
+void xemu_android_vm_pause(void);
+void xemu_android_vm_resume(void);
+
+/* Returns true once qemu_init() has completed and the BQL is initialized. */
+bool xemu_android_qemu_initialized(void);
 
 #ifdef __cplusplus
 }

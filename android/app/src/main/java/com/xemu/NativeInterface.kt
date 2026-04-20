@@ -43,6 +43,14 @@ object NativeInterface {
     external fun pauseEmulation()
     external fun resumeEmulation()
 
+    /**
+     * Notify native code of a surface change.
+     * Pass null when the surface is destroyed (app background/rotation).
+     * Pass the new Surface when it is recreated.
+     * Must NOT be called on the first surface creation — use startEmulation() instead.
+     */
+    external fun setSurface(surface: Surface?)
+
     /** Press a button (mask = one or more BUTTON_* constants OR'd together). */
     external fun sendButtonDown(mask: Int)
     /** Release a button. */

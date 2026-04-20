@@ -29,23 +29,117 @@ EGLConfig  egl_config  = NULL;
 pid_t xemu_main_thread_id = 0;
 
 static _Thread_local bool t_egl_current = false;
+static ANativeWindow *native_window = NULL;
+
+/* Surface lifecycle synchronisation.
+ *
+ * g_surface_valid  — true when egl_surface is created and safe to use.
+ * g_render_has_ctx — true while the render thread has egl_surface current
+ *                    (between set_egl_current(true) and set_egl_current(false)).
+ *
+ * xemu_android_surface_destroyed() sets g_surface_valid=false and waits on
+ * g_surface_cond until the render thread releases the context, then it is safe
+ * to call eglDestroySurface.  xemu_android_surface_created() creates a new
+ * egl_surface and sets g_surface_valid=true.
+ */
+static pthread_mutex_t g_surface_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_surface_cond  = PTHREAD_COND_INITIALIZER;
+static bool g_surface_valid    = false;
+static bool g_render_has_ctx   = false;
+
+bool xemu_android_surface_valid(void) {
+    pthread_mutex_lock(&g_surface_mutex);
+    bool v = g_surface_valid;
+    pthread_mutex_unlock(&g_surface_mutex);
+    return v;
+}
+
+/* Set to true once QEMU has initialized the BQL and the VM is running.
+ * Guards xemu_android_vm_pause/resume against being called too early
+ * (onResume() fires before startEmulation() on first launch). */
+static volatile bool g_qemu_initialized = false;
+
+/* Called from display_very_early_init() after the initial egl_surface is
+ * created, to mark the surface as usable by the render thread.
+ * By this point qemu_init() has run and the BQL is initialized. */
+void xemu_android_surface_mark_valid(void) {
+    g_qemu_initialized = true;
+    pthread_mutex_lock(&g_surface_mutex);
+    g_surface_valid = true;
+    pthread_mutex_unlock(&g_surface_mutex);
+}
+
+bool xemu_android_qemu_initialized(void) {
+    return g_qemu_initialized;
+}
 
 /* Called only from the xemu_core render thread to acquire/release the main
  * EGL display context (egl_context + egl_surface).  NV2A PGRAPH/PFIFO threads
- * now have their own independent EGL contexts via glo_context_create() and
- * never call this function, so no mutex is required. */
+ * have their own independent EGL contexts via glo_context_create(). */
 void set_egl_current(bool current) {
     if (current == t_egl_current) return;
     if (current) {
-        if (!eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context)) {
-            LOGE("set_egl_current: eglMakeCurrent failed: 0x%x", eglGetError());
-        } else {
+        pthread_mutex_lock(&g_surface_mutex);
+        bool ok = g_surface_valid && egl_surface != EGL_NO_SURFACE;
+        pthread_mutex_unlock(&g_surface_mutex);
+        if (!ok) return;
+        if (eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context)) {
             t_egl_current = true;
+            pthread_mutex_lock(&g_surface_mutex);
+            g_render_has_ctx = true;
+            pthread_mutex_unlock(&g_surface_mutex);
+        } else {
+            LOGE("set_egl_current: eglMakeCurrent failed: 0x%x", eglGetError());
         }
     } else {
         eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         t_egl_current = false;
+        pthread_mutex_lock(&g_surface_mutex);
+        g_render_has_ctx = false;
+        pthread_cond_broadcast(&g_surface_cond);
+        pthread_mutex_unlock(&g_surface_mutex);
     }
+}
+
+/* Called from the Java main thread when Android destroys the SurfaceView
+ * (e.g. app goes to background, screen rotation).  Waits for the render
+ * thread to release egl_surface, then destroys it.  egl_context and
+ * egl_display are preserved across surface recreations. */
+void xemu_android_surface_destroyed(void) {
+    LOGI("surface_destroyed: waiting for render thread to release context...");
+    pthread_mutex_lock(&g_surface_mutex);
+    g_surface_valid = false;
+    while (g_render_has_ctx) {
+        pthread_cond_wait(&g_surface_cond, &g_surface_mutex);
+    }
+    pthread_mutex_unlock(&g_surface_mutex);
+
+    LOGI("surface_destroyed: context released, destroying EGL surface");
+    if (egl_surface != EGL_NO_SURFACE) {
+        eglDestroySurface(egl_display, egl_surface);
+        egl_surface = EGL_NO_SURFACE;
+    }
+    if (native_window) {
+        ANativeWindow_release(native_window);
+        native_window = NULL;
+    }
+}
+
+/* Called from the Java main thread when Android provides a new SurfaceView
+ * (after the app returns to foreground or after rotation).  Creates a new
+ * egl_surface from the new ANativeWindow and marks it valid. */
+void xemu_android_surface_created(ANativeWindow *window) {
+    LOGI("surface_created: creating new EGL surface");
+    native_window = window;
+    egl_surface = eglCreateWindowSurface(egl_display, egl_config, window, NULL);
+    if (egl_surface == EGL_NO_SURFACE) {
+        LOGE("surface_created: eglCreateWindowSurface failed: 0x%x", eglGetError());
+        return;
+    }
+    pthread_mutex_lock(&g_surface_mutex);
+    g_surface_valid = true;
+    pthread_mutex_unlock(&g_surface_mutex);
+    LOGI("surface_created: EGL surface ready");
 }
 
 static void signal_handler(int sig) {
@@ -67,7 +161,6 @@ static void sigabrt_handler(int sig) {
 static pthread_t xemu_thread;
 static pthread_t log_thread;
 static int log_pipe[2];
-static ANativeWindow *native_window = NULL;
 ThreadArgs *g_android_args = NULL;
 
 /* Pointer to the Android virtual ControllerState — set once by

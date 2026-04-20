@@ -67,12 +67,26 @@ Java_com_xemu_NativeInterface_stopEmulation(JNIEnv *env, jclass clazz) {
 
 JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_pauseEmulation(JNIEnv *env, jclass clazz) {
-    // TODO
+    xemu_android_vm_pause();
 }
 
 JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_resumeEmulation(JNIEnv *env, jclass clazz) {
-    // TODO
+    xemu_android_vm_resume();
+}
+
+JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_setSurface(JNIEnv *env, jclass clazz, jobject surface) {
+    if (surface == nullptr) {
+        xemu_android_surface_destroyed();
+    } else {
+        ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
+        if (!window) {
+            LOGI("setSurface: ANativeWindow_fromSurface returned null");
+            return;
+        }
+        xemu_android_surface_created(window);
+    }
 }
 
 JNIEXPORT void JNICALL

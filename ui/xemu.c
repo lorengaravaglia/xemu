@@ -88,6 +88,32 @@ bool xemu_is_main_thread(void)
     return true;
 #endif
 }
+
+#if defined(__ANDROID__) || defined(ANDROID)
+/* Called from JNI (Java main thread) via NativeInterface.pauseEmulation() /
+ * resumeEmulation() when the app goes to background / foreground.
+ * vm_stop/vm_start pause TCG, PFIFO, PGRAPH and all QEMU device threads,
+ * which also drains the AAudio ring buffer to silence. */
+void xemu_android_vm_pause(void)
+{
+    if (!xemu_android_qemu_initialized()) return;
+    bql_lock();
+    if (runstate_is_running()) {
+        vm_stop(RUN_STATE_PAUSED);
+    }
+    bql_unlock();
+}
+
+void xemu_android_vm_resume(void)
+{
+    if (!xemu_android_qemu_initialized()) return;
+    bql_lock();
+    if (runstate_check(RUN_STATE_PAUSED)) {
+        vm_start();
+    }
+    bql_unlock();
+}
+#endif
 #else
 #define ALOGI(...) fprintf(stderr, __VA_ARGS__)
 #define ALOGE(...) fprintf(stderr, __VA_ARGS__)
@@ -937,6 +963,13 @@ static void gl_render_frame(struct xemu_console *scon)
         return;
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (!xemu_android_surface_valid()) {
+        qatomic_set(&rendering, false);
+        return;
+    }
+#endif
+
     bool flip_required = false;
     bool release_surface_texture = false;
 #if defined(__ANDROID__) || defined(ANDROID)
@@ -1250,6 +1283,7 @@ static void display_very_early_init(DisplayOptions *o)
         ALOGE("Error: eglCreateWindowSurface failed");
         return;
     }
+    xemu_android_surface_mark_valid();
     ALOGI("eglCreateWindowSurface success. Making current...");
 
     set_egl_current(true);

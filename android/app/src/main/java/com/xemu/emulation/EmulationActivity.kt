@@ -24,6 +24,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     // Kept open for the lifetime of the activity so QEMU can read via /proc/self/fd/<n>
     private var isoPfd: ParcelFileDescriptor? = null
 
+    // True after the first startEmulation() call — subsequent surface events use setSurface()
+    private var emulationStarted = false
+
     // Overlay visibility mode
     private enum class OverlayMode { AUTO, ALWAYS_SHOW, ALWAYS_HIDE }
     private var overlayMode = OverlayMode.AUTO
@@ -79,11 +82,20 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         // ── SurfaceView callback — starts emulation once surface is ready ─────
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                startEmulation(holder)
+                if (!emulationStarted) {
+                    startEmulation(holder)
+                    emulationStarted = true
+                } else {
+                    // Surface recreated after going to background or rotating — hand the
+                    // new ANativeWindow to the native layer without restarting emulation.
+                    NativeInterface.setSurface(holder.surface)
+                }
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                NativeInterface.pauseEmulation()
+                // Block until the render thread has released the EGL context so Android
+                // can safely destroy the underlying ANativeWindow.
+                NativeInterface.setSurface(null)
             }
         })
 
