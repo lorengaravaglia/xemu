@@ -376,6 +376,16 @@ void pgraph_destroy(PGRAPHState *pg)
     qemu_mutex_destroy(&pg->lock);
 }
 
+int nv2a_get_frame_time(void)
+{
+    NV2AState *d = g_nv2a;
+    if (!d) return 0;
+    /* Relaxed read — only used for best-effort "has a new Xbox frame arrived"
+     * polling by the render thread.  A slightly stale value just means one
+     * extra unnecessary sync, which is the status quo anyway. */
+    return d->pgraph.frame_time;
+}
+
 int nv2a_get_framebuffer_surface(void)
 {
     NV2AState *d = g_nv2a;

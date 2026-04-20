@@ -335,12 +335,12 @@ As of April 2026, the Android port boots the Xbox BIOS, completes the boot anima
 - Logging: stdout/stderr → logcat via pipe (`xemu-stdout` tag)
 - Game disc loading via file descriptor (`/proc/self/fd/<n>`) — avoids copying large ISOs
 - Controller input: physical/wireless gamepad (`dispatchKeyEvent` + `dispatchGenericMotionEvent`), on-screen touch overlay (`GamepadView`), auto-hide overlay when physical controller connected, button remapping UI (`MappingActivity`), mappings persisted in `SharedPreferences`
+- Audio: MCPx APU routes through AAudio (NDK) in `hw/xbox/mcpx/apu/monitor.c` via ring buffer + callback-mode stream at 48000 Hz S16LE stereo. QEMU audio API aaudio backend (`audio/aaudiosdk.c`) also wired up. Confirmed working.
 
 **Not yet implemented / known gaps:**
 
 | Feature | Notes |
 |---------|-------|
-| Audio | MCPx APU audio routes through AAudio (NDK) directly in `hw/xbox/mcpx/apu/monitor.c` via a ring buffer + callback-mode AAudio stream at 48000 Hz S16LE stereo. SDL audio is not used on Android (SDL_Init skipped for stability). The QEMU audio API aaudio backend (`audio/aaudiosdk.c`) is also wired up for xblc.c-style devices. Three earlier fixes: (1) `CASE(AAUDIO, aaudio, )` in `audio.c`/`audio_template.h`, (2) `CONFIG_GIO` in CMakeLists.txt, (3) `monitor.c` AAudio path. Needs full audio testing. |
 | Shader cache persistence | Shaders recompile on every launch. Cache writeback path exists; needs Android file path wired in |
 | Redundant sync elimination | `get_framebuffer_surface()` is called at the host render rate (~60fps) even when TCG produces <1fps. Should only sync after a completed Xbox frame (FLIP boundary) |
 | Android lifecycle (surface recreation) | `xemu_android_start()` returns immediately if `native_window != NULL`. EGL surface must be destroyed/recreated on `surfaceDestroyed`/`surfaceCreated` without restarting emulation |

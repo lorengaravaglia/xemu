@@ -930,6 +930,7 @@ static void gl_render_frame(struct xemu_console *scon)
      * returned non-zero) we skip the throttle and run at full rate. */
     static GLuint s_last_tex = 0;
     static int64_t s_last_miss_ms = 0;
+    static int s_last_synced_frame_time = -1;
 #endif
     static bool rendering;
     if (qatomic_xchg(&rendering, true) || qatomic_read(&qemu_exiting)) {
@@ -938,6 +939,9 @@ static void gl_render_frame(struct xemu_console *scon)
 
     bool flip_required = false;
     bool release_surface_texture = false;
+#if defined(__ANDROID__) || defined(ANDROID)
+    bool acquired_surface = false;
+#endif
 
 #if defined(__ANDROID__) || defined(ANDROID)
     if (s_last_tex == 0) {
@@ -952,14 +956,29 @@ static void gl_render_frame(struct xemu_console *scon)
     }
 #endif
 
-    if (frames % 60 == 1) ALOGI("gl_render_frame: calling nv2a_get_framebuffer_surface");
-    GLuint tex = nv2a_get_framebuffer_surface();
-    if (frames % 60 == 1) ALOGI("gl_render_frame: nv2a_get_framebuffer_surface returned %d", tex);
+    GLuint tex;
 #if defined(__ANDROID__) || defined(ANDROID)
-    s_last_tex = tex;
-    if (tex == 0) {
-        s_last_miss_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    /* Only sync with the NV2A PGRAPH thread when the Xbox has produced a new
+     * frame (frame_time advanced past what we last composited).  Re-use the
+     * cached texture otherwise — this avoids 60 redundant pfifo.lock +
+     * sync_complete round-trips per second when TCG is running at <1 fps. */
+    int cur_frame_time = nv2a_get_frame_time();
+    if (s_last_tex != 0 && cur_frame_time == s_last_synced_frame_time) {
+        tex = s_last_tex;
+    } else {
+        if (frames % 60 == 1) ALOGI("gl_render_frame: calling nv2a_get_framebuffer_surface (frame_time=%d)", cur_frame_time);
+        tex = nv2a_get_framebuffer_surface();
+        acquired_surface = true;
+        if (frames % 60 == 1) ALOGI("gl_render_frame: nv2a_get_framebuffer_surface returned %d", tex);
+        s_last_tex = tex;
+        if (tex != 0) {
+            s_last_synced_frame_time = cur_frame_time;
+        } else {
+            s_last_miss_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        }
     }
+#else
+    tex = nv2a_get_framebuffer_surface();
 #endif
 
 #if !defined(__ANDROID__) && !defined(ANDROID)
@@ -1080,7 +1099,13 @@ skip_render:
     /* Release EGL context on all paths, including early-exit (goto skip_render). */
     set_egl_current(false);
 #endif
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (acquired_surface) {
+        nv2a_release_framebuffer_surface();
+    }
+#else
     nv2a_release_framebuffer_surface();
+#endif
     qatomic_set(&rendering, false);
 
 #if DEBUG_XEMU_C
