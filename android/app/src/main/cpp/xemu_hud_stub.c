@@ -12,12 +12,21 @@
 bool g_screenshot_pending = false;
 float g_main_menu_height = 0.0f;
 
+// ---- Aspect ratio ----
+// true  = 16:9 (stretch to fill screen, default)
+// false = 4:3  (pillarbox/letterbox to preserve Xbox AR)
+static bool g_aspect_16x9 = true;
+
+void xemu_hud_set_aspect_16x9(bool wide) {
+    g_aspect_16x9 = wide;
+}
+
 // ---- Fullscreen blit state ----
 static GLuint s_blit_tex  = 0;
 static GLuint s_blit_prog = 0;
 static GLuint s_blit_vao  = 0;
 static GLint  s_blit_tex_loc  = -1;
-static GLint  s_blit_size_loc = -1;
+static GLint  s_blit_ndc_loc  = -1;
 
 static void check_shader_compile(GLuint shader, const char *name)
 {
@@ -32,12 +41,20 @@ static void check_shader_compile(GLuint shader, const char *name)
 
 static void init_blit_resources(void)
 {
+    /* dst_ndc: x0,y0,x1,y1 in NDC space for the destination quad.
+     * Vertex layout (triangle strip): BL=0, BR=1, TL=2, TR=3.
+     * v_uv is always (0,0)→(1,1) regardless of dst_ndc. */
     const char *vs =
         "#version 300 es\n"
+        "uniform vec4 dst_ndc;\n"
+        "out vec2 v_uv;\n"
         "void main() {\n"
-        "    float x = -1.0 + float((gl_VertexID & 1) << 2);\n"
-        "    float y = -1.0 + float((gl_VertexID & 2) << 1);\n"
+        "    float x = ((gl_VertexID & 1) == 0) ? dst_ndc.x : dst_ndc.z;\n"
+        "    float y = ((gl_VertexID & 2) == 0) ? dst_ndc.y : dst_ndc.w;\n"
+        "    float u = ((gl_VertexID & 1) == 0) ? 0.0 : 1.0;\n"
+        "    float v = ((gl_VertexID & 2) == 0) ? 0.0 : 1.0;\n"
         "    gl_Position = vec4(x, y, 0.0, 1.0);\n"
+        "    v_uv = vec2(u, v);\n"
         "}\n";
 
     /* Sample r->gl_display_buffer: after render_display's Y-flip, the
@@ -48,11 +65,10 @@ static void init_blit_resources(void)
         "#version 300 es\n"
         "precision highp float;\n"
         "uniform sampler2D tex;\n"
-        "uniform vec2 display_size;\n"
+        "in vec2 v_uv;\n"
         "layout(location = 0) out vec4 fragColor;\n"
         "void main() {\n"
-        "    vec2 uv = gl_FragCoord.xy / display_size;\n"
-        "    fragColor = vec4(texture(tex, uv).rgb, 1.0);\n"
+        "    fragColor = vec4(texture(tex, v_uv).rgb, 1.0);\n"
         "}\n";
 
     GLuint v = glCreateShader(GL_VERTEX_SHADER);
@@ -80,12 +96,12 @@ static void init_blit_resources(void)
     glDeleteShader(f);
 
     s_blit_tex_loc  = glGetUniformLocation(s_blit_prog, "tex");
-    s_blit_size_loc = glGetUniformLocation(s_blit_prog, "display_size");
+    s_blit_ndc_loc  = glGetUniformLocation(s_blit_prog, "dst_ndc");
 
     glGenVertexArrays(1, &s_blit_vao);
 
-    LOGI("blit shader initialised (prog=%u vao=%u tex_loc=%d size_loc=%d)",
-         s_blit_prog, s_blit_vao, s_blit_tex_loc, s_blit_size_loc);
+    LOGI("blit shader initialised (prog=%u vao=%u tex_loc=%d ndc_loc=%d)",
+         s_blit_prog, s_blit_vao, s_blit_tex_loc, s_blit_ndc_loc);
 }
 
 // ---- Stub implementations ----
@@ -134,9 +150,30 @@ void xemu_hud_render(void)
     float w = (float)vp[2];
     float h = (float)vp[3];
 
+    /* Compute destination rect in NDC space.
+     * 16:9 mode: fill the whole viewport (NDC -1..1).
+     * 4:3 mode:  pillarbox or letterbox to preserve 4:3 Xbox output. */
+    float x0 = -1.0f, y0 = -1.0f, x1 = 1.0f, y1 = 1.0f;
+    if (!g_aspect_16x9 && w > 0.0f && h > 0.0f) {
+        const float target_ar = 4.0f / 3.0f;
+        float screen_ar = w / h;
+        if (screen_ar > target_ar) {
+            /* Screen is wider than 4:3 → pillarbox: shrink x */
+            float rect_w_ndc = target_ar / screen_ar; /* fraction of half-width */
+            x0 = -rect_w_ndc;
+            x1 =  rect_w_ndc;
+        } else if (screen_ar < target_ar) {
+            /* Screen is taller than 4:3 → letterbox: shrink y */
+            float rect_h_ndc = screen_ar / target_ar;
+            y0 = -rect_h_ndc;
+            y1 =  rect_h_ndc;
+        }
+    }
+
     if (s_blit_frame % 60 == 1) {
-        LOGI("xemu_hud_render: tex=%u vp=%d,%d,%d,%d prog=%u",
-             s_blit_tex, vp[0], vp[1], vp[2], vp[3], s_blit_prog);
+        LOGI("xemu_hud_render: tex=%u vp=%d,%d,%d,%d prog=%u ar=%s ndc=(%.3f,%.3f,%.3f,%.3f)",
+             s_blit_tex, vp[0], vp[1], vp[2], vp[3], s_blit_prog,
+             g_aspect_16x9 ? "16:9" : "4:3", x0, y0, x1, y1);
     }
 
     /* Render to the EGL window surface (FBO 0) */
@@ -149,14 +186,20 @@ void xemu_hud_render(void)
     glDisable(GL_CULL_FACE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
+    /* Clear pillarbox/letterbox bars to black */
+    if (x0 > -1.0f || y0 > -1.0f) {
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
     glUseProgram(s_blit_prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, s_blit_tex);
     glUniform1i(s_blit_tex_loc, 0);
-    glUniform2f(s_blit_size_loc, w, h);
+    glUniform4f(s_blit_ndc_loc, x0, y0, x1, y1);
 
     glBindVertexArray(s_blit_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     /* Diagnostic: sample the center pixel to detect black output */
     if (s_blit_frame % 60 == 1 && vp[2] > 0 && vp[3] > 0) {

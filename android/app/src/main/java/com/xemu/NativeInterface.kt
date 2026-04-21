@@ -59,4 +59,11 @@ object NativeInterface {
     external fun sendAxis(axis: Int, value: Int)
     /** Terminate the emulation process and return to MainActivity. */
     external fun requestExit()
+
+    /**
+     * Set the display aspect ratio.
+     * wide=true  → 16:9 stretch (default).
+     * wide=false → 4:3 with pillarboxing/letterboxing.
+     */
+    external fun setAspectRatio(wide: Boolean)
 }

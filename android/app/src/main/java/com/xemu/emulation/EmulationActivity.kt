@@ -31,6 +31,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private enum class OverlayMode { AUTO, ALWAYS_SHOW, ALWAYS_HIDE }
     private var overlayMode = OverlayMode.AUTO
 
+    // Display aspect ratio: true = 16:9 stretch (default), false = 4:3 pillarbox
+    private var aspect16x9 = true
+
     // D-pad hat axis state (for AXIS_HAT_X / AXIS_HAT_Y)
     private var lastHatX = 0f
     private var lastHatY = 0f
@@ -46,6 +49,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         overlayMode = OverlayMode.valueOf(
             prefs.getString("overlay_mode", OverlayMode.AUTO.name) ?: OverlayMode.AUTO.name
         )
+        aspect16x9 = prefs.getBoolean("aspect_16x9", true)
 
         val root = FrameLayout(this)
         setContentView(root)
@@ -84,6 +88,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             override fun surfaceCreated(holder: SurfaceHolder) {
                 if (!emulationStarted) {
                     startEmulation(holder)
+                    NativeInterface.setAspectRatio(aspect16x9)
                     emulationStarted = true
                 } else {
                     // Surface recreated after going to background or rotating — hand the
@@ -218,16 +223,24 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             OverlayMode.ALWAYS_SHOW -> "Overlay: Always Show"
             OverlayMode.ALWAYS_HIDE -> "Overlay: Always Hide"
         }
+        val aspectLabel = if (aspect16x9) "Aspect: 16:9 (stretch)" else "Aspect: 4:3 (pillarbox)"
         AlertDialog.Builder(this)
             .setTitle("Menu")
-            .setItems(arrayOf(overlayLabel, "Map Controls", "Exit")) { _, which ->
+            .setItems(arrayOf(overlayLabel, aspectLabel, "Map Controls", "Exit")) { _, which ->
                 when (which) {
                     0 -> cycleOverlayMode()
-                    1 -> startActivity(Intent(this, MappingActivity::class.java))
-                    2 -> confirmExit()
+                    1 -> toggleAspectRatio()
+                    2 -> startActivity(Intent(this, MappingActivity::class.java))
+                    3 -> confirmExit()
                 }
             }
             .show()
+    }
+
+    private fun toggleAspectRatio() {
+        aspect16x9 = !aspect16x9
+        prefs.edit().putBoolean("aspect_16x9", aspect16x9).apply()
+        NativeInterface.setAspectRatio(aspect16x9)
     }
 
     private fun cycleOverlayMode() {

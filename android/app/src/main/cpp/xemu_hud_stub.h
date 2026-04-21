@@ -18,6 +18,11 @@ void xemu_hud_set_framebuffer_texture(uint32_t tex, bool flip);
 void xemu_hud_update(void);
 void xemu_hud_render(void);
 
+/* Aspect ratio control.
+ * wide=true  → 16:9 stretch (default).
+ * wide=false → 4:3 with pillarboxing/letterboxing. */
+void xemu_hud_set_aspect_16x9(bool wide);
+
 #ifdef __cplusplus
 }
 #endif

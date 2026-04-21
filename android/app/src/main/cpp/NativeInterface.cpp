@@ -7,6 +7,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include "xemu_android.h"
+#include "xemu_hud_stub.h"
 
 #define LOG_TAG "xemu-android"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -107,6 +108,11 @@ Java_com_xemu_NativeInterface_sendAxis(JNIEnv *env, jclass clazz, jint axis, jin
 JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_requestExit(JNIEnv *env, jclass clazz) {
     xemu_android_request_exit();
+}
+
+JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_setAspectRatio(JNIEnv *env, jclass clazz, jboolean wide) {
+    xemu_hud_set_aspect_16x9((bool)wide);
 }
 
 } // extern "C"
