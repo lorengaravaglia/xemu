@@ -698,6 +698,63 @@ error:
     g_free(cached_gl_vendor);
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/* On Android, xemu_android_request_exit() calls _exit(0) which bypasses the
+ * normal QEMU shutdown sequence.  This means pgraph_gl_shader_write_cache_reload_list()
+ * (which writes shader_cache_list) never runs.  The individual shader binary files
+ * ARE written incrementally as each shader compiles, so we recover them by
+ * scanning the shaders/ directory directly on next launch. */
+#include <dirent.h>
+
+static void shader_android_scan_and_load(PGRAPHState *pg)
+{
+    const char *base = xemu_settings_get_base_path();
+    char *shaders_dir = g_strdup_printf("%sshaders", base);
+
+    DIR *top = opendir(shaders_dir);
+    if (!top) {
+        ALOGI("shader_android_scan: no shaders dir at %s", shaders_dir);
+        g_free(shaders_dir);
+        return;
+    }
+
+    int loaded = 0;
+    struct dirent *de;
+    while ((de = readdir(top)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+
+        unsigned int dir_prefix = 0;
+        if (sscanf(de->d_name, "%04x", &dir_prefix) != 1) continue;
+
+        char *subdir = g_strdup_printf("%s/%s", shaders_dir, de->d_name);
+        DIR *sub = opendir(subdir);
+        if (!sub) {
+            g_free(subdir);
+            continue;
+        }
+
+        struct dirent *fe;
+        while ((fe = readdir(sub)) != NULL) {
+            if (fe->d_name[0] == '.') continue;
+
+            uint64_t file_bits = 0;
+            if (sscanf(fe->d_name, "%" SCNx64, &file_bits) != 1) continue;
+
+            uint64_t hash = ((uint64_t)dir_prefix << 48) | (file_bits & 0x0000ffffffffffffULL);
+            shader_load_from_disk(pg, hash);
+            loaded++;
+        }
+
+        closedir(sub);
+        g_free(subdir);
+    }
+
+    closedir(top);
+    g_free(shaders_dir);
+    ALOGI("shader_android_scan: loaded %d shader(s) from disk", loaded);
+}
+#endif /* __ANDROID__ */
+
 static void *shader_reload_lru_from_disk(void *arg)
 {
     if (!g_config.perf.cache_shaders) {
@@ -710,6 +767,10 @@ static void *shader_reload_lru_from_disk(void *arg)
     FILE *lru_shaders_list = qemu_fopen(shader_lru_path, "rb");
     g_free(shader_lru_path);
     if (!lru_shaders_list) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* LRU list file never written on Android — fall back to dir scan */
+        shader_android_scan_and_load(pg);
+#endif
         return NULL;
     }
 
@@ -718,6 +779,7 @@ static void *shader_reload_lru_from_disk(void *arg)
         shader_load_from_disk(pg, hash);
     }
 
+    fclose(lru_shaders_list);
     return NULL;
 }
 
