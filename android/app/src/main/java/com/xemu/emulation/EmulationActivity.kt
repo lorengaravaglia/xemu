@@ -295,9 +295,16 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     }
 
     private fun getCachedOrCopy(uriStr: String, fileName: String): String {
+        val prefKey = "cached_uri_$fileName"
         val cached = java.io.File(filesDir, fileName)
-        if (cached.exists()) return cached.absolutePath
-        return MainActivity.getRealFilePath(this, uriStr, fileName)
+        if (cached.exists() && prefs.getString(prefKey, null) == uriStr) {
+            return cached.absolutePath
+        }
+        // URI changed or cache missing — delete stale copy and re-copy from source
+        cached.delete()
+        val path = MainActivity.getRealFilePath(this, uriStr, fileName)
+        prefs.edit().putString(prefKey, uriStr).apply()
+        return path
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
