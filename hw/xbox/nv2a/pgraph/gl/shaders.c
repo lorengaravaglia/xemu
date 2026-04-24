@@ -713,7 +713,7 @@ static void shader_android_scan_and_load(PGRAPHState *pg)
 
     DIR *top = opendir(shaders_dir);
     if (!top) {
-        ALOGI("shader_android_scan: no shaders dir at %s", shaders_dir);
+        fprintf(stderr, "shader_android_scan: no shaders dir at %s\n", shaders_dir);
         g_free(shaders_dir);
         return;
     }
@@ -751,7 +751,7 @@ static void shader_android_scan_and_load(PGRAPHState *pg)
 
     closedir(top);
     g_free(shaders_dir);
-    ALOGI("shader_android_scan: loaded %d shader(s) from disk", loaded);
+    fprintf(stderr, "shader_android_scan: loaded %d shader(s) from disk\n", loaded);
 }
 #endif /* __ANDROID__ */
 
@@ -831,6 +831,9 @@ void pgraph_gl_init_shaders(PGRAPHState *pg)
     }
 
     shader_create_cache_folder();
+
+    fprintf(stderr, "pgraph_gl_init_shaders: cache_shaders=%d base_path=%s\n",
+            (int)g_config.perf.cache_shaders, xemu_settings_get_base_path());
 
     /* FIXME: Make this configurable */
     const size_t shader_cache_size = 50*1024;

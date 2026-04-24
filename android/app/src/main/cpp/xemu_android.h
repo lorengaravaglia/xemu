@@ -45,6 +45,10 @@ void xemu_android_surface_mark_valid(void);
 
 /* Returns true if egl_surface is valid and the render thread may use it. */
 bool xemu_android_surface_valid(void);
+
+/* Block the calling thread until the EGL surface is valid (app foregrounded)
+ * or a short timeout expires.  Safe to call from any thread. */
+void xemu_android_wait_for_surface(void);
 void xemu_android_input_init(void);
 
 /* Called from JNI input thread to update the virtual controller state.

@@ -894,6 +894,15 @@ static void *vblank_timer_thread(void *opaque)
 
         if (!qatomic_read(&qemu_exiting)) {
 #if defined(__ANDROID__) || defined(ANDROID)
+            /* When paused and no surface, block here instead of acquiring
+             * the BQL 60 times/second for a no-op process_vblank call.
+             * Reset next_vblank after waking so we resume at the correct
+             * cadence without a catch-up burst. */
+            if (!runstate_is_running() && !xemu_android_surface_valid()) {
+                xemu_android_wait_for_surface();
+                next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                continue;
+            }
             if (frames % 60 == 0) ALOGI("vblank_timer_thread: calling process_vblank (frame %d)", frames);
             frames++;
 #endif
@@ -1839,9 +1848,18 @@ int xemu_core_main(int argc, char **argv)
     struct xemu_console *scon = &scon_list[0];
     int frames = 0;
     while (!qatomic_read(&qemu_exiting)) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* When the surface is gone (app backgrounded), block instead of
+         * spinning at 60fps doing nothing.  Wakes immediately when the
+         * surface is recreated (app returns to foreground). */
+        if (!xemu_android_surface_valid()) {
+            xemu_android_wait_for_surface();
+            continue;
+        }
         if (frames % 60 == 0) {
             ALOGI("Main loop iteration %d", frames);
         }
+#endif
 #if !defined(__ANDROID__) && !defined(ANDROID)
         if (xemu_is_main_thread()) {
             poll_events(scon);

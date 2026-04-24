@@ -54,6 +54,19 @@ bool xemu_android_surface_valid(void) {
     return v;
 }
 
+void xemu_android_wait_for_surface(void) {
+    struct timespec ts;
+    pthread_mutex_lock(&g_surface_mutex);
+    while (!g_surface_valid) {
+        /* Use a 1-second timeout so the caller can re-check qemu_exiting
+         * and other exit conditions without blocking indefinitely. */
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1;
+        pthread_cond_timedwait(&g_surface_cond, &g_surface_mutex, &ts);
+    }
+    pthread_mutex_unlock(&g_surface_mutex);
+}
+
 /* Set to true once QEMU has initialized the BQL and the VM is running.
  * Guards xemu_android_vm_pause/resume against being called too early
  * (onResume() fires before startEmulation() on first launch). */
@@ -66,6 +79,7 @@ void xemu_android_surface_mark_valid(void) {
     g_qemu_initialized = true;
     pthread_mutex_lock(&g_surface_mutex);
     g_surface_valid = true;
+    pthread_cond_broadcast(&g_surface_cond);
     pthread_mutex_unlock(&g_surface_mutex);
 }
 
@@ -138,6 +152,7 @@ void xemu_android_surface_created(ANativeWindow *window) {
     }
     pthread_mutex_lock(&g_surface_mutex);
     g_surface_valid = true;
+    pthread_cond_broadcast(&g_surface_cond);
     pthread_mutex_unlock(&g_surface_mutex);
     LOGI("surface_created: EGL surface ready");
 }
