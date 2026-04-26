@@ -42,6 +42,7 @@
 #include "system/runstate.h"
 #include "system/runstate-action.h"
 #include "system/system.h"
+#include "block/block-global-state.h"
 #if defined(__ANDROID__) || defined(ANDROID)
 #include "../android/app/src/main/cpp/xemu_hud_stub.h"
 #else
@@ -112,6 +113,25 @@ void xemu_android_vm_resume(void)
         vm_start();
     }
     bql_unlock();
+}
+
+/* Stop the VM and flush all block devices (qcow2 HDD) to disk so the
+ * dirty bit is cleared before _exit().  Call this from the exit handler
+ * to ensure data written during the session survives the next open without
+ * requiring qcow2 dirty-bit recovery. */
+void xemu_android_flush_block_devices(void)
+{
+    if (!xemu_android_qemu_initialized()) return;
+    bql_lock();
+    if (runstate_is_running()) {
+        vm_stop(RUN_STATE_SHUTDOWN);
+    }
+    bql_unlock();
+    /* Drain all pending block I/O, then flush to clear the qcow2 dirty bit.
+     * Called outside the BQL: bdrv_drain_all_begin is GRAPH_UNLOCKED. */
+    bdrv_drain_all_begin();
+    bdrv_flush_all();
+    bdrv_drain_all_end();
 }
 #endif
 #else

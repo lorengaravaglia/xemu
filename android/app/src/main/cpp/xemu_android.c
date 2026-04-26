@@ -235,16 +235,16 @@ void xemu_android_set_axis(int axis_index, int16_t value) {
 
 void xemu_android_request_exit(void) {
     LOGI("Exit requested — terminating emulation process.");
-    /* EmulationActivity runs in :EmulationProcess (separate process from
-     * MainActivity), so _exit() here cleanly terminates emulation without
-     * affecting the main app process.
+    /* Stop the VM and flush all block devices so the qcow2 HDD image is in
+     * a clean state on the next open.  Without this, _exit() leaves the
+     * qcow2 dirty bit set and any pending FATX metadata writes are lost,
+     * which causes "Unable to create new player profile" on the next session.
      *
-     * We use _exit() (not exit()) deliberately: exit() runs all atexit()
+     * We use _exit() (not exit()) after the flush: exit() would run atexit()
      * handlers (including xemu_settings_save) while QEMU threads are still
-     * live.  Those handlers race with active threads, corrupt global state,
-     * and write a broken config file (e.g. dvd_path=/proc/self/fd/N from
-     * the dying process) that causes a pixman use-after-free crash on the
-     * very next emulation session. */
+     * live, corrupting the config file (e.g. dvd_path=/proc/self/fd/N). */
+    xemu_android_flush_block_devices();
+    LOGI("Block devices flushed — exiting.");
     _exit(0);
 }
 

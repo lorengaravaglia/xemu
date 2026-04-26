@@ -65,6 +65,11 @@ void xemu_android_request_exit(void);
 void xemu_android_vm_pause(void);
 void xemu_android_vm_resume(void);
 
+/* Stop the VM and flush all block devices (qcow2 HDD) to disk, clearing
+ * the dirty bit so the next session can open the image cleanly.
+ * Defined in ui/xemu.c. */
+void xemu_android_flush_block_devices(void);
+
 /* Returns true once qemu_init() has completed and the BQL is initialized. */
 bool xemu_android_qemu_initialized(void);
 
