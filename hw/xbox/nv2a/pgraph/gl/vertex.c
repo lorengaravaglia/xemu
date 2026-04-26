@@ -80,6 +80,7 @@ void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
     }
 
     pg->compressed_attrs = 0;
+    pg->swizzle_attrs = 0;
 
     for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
         VertexAttribute *attr = &pg->vertex_attributes[i];
@@ -145,6 +146,11 @@ void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
         if (needs_conversion) {
             pg->compressed_attrs |= (1 << i);
         }
+#if defined(__ANDROID__) || defined(ANDROID)
+        if (attr->format == NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_UB_D3D) {
+            pg->swizzle_attrs |= (1 << i);
+        }
+#endif
 
         hwaddr start = 0;
         if (inline_data) {

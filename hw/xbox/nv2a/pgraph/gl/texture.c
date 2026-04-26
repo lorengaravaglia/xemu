@@ -553,22 +553,6 @@ static void upload_gl_texture(GLenum gl_target,
         f.gl_swizzle_mask[0] = f.gl_swizzle_mask[1] =
         f.gl_swizzle_mask[2] = f.gl_swizzle_mask[3] = 0;
     }
-    /* Always log A8 expansions; log first 500 uploads for general diagnosis. */
-    if (is_a8_expand) {
-        __android_log_print(ANDROID_LOG_INFO, "xemu-tex",
-            "TEX-A8 color_fmt=0x%x w=%u h=%u gl_int=0x%x gl_fmt=0x%x",
-            (unsigned)s.color_format, s.width, s.height,
-            (unsigned)f.gl_internal_format, (unsigned)tex_gl_format);
-    } else {
-        static int tex_log_cnt = 0;
-        if (tex_log_cnt < 500) {
-            __android_log_print(ANDROID_LOG_INFO, "xemu-tex",
-                "TEX[%d] color_fmt=0x%x w=%u h=%u gl_int=0x%x gl_fmt=0x%x",
-                tex_log_cnt++, (unsigned)s.color_format,
-                s.width, s.height,
-                (unsigned)f.gl_internal_format, (unsigned)tex_gl_format);
-        }
-    }
 #else
     bool is_a8_expand = false;
     GLenum tex_gl_format = f.gl_format;

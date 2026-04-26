@@ -393,6 +393,17 @@ void pgraph_gl_render_surface_to_texture(NV2AState *d, SurfaceBinding *surface,
     render_surface_to(d, surface, texture_unit, texture->gl_target,
                              texture->gl_texture, width, height);
     glBindTexture(texture->gl_target, texture->gl_texture);
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* The FBO content is GPU-rendered and already in correct RGBA channel
+     * order — no BGRA→RGBA correction needed.  Reset swizzle to identity so
+     * the corrective swizzle that generate_texture() may have set for a prior
+     * CPU-uploaded BGRA texture on this same GL texture object does not
+     * accidentally swap R↔B on the GPU-rendered content. */
+    glTexParameteri(texture->gl_target, GL_TEXTURE_SWIZZLE_R, GL_RED);
+    glTexParameteri(texture->gl_target, GL_TEXTURE_SWIZZLE_G, GL_GREEN);
+    glTexParameteri(texture->gl_target, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+    glTexParameteri(texture->gl_target, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
+#endif
     glUseProgram(
         r->shader_binding ? r->shader_binding->gl_program : 0);
 }
