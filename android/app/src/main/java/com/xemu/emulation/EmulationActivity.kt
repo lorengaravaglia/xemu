@@ -122,6 +122,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     override fun onDestroy() {
         super.onDestroy()
+        NativeInterface.flushBlockDevices()
         isoPfd?.close()
     }
 
@@ -298,45 +299,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val prefKey = "cached_uri_$fileName"
         val cached = java.io.File(filesDir, fileName)
         if (cached.exists() && prefs.getString(prefKey, null) == uriStr) {
-            if (!isQcow2Dirty(cached)) {
-                return cached.absolutePath
-            }
-            // qcow2 dirty bit is set — the process was killed before a clean flush
-            // (e.g. Android Studio rebuild, device restart). Re-copy from source so
-            // QEMU doesn't open a file with inconsistent FATX metadata.
-            android.util.Log.w("xemu-kotlin",
-                "$fileName has dirty qcow2 bit — re-copying from source")
+            return cached.absolutePath
         }
-        // URI changed, cache missing, or dirty qcow2 — delete and re-copy from source
         cached.delete()
         val path = MainActivity.getRealFilePath(this, uriStr, fileName)
         prefs.edit().putString(prefKey, uriStr).apply()
         return path
-    }
-
-    /**
-     * Returns true if [file] is a qcow2 image (version 3+) with the dirty bit set,
-     * meaning it was not cleanly closed on last use.
-     * Returns false for non-qcow2 files or any I/O error.
-     */
-    private fun isQcow2Dirty(file: java.io.File): Boolean {
-        if (file.length() < 80) return false
-        return try {
-            java.io.RandomAccessFile(file, "r").use { raf ->
-                val magic = ByteArray(4)
-                raf.readFully(magic)
-                // qcow2 magic: "QFI\xfb"
-                if (magic[0] != 'Q'.code.toByte() || magic[1] != 'F'.code.toByte() ||
-                    magic[2] != 'I'.code.toByte() || magic[3] != 0xfb.toByte()) return false
-                val version = raf.readInt()   // big-endian uint32; readInt() is big-endian in Java
-                if (version < 3) return false // dirty bit only exists in qcow2 v3+
-                raf.seek(72)                  // incompatible_features field (uint64 big-endian)
-                val incompatFeatures = raf.readLong()
-                (incompatFeatures and 1L) != 0L  // bit 0 = dirty bit
-            }
-        } catch (e: Exception) {
-            false
-        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

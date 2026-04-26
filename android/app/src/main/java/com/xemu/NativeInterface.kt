@@ -59,6 +59,8 @@ object NativeInterface {
     external fun sendAxis(axis: Int, value: Int)
     /** Terminate the emulation process and return to MainActivity. */
     external fun requestExit()
+    /** Stop the VM and flush all block devices to disk (clears qcow2 dirty bit). */
+    external fun flushBlockDevices()
 
     /**
      * Set the display aspect ratio.

@@ -77,6 +77,11 @@ Java_com_xemu_NativeInterface_resumeEmulation(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_flushBlockDevices(JNIEnv *env, jclass clazz) {
+    xemu_android_flush_block_devices();
+}
+
+JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_setSurface(JNIEnv *env, jclass clazz, jobject surface) {
     if (surface == nullptr) {
         xemu_android_surface_destroyed();
