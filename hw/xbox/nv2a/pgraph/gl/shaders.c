@@ -107,7 +107,15 @@ static char *patch_shader_source(const char *src, GLenum type) {
                 "#extension GL_EXT_gpu_shader5 : enable\n");
         }
 
-        g_string_append(patched, "precision highp float;\nprecision highp int;\n");
+        g_string_append(patched,
+            "precision highp float;\n"
+            "precision highp int;\n"
+            "precision highp sampler2D;\n"
+            "precision highp sampler3D;\n"
+            "precision highp samplerCube;\n"
+            "precision highp sampler2DArray;\n"
+            "precision highp sampler2DShadow;\n"
+            "precision highp sampler2DArrayShadow;\n");
         if (!gles31) {
             /* bitfieldExtract polyfill: not a built-in until GLSL ES 3.10 */
             g_string_append(patched,
