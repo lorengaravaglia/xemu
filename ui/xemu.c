@@ -133,6 +133,15 @@ void xemu_android_flush_block_devices(void)
     bdrv_flush_all();
     bdrv_drain_all_end();
 }
+
+/* Frame counter incremented after each eglSwapBuffers — read by JNI to
+ * compute FPS in the Kotlin UI layer. */
+static volatile int g_rendered_frame_count = 0;
+
+int xemu_android_get_rendered_frame_count(void)
+{
+    return g_rendered_frame_count;
+}
 #endif
 #else
 #define ALOGI(...) fprintf(stderr, __VA_ARGS__)
@@ -1035,6 +1044,7 @@ static void gl_render_frame(struct xemu_console *scon)
         s_last_tex = tex;
         if (tex != 0) {
             s_last_synced_frame_time = cur_frame_time;
+            g_rendered_frame_count++;
         } else {
             s_last_miss_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         }

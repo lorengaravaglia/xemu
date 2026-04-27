@@ -5,6 +5,8 @@ import android.content.Intent
 import android.graphics.Color
 import android.hardware.input.InputManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.view.*
 import android.widget.FrameLayout
@@ -38,6 +40,26 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private var lastHatX = 0f
     private var lastHatY = 0f
 
+    // FPS counter overlay
+    private lateinit var fpsTextView: TextView
+    private val fpsHandler = Handler(Looper.getMainLooper())
+    private var lastFrameCount = 0
+    private var lastFpsTime = 0L
+    private val fpsRunnable = object : Runnable {
+        override fun run() {
+            val now = System.currentTimeMillis()
+            val count = NativeInterface.getRenderedFrameCount()
+            val elapsed = now - lastFpsTime
+            if (lastFpsTime != 0L && elapsed > 0) {
+                val fps = (count - lastFrameCount) * 1000f / elapsed
+                fpsTextView.text = "%.1f FPS".format(fps)
+            }
+            lastFrameCount = count
+            lastFpsTime = now
+            fpsHandler.postDelayed(this, 1000)
+        }
+    }
+
     private val prefs get() = getSharedPreferences("emulation_prefs", Context.MODE_PRIVATE)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,6 +89,20 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
+
+        // ── FPS counter (top-left corner) ─────────────────────────────────────
+        fpsTextView = TextView(this).apply {
+            text = "-- FPS"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(160, 30, 30, 30))
+            setPadding(20, 10, 20, 10)
+        }
+        root.addView(fpsTextView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START
+        ).apply { topMargin = 16; leftMargin = 16 })
 
         // ── Menu button (top-right corner) ────────────────────────────────────
         val menuBtn = TextView(this).apply {
@@ -111,11 +147,14 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         super.onResume()
         NativeInterface.resumeEmulation()
         inputManager.registerInputDeviceListener(this, null)
+        lastFpsTime = 0L
+        fpsHandler.post(fpsRunnable)
         updateOverlayVisibility()
     }
 
     override fun onPause() {
         super.onPause()
+        fpsHandler.removeCallbacks(fpsRunnable)
         NativeInterface.pauseEmulation()
         inputManager.unregisterInputDeviceListener(this)
     }

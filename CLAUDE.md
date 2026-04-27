@@ -238,6 +238,8 @@ All formats using `GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV` (A8R8G8B8, X8R8G8B8 �
 
 **2. R/B channel swizzle** (`generate_texture()`, Android block): Substituting `GL_BGRA → GL_RGBA` causes Xbox_B to land in `texture.r` and Xbox_R in `texture.b`. Fix: set swizzle mask `{GL_BLUE, GL_GREEN, GL_RED, GL_ALPHA}` for all formats where `f.gl_format == GL_BGRA && f.gl_type == GL_UNSIGNED_INT_8_8_8_8_REV`. This condition correctly excludes B8G8R8A8 (no REV) and A4R4G4B4 (manually expanded via a separate path that resets the swizzle to identity).
 
+**3. Surface-to-texture swizzle reset** (`pgraph_gl_render_surface_to_texture()` fast path in `surface.c`, Android block): When a GPU-rendered surface is used as a texture, the fast path reuses the existing GL texture object and renders the FBO content into it. The BGRA corrective swizzle set by `generate_texture()` for a prior CPU-uploaded use of that texture object must be reset to identity `{GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA}` — FBO-rendered content is already in correct channel order and the corrective swizzle would incorrectly swap R↔B. Symptom if missing: render-to-texture surfaces appear with R↔B swap (e.g. Halo CE loading screen appeared purple instead of blue).
+
 **xemu Y-axis convention**: Positive Y = stick pushed up (matches keyboard mapping in `xemu-input.c`). Android reports `AXIS_Y`/`AXIS_RZ` as −1.0 when pushed up, so both `GamepadView` (touch overlay) and `EmulationActivity` (physical controller path) negate Y axes before calling `NativeInterface.sendAxis()`.
 
 ## NV2A PGRAPH / GLSL Shader Compatibility (Android)
@@ -255,7 +257,7 @@ Two cached probes run on first shader compilation:
 
 ### `patch_shader_source()` — what it does on Android
 
-1. **Version line**: Replaces the desktop `#version 400` with `#version 310 es` (GLES 3.1+) or `#version 300 es` (GLES 3.0). Adds `precision highp float; precision highp int;`.
+1. **Version line**: Replaces the desktop `#version 400` with `#version 310 es` (GLES 3.1+) or `#version 300 es` (GLES 3.0). Adds `precision highp float; precision highp int;` plus precision qualifiers for all sampler types (`sampler2D`, `sampler3D`, `samplerCube`, `sampler2DArray`, `sampler2DShadow`, `sampler2DArrayShadow`) — GLES requires explicit precision on all sampler uniforms or a shader compile error results.
 2. **`bitfieldExtract` polyfill** (GLES 3.0 only): This built-in is not available until GLSL ES 3.10. A sign-extending integer polyfill is injected into the shader preamble.
 3. **Fragment shader fixups**: Removes the `out vec4 out_Color` declaration (replaced by `fragColor` via `#define`), fixes `textureSize()` return type cast.
 4. **uint/int type fixes** (all shaders): Strict GLSL ES rejects `uint == int` and passing ambiguous hex literals to `uintBitsToFloat`. Replacements applied:
@@ -320,10 +322,12 @@ From `.github/copilot-instructions.md`: developer style guide is at `docs/devel/
 - **`generated/config-host.h` vs `build/config-host.h` layout mismatch.** CMake-compiled files find `android/app/src/main/cpp/generated/config-host.h` before `build/config-host.h` (due to include path order). The generated file is intentionally minimal, so any `CONFIG_*` flag that guards struct members in shared headers (e.g. `CONFIG_GIO` guards `set_dbus_server` in `struct audio_driver` in `audio_int.h`) **must** be explicitly added as `add_definitions(-DCONFIG_XXX=1)` in CMakeLists.txt. Forgetting this causes the CMake-compiled struct to have different field offsets than the Meson-compiled version, producing SIGSEGV with a small non-NULL fault address (e.g. `0x69` = `1 + 0x68` when `max_voices_out=1` is read as a pointer). When adding a new CMake-compiled file that uses QEMU shared headers, check `build/config-host.h` for any `CONFIG_*` flags that affect structs those headers define.
 - **Surface VRAM upload has R/B swap on GLES (fixed in `surface.c`).** The BGRA→RGBA format substitution at surface creation time changes `GL_BGRA+GL_UNSIGNED_INT_8_8_8_8_REV` to `GL_RGBA+GL_UNSIGNED_BYTE`. When CPU-written VRAM data (BGRA byte order) is uploaded via `pgraph_gl_upload_surface_data`, the bytes are interpreted as RGBA, swapping R and B. Fixed in `surface.c`'s upload path by software-swapping bytes 0 and 2 for surfaces with `gl_format==GL_RGBA && gl_type==GL_UNSIGNED_BYTE && bytes_per_pixel==4`. GPU-rendered FBO content is unaffected (it never goes through the upload path after the initial clear).
 - **MCPx APU audio uses SDL directly, not the QEMU audio API.** `hw/xbox/mcpx/apu/monitor.c` calls `SDL_PutAudioStreamData`. SDL audio is not initialized on Android (SDL_Init skipped for stability). Fixed by adding an AAudio (NDK) path in `monitor.c` that opens a 48000 Hz S16LE stereo callback-mode stream with a ring buffer. The `libaaudio` symbols are resolved at final CMake link time (CMakeLists.txt already links libaaudio). Note: Meson-compiled files CAN reference NDK-specific functions (e.g. AAudio) as long as the final CMake link step provides the library — no Meson build change is needed.
+- **Surface-to-texture swizzle must be reset to identity for GPU-rendered content.** `generate_texture()` sets a corrective BGRA swizzle `{GL_BLUE, GL_GREEN, GL_RED, GL_ALPHA}` on GL texture objects for CPU-uploaded BGRA data. If that same texture object is later used as the render target in `pgraph_gl_render_surface_to_texture()` (FBO blit path), the swizzle must be reset to identity — FBO content is GPU-rendered and already in correct RGBA channel order. See `surface.c` fast path.
+- **qcow2 block device flush on exit.** `xemu_android_flush_block_devices()` (defined in `ui/xemu.c`) stops the VM, drains all block I/O, and flushes all block devices — this clears the qcow2 dirty bit so QEMU does not run crash recovery on the next open. Called from: (1) `xemu_android_request_exit()` for in-app exits; (2) `NativeInterface.flushBlockDevices()` → `EmulationActivity.onDestroy()` for system lifecycle kills (swiped from recents, etc.). For SIGKILL (Android Studio force-stop, OOM killer), no flush is possible — QEMU's built-in qcow2 recovery handles consistency on the next open.
 
 ## Android Port — Current Status
 
-As of April 2026, the Android port boots the Xbox BIOS, completes the boot animation, and loads Halo: Combat Evolved to the main menu. The game is partially playable (menu navigation works) but has known rendering issues in-game.
+As of April 2026, the Android port boots the Xbox BIOS, completes the boot animation, and loads Halo: Combat Evolved to the main menu and in-game. The loading screen and in-game rendering display with correct colors.
 
 **Working:**
 - EGL + GLES 3.0 rendering pipeline (three-context model above)
@@ -336,6 +340,8 @@ As of April 2026, the Android port boots the Xbox BIOS, completes the boot anima
 - Game disc loading via file descriptor (`/proc/self/fd/<n>`) — avoids copying large ISOs
 - Controller input: physical/wireless gamepad (`dispatchKeyEvent` + `dispatchGenericMotionEvent`), on-screen touch overlay (`GamepadView`), auto-hide overlay when physical controller connected, button remapping UI (`MappingActivity`), mappings persisted in `SharedPreferences`
 - Audio: MCPx APU routes through AAudio (NDK) in `hw/xbox/mcpx/apu/monitor.c` via ring buffer + callback-mode stream at 48000 Hz S16LE stereo. QEMU audio API aaudio backend (`audio/aaudiosdk.c`) also wired up. Confirmed working.
+- Player profile creation: works correctly. qcow2 is flushed cleanly on normal exits and Android lifecycle kills (`onDestroy`). SIGKILL (Android Studio force-stop) relies on QEMU's built-in qcow2 crash recovery.
+- Halo CE loading screen and in-game rendering: correct colors (surface-to-texture swizzle reset fixed purple tint).
 
 **Not yet implemented / known gaps:**
 

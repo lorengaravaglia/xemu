@@ -73,6 +73,10 @@ void xemu_android_flush_block_devices(void);
 /* Returns true once qemu_init() has completed and the BQL is initialized. */
 bool xemu_android_qemu_initialized(void);
 
+/* Returns the total number of frames rendered (eglSwapBuffers calls).
+ * Sample twice with a known interval to compute FPS. */
+int xemu_android_get_rendered_frame_count(void);
+
 #ifdef __cplusplus
 }
 #endif

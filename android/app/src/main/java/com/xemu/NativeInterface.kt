@@ -61,6 +61,8 @@ object NativeInterface {
     external fun requestExit()
     /** Stop the VM and flush all block devices to disk (clears qcow2 dirty bit). */
     external fun flushBlockDevices()
+    /** Returns total rendered frame count; sample twice over a known interval to compute FPS. */
+    external fun getRenderedFrameCount(): Int
 
     /**
      * Set the display aspect ratio.
