@@ -152,6 +152,10 @@ void xemu_android_surface_created(ANativeWindow *window) {
     };
     egl_surface = eglCreateWindowSurface(egl_display, egl_config, window, srgb_attribs);
     if (egl_surface == EGL_NO_SURFACE) {
+        LOGI("surface_created: sRGB surface failed (0x%x), retrying without", eglGetError());
+        egl_surface = eglCreateWindowSurface(egl_display, egl_config, window, NULL);
+    }
+    if (egl_surface == EGL_NO_SURFACE) {
         LOGE("surface_created: eglCreateWindowSurface failed: 0x%x", eglGetError());
         return;
     }

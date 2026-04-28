@@ -1323,6 +1323,11 @@ static void display_very_early_init(DisplayOptions *o)
     };
     egl_surface = eglCreateWindowSurface(egl_display, config, window, srgb_attribs);
     if (egl_surface == EGL_NO_SURFACE) {
+        ALOGI("eglCreateWindowSurface with sRGB colorspace failed (0x%x), retrying without",
+              eglGetError());
+        egl_surface = eglCreateWindowSurface(egl_display, config, window, NULL);
+    }
+    if (egl_surface == EGL_NO_SURFACE) {
         ALOGE("Error: eglCreateWindowSurface failed");
         return;
     }
