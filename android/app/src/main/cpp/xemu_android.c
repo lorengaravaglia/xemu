@@ -11,6 +11,7 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 
 #define LOG_TAG "xemu-android"
 #define LOGI(...) do { \
@@ -145,7 +146,11 @@ void xemu_android_surface_destroyed(void) {
 void xemu_android_surface_created(ANativeWindow *window) {
     LOGI("surface_created: creating new EGL surface");
     native_window = window;
-    egl_surface = eglCreateWindowSurface(egl_display, egl_config, window, NULL);
+    static const EGLint srgb_attribs[] = {
+        EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_SRGB_KHR,
+        EGL_NONE
+    };
+    egl_surface = eglCreateWindowSurface(egl_display, egl_config, window, srgb_attribs);
     if (egl_surface == EGL_NO_SURFACE) {
         LOGE("surface_created: eglCreateWindowSurface failed: 0x%x", eglGetError());
         return;

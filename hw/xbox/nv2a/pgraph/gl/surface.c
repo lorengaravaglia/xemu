@@ -812,6 +812,23 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
         pg->surface_scale_factor * surface->width,
         pg->surface_scale_factor * surface->height, flip, gl_read_buf);
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* glReadPixels returns RGBA bytes because GLES doesn't support GL_BGRA.
+     * Xbox VRAM and generate_texture() expect BGRA byte order.  Swap bytes 0
+     * and 2 of each 32-bit pixel to restore BGRA order so that the corrective
+     * swizzle in generate_texture() produces correct channel mapping. */
+    if (surface->fmt.gl_format == GL_RGBA &&
+        surface->fmt.gl_type == GL_UNSIGNED_BYTE &&
+        surface->fmt.bytes_per_pixel == 4) {
+        unsigned int npixels = (pg->surface_scale_factor * surface->width) *
+                               (pg->surface_scale_factor * surface->height);
+        uint8_t *p = (uint8_t *)gl_read_buf;
+        for (unsigned int i = 0; i < npixels; i++, p += 4) {
+            uint8_t tmp = p[0]; p[0] = p[2]; p[2] = tmp;
+        }
+    }
+#endif
+
     /* FIXME: Replace this with a hw accelerated version */
     if (downscale) {
         assert(surface->pitch >= (surface->width * surface->fmt.bytes_per_pixel));

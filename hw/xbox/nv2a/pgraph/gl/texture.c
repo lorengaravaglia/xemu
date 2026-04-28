@@ -20,9 +20,6 @@
  */
 
 #include "qemu/fast-hash.h"
-#if defined(__ANDROID__) || defined(ANDROID)
-#include <android/log.h>
-#endif
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "hw/xbox/nv2a/pgraph/s3tc.h"
@@ -467,14 +464,6 @@ static uint8_t *expand_a4r4g4b4_to_rgba8(const uint8_t *src, size_t pixel_count)
  * colored boxes instead of correctly shaped letter glyphs. */
 static uint8_t *expand_a8_to_rgba8(const uint8_t *src, size_t pixel_count)
 {
-    /* Log first few pixels so we can verify the A8 data is non-trivial */
-    {
-        size_t n = pixel_count < 16 ? pixel_count : 16;
-        char buf[64]; int pos = 0;
-        for (size_t k = 0; k < n; k++) pos += snprintf(buf+pos, sizeof(buf)-pos, "%u ", src[k]);
-        __android_log_print(ANDROID_LOG_INFO, "xemu-tex",
-            "expand_a8 px_count=%zu first_bytes: %s", pixel_count, buf);
-    }
     uint8_t *dst = (uint8_t *)g_malloc(pixel_count * 4);
     for (size_t i = 0; i < pixel_count; i++) {
         dst[i * 4 + 0] = 0xFF;   /* R = white */

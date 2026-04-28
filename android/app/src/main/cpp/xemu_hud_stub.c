@@ -3,6 +3,12 @@
 #include "ui/xemu-notifications.h"
 #include <GLES3/gl3.h>
 #include <stdlib.h>
+#include <string.h>
+
+/* GL_EXT_sRGB_write_control — may not be defined in NDK headers */
+#ifndef GL_FRAMEBUFFER_SRGB_EXT
+#define GL_FRAMEBUFFER_SRGB_EXT 0x8DB9
+#endif
 
 #define LOG_TAG "xemu-android-hud-stub"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -41,6 +47,18 @@ static void check_shader_compile(GLuint shader, const char *name)
 
 static void init_blit_resources(void)
 {
+    /* Probe for GL_EXT_sRGB_write_control. If present, disable sRGB encoding
+     * on framebuffer writes so Xbox sRGB values pass through the sRGB EGL
+     * surface unchanged. If absent, use the pow() fallback in the shader. */
+    const char *exts = (const char *)glGetString(GL_EXTENSIONS);
+    bool has_srgb_write_ctrl = exts && strstr(exts, "GL_EXT_sRGB_write_control");
+    if (has_srgb_write_ctrl) {
+        glDisable(GL_FRAMEBUFFER_SRGB_EXT);
+        LOGI("GL_EXT_sRGB_write_control available: sRGB framebuffer write encoding disabled");
+    } else {
+        LOGI("GL_EXT_sRGB_write_control not available: using pow() sRGB decode in blit shader");
+    }
+
     /* dst_ndc: x0,y0,x1,y1 in NDC space for the destination quad.
      * Vertex layout (triangle strip): BL=0, BR=1, TL=2, TR=3.
      * v_uv is always (0,0)→(1,1) regardless of dst_ndc. */
@@ -60,8 +78,13 @@ static void init_blit_resources(void)
     /* Sample r->gl_display_buffer: after render_display's Y-flip, the
      * texture's texcoord (0,0) is Xbox bottom and (0,1) is Xbox top.
      * For correct screen output (GL y=0 = screen bottom = Xbox bottom)
-     * no additional flip is needed. */
-    const char *fs =
+     * no additional flip is needed.
+     *
+     * Two variants: when GL_EXT_sRGB_write_control is available we disabled
+     * sRGB encoding above, so we pass through directly.  Otherwise we
+     * linearise (sRGB-decode) here so the sRGB EGL surface re-encodes exactly
+     * once, preserving the original Xbox sRGB values on screen. */
+    const char *fs_passthrough =
         "#version 300 es\n"
         "precision highp float;\n"
         "uniform sampler2D tex;\n"
@@ -70,6 +93,22 @@ static void init_blit_resources(void)
         "void main() {\n"
         "    fragColor = vec4(texture(tex, v_uv).rgb, 1.0);\n"
         "}\n";
+
+    const char *fs_srgb_decode =
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "uniform sampler2D tex;\n"
+        "in vec2 v_uv;\n"
+        "layout(location = 0) out vec4 fragColor;\n"
+        "void main() {\n"
+        "    vec3 c = texture(tex, v_uv).rgb;\n"
+        "    vec3 lin = mix(c / 12.92,\n"
+        "                   pow((c + 0.055) / 1.055, vec3(2.4)),\n"
+        "                   step(vec3(0.04045), c));\n"
+        "    fragColor = vec4(lin.rgb, 1.0);\n"
+        "}\n";
+
+    const char *fs = has_srgb_write_ctrl ? fs_passthrough : fs_srgb_decode;
 
     GLuint v = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(v, 1, &vs, NULL);

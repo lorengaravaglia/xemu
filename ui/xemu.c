@@ -1317,7 +1317,11 @@ static void display_very_early_init(DisplayOptions *o)
         return;
     }
 
-    egl_surface = eglCreateWindowSurface(egl_display, config, window, NULL);
+    static const EGLint srgb_attribs[] = {
+        EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_SRGB_KHR,
+        EGL_NONE
+    };
+    egl_surface = eglCreateWindowSurface(egl_display, config, window, srgb_attribs);
     if (egl_surface == EGL_NO_SURFACE) {
         ALOGE("Error: eglCreateWindowSurface failed");
         return;
