@@ -814,6 +814,17 @@ static TextureBinding* generate_texture(const TextureShape s,
         f.gl_swizzle_mask[2] = GL_RED;
         f.gl_swizzle_mask[3] = GL_ALPHA;
     }
+    /* A8 textures are expanded to RGBA8 in upload_gl_texture(), placing the
+     * stored alpha in the .a channel directly.  Clear the original swizzle
+     * mask so GL_TEXTURE_SWIZZLE_A = GL_RED is not applied — that would read
+     * the R channel (always 0xFF in the expanded data), making every glyph
+     * fully opaque and producing solid colored boxes instead of shaped text. */
+    if (f.gl_format == GL_RED &&
+        f.gl_swizzle_mask[0] == GL_ONE &&
+        f.gl_swizzle_mask[3] == GL_RED) {
+        f.gl_swizzle_mask[0] = f.gl_swizzle_mask[1] =
+        f.gl_swizzle_mask[2] = f.gl_swizzle_mask[3] = 0;
+    }
 #endif
 
     /* Create a new opengl texture */
