@@ -349,7 +349,7 @@ As of April 2026, the Android port boots the Xbox BIOS, completes the boot anima
 | Feature | Notes |
 |---------|-------|
 | Shader cache persistence | Implemented: individual shader binaries written to `filesDir/shaders/` as compiled. On next launch, `shader_android_scan_and_load()` scans that directory (since `_exit()` prevents writing `shader_cache_list`). Confirmed: 78 shaders loaded from disk on second launch. Note: `__android_log_print` from Meson-compiled objects does not appear in logcat; use `fprintf(stderr,...)` → `xemu-stdout` for diagnostics from those files. |
-| Background idle threads | When backgrounded, `vm_stop()` halts the vCPU and NV2A PGRAPH (no draw calls, no audio). Two lightweight threads remain active: the render thread spins at 60fps checking `xemu_android_surface_valid()==false` and returning immediately; `vblank_timer_thread` fires every ~200ms. Neither does meaningful work but both consume small amounts of battery. Fix: block the render thread on a condition variable when paused+no-surface; gate `vblank_timer_thread` on VM runstate. |
+| Background idle threads | Fixed. Both the render thread (`gl_render_frame` loop) and `vblank_timer_thread` block on `xemu_android_wait_for_surface()` when the surface is gone (app backgrounded). They wake immediately when the surface is recreated on foreground return. |
 | Aspect ratio / display scaling | Implemented: 16:9 stretch (default) and 4:3 pillarbox/letterbox. Toggle via the in-game menu; persisted in SharedPreferences. `xemu_hud_set_aspect_16x9(bool)` in `xemu_hud_stub.c`. |
 | Save states | Not tested on Android |
 

@@ -456,6 +456,30 @@ static uint8_t *expand_a4r4g4b4_to_rgba8(const uint8_t *src, size_t pixel_count)
     return dst;
 }
 
+/* Expand A1R5G5B5 / X1R5G5B5 (16-bit, GL_BGRA + GL_UNSIGNED_SHORT_1_5_5_5_REV
+ * bit layout: A@bit15, R@bits14:10, G@bits9:5, B@bits4:0) to RGBA8.
+ * GLES has no equivalent packed type; the naive substitute
+ * GL_UNSIGNED_SHORT_5_5_5_1 uses a completely different bit layout
+ * (R@15:11, G@10:6, B@5:1, A@0), scrambling all four channels. */
+static uint8_t *expand_a1r5g5b5_to_rgba8(const uint8_t *src, size_t pixel_count)
+{
+    uint8_t *dst = (uint8_t *)g_malloc(pixel_count * 4);
+    for (size_t i = 0; i < pixel_count; i++) {
+        /* 16-bit little-endian: bit 15=A, bits 14:10=R, bits 9:5=G, bits 4:0=B */
+        uint16_t px = (uint16_t)src[i * 2] | ((uint16_t)src[i * 2 + 1] << 8);
+        uint8_t a1 = (px >> 15) & 0x1;
+        uint8_t r5 = (px >> 10) & 0x1F;
+        uint8_t g5 = (px >>  5) & 0x1F;
+        uint8_t b5 = (px >>  0) & 0x1F;
+        /* Expand 5-bit to 8-bit by replicating the top bits into the low bits */
+        dst[i * 4 + 0] = (r5 << 3) | (r5 >> 2);
+        dst[i * 4 + 1] = (g5 << 3) | (g5 >> 2);
+        dst[i * 4 + 2] = (b5 << 3) | (b5 >> 2);
+        dst[i * 4 + 3] = a1 ? 0xFF : 0x00;
+    }
+    return dst;
+}
+
 /* Expand single-channel A8 data to RGBA8 with data in alpha channel.
  * Works around a GLES driver bug where GL_TEXTURE_SWIZZLE_A = GL_RED on a
  * GL_R8 texture silently fails, causing texture.a to always return 1.0
@@ -542,8 +566,23 @@ static void upload_gl_texture(GLenum gl_target,
         f.gl_swizzle_mask[0] = f.gl_swizzle_mask[1] =
         f.gl_swizzle_mask[2] = f.gl_swizzle_mask[3] = 0;
     }
+    /* Detect A1R5G5B5 / X1R5G5B5: GL_UNSIGNED_SHORT_1_5_5_5_REV has no GLES
+     * equivalent.  The substitute GL_UNSIGNED_SHORT_5_5_5_1 applied above
+     * uses a completely different bit layout and scrambles all channels.
+     * Use f.gl_type (original, before substitution) to detect and expand
+     * manually to RGBA8 instead. */
+    bool is_a1r5g5b5_expand = (f.gl_format == GL_BGRA &&
+                                f.gl_type == GL_UNSIGNED_SHORT_1_5_5_5_REV);
+    if (is_a1r5g5b5_expand) {
+        f.gl_internal_format = GL_RGBA8;
+        tex_gl_format = GL_RGBA;
+        tex_gl_type = GL_UNSIGNED_BYTE;
+        f.gl_swizzle_mask[0] = f.gl_swizzle_mask[1] =
+        f.gl_swizzle_mask[2] = f.gl_swizzle_mask[3] = 0;
+    }
 #else
     bool is_a8_expand = false;
+    bool is_a1r5g5b5_expand = false;
     GLenum tex_gl_format = f.gl_format;
     GLenum tex_gl_type   = f.gl_type;
 #endif
@@ -585,6 +624,16 @@ static void upload_gl_texture(GLenum gl_target,
                 /* A8 workaround: expand single-channel to RGBA8 (alpha in .a) */
                 const uint8_t *src = converted ? converted : texture_data;
                 uint8_t *rgba = expand_a8_to_rgba8(src,
+                                    (size_t)adjusted_width * adjusted_height);
+                if (converted) { g_free(converted); }
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                glTexImage2D(GL_TEXTURE_2D, 0, f.gl_internal_format,
+                             adjusted_width, adjusted_height, 0,
+                             tex_gl_format, tex_gl_type, rgba);
+                g_free(rgba);
+            } else if (is_a1r5g5b5_expand) {
+                const uint8_t *src = converted ? converted : texture_data;
+                uint8_t *rgba = expand_a1r5g5b5_to_rgba8(src,
                                     (size_t)adjusted_width * adjusted_height);
                 if (converted) { g_free(converted); }
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
@@ -690,6 +739,13 @@ static void upload_gl_texture(GLenum gl_target,
                 } else if (is_a8_expand) {
                     /* A8 workaround: expand single-channel to RGBA8 */
                     uint8_t *rgba = expand_a8_to_rgba8(pixel_data,
+                                        (size_t)tex_width * tex_height);
+                    glTexImage2D(gl_target, level, f.gl_internal_format,
+                                 tex_width, tex_height, 0,
+                                 tex_gl_format, tex_gl_type, rgba);
+                    g_free(rgba);
+                } else if (is_a1r5g5b5_expand) {
+                    uint8_t *rgba = expand_a1r5g5b5_to_rgba8(pixel_data,
                                         (size_t)tex_width * tex_height);
                     glTexImage2D(gl_target, level, f.gl_internal_format,
                                  tex_width, tex_height, 0,
