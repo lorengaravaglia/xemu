@@ -1163,14 +1163,11 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
         filter->voice = v;
         int err;
 
-        /* Note: Using a sinc based resampler for quality. Unsure about
-         * hardware's actual interpolation method; it could just be linear, in
-         * which case using this resampler is overkill, but quality is good
-         * so use it for now.
-         */
+        /* Use linear interpolation — matches the Xbox hardware's interpolation
+         * method and is significantly cheaper than sinc on mobile. */
         // FIXME: Don't do 2ch resampling if this is a mono voice
         filter->resampler = src_callback_new(&voice_resample_callback,
-                                           SRC_SINC_FASTEST, 2, &err, filter);
+                                           SRC_LINEAR, 2, &err, filter);
         if (filter->resampler == NULL) {
             fprintf(stderr, "src error: %s\n", src_strerror(err));
             assert(0);

@@ -215,15 +215,12 @@ static void nv2a_vga_gfx_update(void *opaque)
     nv2a_update_irq(d);
 
 #if defined(__ANDROID__) || defined(ANDROID)
-    /* Vblank diagnostic: tracks the Xbox kernel spin-wait at 0x8001b02f.
-     * Samples every 6 vblanks (~100ms) for responsive transition detection.
-     * Logs heartbeat every 60 vblanks (1s) and captures:
-     *   - LOOP ENTER/EXIT events at 0x8001b02f
-     *   - Every change to [EBX+0x2C] (the wait-condition field)
-     * This catches the exact 0→nonzero transition during the first wait,
-     * identifying what value is written and when. */
+    /* Tracks the Xbox kernel spin-wait at 0x8001b02f.  Samples every 6
+     * vblanks (~100ms).  When the kernel has been stuck for >=2s at that
+     * address with [EBX+0x2C]==0, writes 1 to unblock it (mimics the NOP
+     * ISR that normally signals the wait — absent after the game's GPU init
+     * empties PFIFO). */
     static unsigned vblank_count = 0;
-    static uint32_t last_wait_field = 0xdeadbeef; /* sentinel = unread */
     static bool in_stuck_loop = false;
     static unsigned stuck_entry_vblank = 0;
 
@@ -235,73 +232,16 @@ static void nv2a_vga_gfx_update(void *opaque)
             CPUX86State *env = cpu_env(vcpu);
             uint32_t linear_pc = (uint32_t)(env->segs[R_CS].base + env->eip);
             uint32_t ebx = (uint32_t)env->regs[R_EBX];
-            uint32_t ebp = (uint32_t)env->regs[R_EBP];
 
-            /* Heartbeat every second */
-            if (vblank_count % 60 == 0) {
-                __android_log_print(ANDROID_LOG_INFO, "xemu-vcpu",
-                    "vblank #%u: linear=0x%08x EBX=0x%08x EBP=0x%08x halted=%u",
-                    vblank_count, linear_pc, ebx, ebp,
-                    (unsigned)vcpu->halted);
-            }
-
-            /* Continuously monitor [EBX+0x2C] when EBX = known kernel object */
-            if (ebx == 0x80035bdc) {
-                uint32_t wait_field = 0;
-                cpu_memory_rw_debug(vcpu, ebx + 0x2c,
-                                    (uint8_t *)&wait_field, 4, 0);
-                if (wait_field != last_wait_field) {
-                    __android_log_print(ANDROID_LOG_INFO, "xemu-vcpu",
-                        "WAIT_FIELD CHANGE vblank#%u: "
-                        "[0x80035c08]=0x%08x->0x%08x PC=0x%08x EBP=0x%08x",
-                        vblank_count, last_wait_field, wait_field,
-                        linear_pc, ebp);
-                    last_wait_field = wait_field;
-                }
-            }
-
-            /* Detect entry into / exit from the spin-wait loop at 0x8001b02f */
             bool at_loop = (linear_pc == 0x8001b02f);
             if (at_loop && !in_stuck_loop) {
                 in_stuck_loop = true;
                 stuck_entry_vblank = vblank_count;
-                uint32_t wait_field = 0;
-                uint32_t ebp_flink = 0;
-                if (ebx) {
-                    cpu_memory_rw_debug(vcpu, ebx + 0x2c,
-                                        (uint8_t *)&wait_field, 4, 0);
-                }
-                cpu_memory_rw_debug(vcpu, ebp, (uint8_t *)&ebp_flink, 4, 0);
-                __android_log_print(ANDROID_LOG_INFO, "xemu-vcpu",
-                    "LOOP ENTER vblank#%u EBX=0x%08x [EBX+0x2C]=0x%08x "
-                    "EBP=0x%08x [EBP].Flink=0x%08x halted=%u",
-                    vblank_count, ebx, wait_field, ebp, ebp_flink,
-                    (unsigned)vcpu->halted);
-                last_wait_field = wait_field;
             } else if (!at_loop && in_stuck_loop) {
                 in_stuck_loop = false;
-                uint32_t wait_field = 0;
-                if (ebx) {
-                    cpu_memory_rw_debug(vcpu, ebx + 0x2c,
-                                        (uint8_t *)&wait_field, 4, 0);
-                }
-                __android_log_print(ANDROID_LOG_INFO, "xemu-vcpu",
-                    "LOOP EXIT vblank#%u (duration=%u vblanks) "
-                    "EBX=0x%08x [EBX+0x2C]=0x%08x newPC=0x%08x",
-                    vblank_count, vblank_count - stuck_entry_vblank,
-                    ebx, wait_field, linear_pc);
             } else if (at_loop && in_stuck_loop &&
                        ebx == 0x80035bdc &&
                        vblank_count - stuck_entry_vblank >= 120) {
-                /* The kernel has been stuck for >=2s at 0x8001b02f.
-                 * Earlier stalls (#1, #2) resolve within ~60 vblanks because
-                 * the dashboard is still pushing NOP(0x31c) to PFIFO, which
-                 * causes the NOP ISR to write a nonzero value to [EBX+0x2C].
-                 * The permanent stall occurs after the game's GPU init: PFIFO
-                 * is idle, no NOP fires, and [EBX+0x2C] stays 0 forever.
-                 * Fix: write 1 (KeSetEvent SignalState) to [EBX+0x2C] to
-                 * unblock the kernel, as if the NOP ISR had just signalled it.
-                 * Only fire once per stall entry (check every 60 vblanks). */
                 uint32_t wait_field = 0;
                 cpu_memory_rw_debug(vcpu, ebx + 0x2c,
                                     (uint8_t *)&wait_field, 4, 0);
@@ -312,9 +252,9 @@ static void nv2a_vga_gfx_update(void *opaque)
                                         (uint8_t *)&signal_val, 4, 1);
                     __android_log_print(ANDROID_LOG_INFO, "xemu-vcpu",
                         "LOOP FORCE-SIGNAL vblank#%u (stuck %u vblanks): "
-                        "wrote 1 to [0x%08x+0x2C]=0x%08x",
+                        "wrote 1 to [0x%08x+0x2C]",
                         vblank_count, vblank_count - stuck_entry_vblank,
-                        ebx, ebx + 0x2c);
+                        ebx);
                 }
             }
         }

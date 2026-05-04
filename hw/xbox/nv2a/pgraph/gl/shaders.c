@@ -1057,11 +1057,6 @@ static void apply_uniform_updates(const UniformInfo *info, int *locs,
             default:
                 g_assert_not_reached();
             }
-            GLenum _err = glGetError();
-            if (_err != GL_NO_ERROR && _err != GL_INVALID_OPERATION) {
-                ALOGI("uniform error: idx %d[%zu] name %s err 0x%x",
-                      i, j, info[i].name, (unsigned)_err);
-            }
         }
 #else
         switch (info[i].type) {
@@ -1098,7 +1093,22 @@ static void apply_uniform_updates(const UniformInfo *info, int *locs,
 #endif
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Drain any GL_INVALID_OPERATION errors accumulated from uploading to
+     * inactive uniform locations — expected on GLES when an array has more
+     * elements than the shader uses.  Log anything else as unexpected. */
+    {
+        GLenum _err;
+        while ((_err = glGetError()) != GL_NO_ERROR) {
+            if (_err != GL_INVALID_OPERATION) {
+                ALOGI("apply_uniform_updates: unexpected GL error 0x%x",
+                      (unsigned)_err);
+            }
+        }
+    }
+#else
     assert(glGetError() == GL_NO_ERROR);
+#endif
 }
 
 // FIXME: Dirty tracking

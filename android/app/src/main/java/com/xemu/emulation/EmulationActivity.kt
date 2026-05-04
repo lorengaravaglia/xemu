@@ -11,6 +11,7 @@ import android.os.ParcelFileDescriptor
 import android.view.*
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.xemu.MainActivity
@@ -266,12 +267,44 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val aspectLabel = if (aspect16x9) "Aspect: 16:9 (stretch)" else "Aspect: 4:3 (pillarbox)"
         AlertDialog.Builder(this)
             .setTitle("Menu")
-            .setItems(arrayOf(overlayLabel, aspectLabel, "Map Controls", "Exit")) { _, which ->
+            .setItems(arrayOf(overlayLabel, aspectLabel, "Save State", "Load State", "Map Controls", "Exit")) { _, which ->
                 when (which) {
                     0 -> cycleOverlayMode()
                     1 -> toggleAspectRatio()
-                    2 -> startActivity(Intent(this, MappingActivity::class.java))
-                    3 -> confirmExit()
+                    2 -> showSaveStateDialog()
+                    3 -> showLoadStateDialog()
+                    4 -> startActivity(Intent(this, MappingActivity::class.java))
+                    5 -> confirmExit()
+                }
+            }
+            .show()
+    }
+
+    private fun showSaveStateDialog() {
+        val slotLabels = Array(8) { i -> "Slot ${i + 1}" }
+        AlertDialog.Builder(this)
+            .setTitle("Save State")
+            .setItems(slotLabels) { _, which ->
+                NativeInterface.saveState("slot_${which + 1}")
+                Toast.makeText(this, "Saved to Slot ${which + 1}", Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
+    private fun showLoadStateDialog() {
+        val existingSlots = NativeInterface.listStates().toSet()
+        val slotLabels = Array(8) { i ->
+            val name = "slot_${i + 1}"
+            if (name in existingSlots) "Slot ${i + 1}" else "Slot ${i + 1} (empty)"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Load State")
+            .setItems(slotLabels) { _, which ->
+                val name = "slot_${which + 1}"
+                if (name in existingSlots) {
+                    NativeInterface.loadState(name)
+                } else {
+                    Toast.makeText(this, "Slot ${which + 1} is empty", Toast.LENGTH_SHORT).show()
                 }
             }
             .show()

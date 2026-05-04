@@ -115,25 +115,6 @@ void xemu_android_vm_resume(void)
     bql_unlock();
 }
 
-/* Stop the VM and flush all block devices (qcow2 HDD) to disk so the
- * dirty bit is cleared before _exit().  Call this from the exit handler
- * to ensure data written during the session survives the next open without
- * requiring qcow2 dirty-bit recovery. */
-void xemu_android_flush_block_devices(void)
-{
-    if (!xemu_android_qemu_initialized()) return;
-    bql_lock();
-    if (runstate_is_running()) {
-        vm_stop(RUN_STATE_SHUTDOWN);
-    }
-    bql_unlock();
-    /* Drain all pending block I/O, then flush to clear the qcow2 dirty bit.
-     * Called outside the BQL: bdrv_drain_all_begin is GRAPH_UNLOCKED. */
-    bdrv_drain_all_begin();
-    bdrv_flush_all();
-    bdrv_drain_all_end();
-}
-
 /* Frame counter incremented after each eglSwapBuffers — read by JNI to
  * compute FPS in the Kotlin UI layer. */
 static volatile int g_rendered_frame_count = 0;
@@ -141,6 +122,169 @@ static volatile int g_rendered_frame_count = 0;
 int xemu_android_get_rendered_frame_count(void)
 {
     return g_rendered_frame_count;
+}
+
+/* save_snapshot(), load_snapshot(), and bdrv_drain_all_begin() all assert
+ * qemu_in_main_thread() — they must run on the QEMU main loop thread.
+ * We dispatch all such work via a single bottom-half handler and block the
+ * JNI thread on a QemuSemaphore until the BH completes.
+ *
+ * The QEMU main loop holds BQL when it dispatches BHs (bql_lock_impl asserts
+ * !bql_locked(), so we must never call bql_lock() inside the BH).
+ * vm_stop()/vm_start() work because BQL is already held.
+ * load/save_snapshot() internally yield/re-acquire BQL via QEMU coroutines
+ * for their block I/O — BQL is restored before they return.
+ * bdrv_drain_all_begin/end must be called with BQL held; they manage BQL
+ * internally via AIO_WAIT_WHILE_UNLOCKED. */
+#include "migration/snapshot.h"
+
+typedef enum { MAIN_OP_SAVE, MAIN_OP_LOAD, MAIN_OP_FLUSH } MainThreadOp;
+
+static struct {
+    MainThreadOp op;
+    char         name[64];
+    bool         ok;
+    Error       *err;
+} g_main_req;
+
+static QemuSemaphore g_main_done;
+static QemuMutex     g_main_lock;
+static QEMUBH       *g_main_bh;
+
+static void main_thread_bh(void *opaque)
+{
+    switch (g_main_req.op) {
+    case MAIN_OP_SAVE:
+        save_snapshot(g_main_req.name, true, NULL, false, NULL,
+                      &g_main_req.err);
+        xemu_snapshots_mark_dirty();
+        break;
+
+    case MAIN_OP_LOAD: {
+        bool was_running = runstate_is_running();
+        vm_stop(RUN_STATE_RESTORE_VM);
+        g_main_req.ok = load_snapshot(g_main_req.name, NULL, false, NULL,
+                                      &g_main_req.err);
+        if (g_main_req.ok && was_running) {
+            vm_start();
+        }
+        break;
+    }
+
+    case MAIN_OP_FLUSH:
+        /* vm_stop under BQL (already held) */
+        if (runstate_is_running()) {
+            vm_stop(RUN_STATE_SHUTDOWN);
+        }
+        /* bdrv_drain_all_begin() asserts bql_locked() (qemu_in_main_thread ==
+         * bql_locked() in this QEMU build) and manages BQL internally via
+         * AIO_WAIT_WHILE_UNLOCKED — do NOT unlock BQL before calling it. */
+        bdrv_drain_all_begin();
+        bdrv_flush_all();
+        bdrv_drain_all_end();
+        break;
+    }
+    qemu_sem_post(&g_main_done);
+}
+
+static void main_bh_ensure_init(void)
+{
+    static bool initialised = false;
+    if (initialised) return;
+    initialised = true;
+    qemu_mutex_init(&g_main_lock);
+    qemu_sem_init(&g_main_done, 0);
+    g_main_bh = qemu_bh_new(main_thread_bh, NULL);
+}
+
+static void dispatch_main_op(MainThreadOp op, const char *name)
+{
+    if (!xemu_android_qemu_initialized()) return;
+    main_bh_ensure_init();
+
+    qemu_mutex_lock(&g_main_lock);
+    g_main_req.op   = op;
+    g_main_req.ok   = false;
+    g_main_req.err  = NULL;
+    if (name) {
+        snprintf(g_main_req.name, sizeof(g_main_req.name), "%s", name);
+    }
+
+    qemu_bh_schedule(g_main_bh);
+    qemu_sem_wait(&g_main_done);
+
+    if (g_main_req.err) {
+        const char *opname = (op == MAIN_OP_SAVE) ? "save"
+                           : (op == MAIN_OP_LOAD) ? "load" : "flush";
+        ALOGE("main_op '%s' (%s): %s", name ? name : "", opname,
+              error_get_pretty(g_main_req.err));
+        error_free(g_main_req.err);
+        g_main_req.err = NULL;
+    }
+    qemu_mutex_unlock(&g_main_lock);
+}
+
+/* Stop the VM and flush all block devices (qcow2 HDD) to disk so the dirty
+ * bit is cleared before _exit().  bdrv_drain_all_begin() asserts
+ * qemu_in_main_thread(), so dispatch via BH like save/load state. */
+void xemu_android_flush_block_devices(void)
+{
+    dispatch_main_op(MAIN_OP_FLUSH, NULL);
+}
+
+void xemu_android_save_state(const char *name)
+{
+    dispatch_main_op(MAIN_OP_SAVE, name);
+}
+
+void xemu_android_load_state(const char *name)
+{
+    dispatch_main_op(MAIN_OP_LOAD, name);
+}
+
+/* Return names of all existing snapshots in *out_names (caller frees each entry
+ * and the array itself with g_free).  Returns count; 0 on error or no snapshots. */
+int xemu_android_list_states(char ***out_names)
+{
+    *out_names = NULL;
+    if (!xemu_android_qemu_initialized()) return 0;
+
+    Error *err = NULL;
+    BlockDriverState *bs;
+    QEMUSnapshotInfo *sn_list = NULL;
+    int n;
+
+    bql_lock();
+    bs = bdrv_all_find_vmstate_bs(NULL, false, NULL, &err);
+    if (!bs) {
+        bql_unlock();
+        if (err) { error_free(err); }
+        return 0;
+    }
+    n = bdrv_snapshot_list(bs, &sn_list);
+    bql_unlock();
+
+    if (n <= 0) {
+        g_free(sn_list);
+        return 0;
+    }
+
+    char **names = (char **)g_malloc(n * sizeof(char *));
+    for (int i = 0; i < n; i++) {
+        names[i] = g_strdup(sn_list[i].name);
+    }
+    g_free(sn_list);
+    *out_names = names;
+    return n;
+}
+
+void xemu_android_free_state_names(char **names, int count)
+{
+    if (!names) return;
+    for (int i = 0; i < count; i++) {
+        g_free(names[i]);
+    }
+    g_free(names);
 }
 #endif
 #else
@@ -932,7 +1076,6 @@ static void *vblank_timer_thread(void *opaque)
                 next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
                 continue;
             }
-            if (frames % 60 == 0) ALOGI("vblank_timer_thread: calling process_vblank (frame %d)", frames);
             frames++;
 #endif
             xemu_main_loop_lock();
@@ -985,7 +1128,6 @@ static void gl_render_frame(struct xemu_console *scon)
 {
     static int frames = 0;
 #if defined(__ANDROID__) || defined(ANDROID)
-    if (frames % 60 == 0) ALOGI("Rendering frame %d", frames);
     frames++;
     /* Throttle state: when nv2a_get_framebuffer_surface returns 0 (no surface
      * at pcrtc.start yet), we limit polling to ~10Hz instead of 60Hz.  The
@@ -1037,10 +1179,8 @@ static void gl_render_frame(struct xemu_console *scon)
     if (s_last_tex != 0 && cur_frame_time == s_last_synced_frame_time) {
         tex = s_last_tex;
     } else {
-        if (frames % 60 == 1) ALOGI("gl_render_frame: calling nv2a_get_framebuffer_surface (frame_time=%d)", cur_frame_time);
         tex = nv2a_get_framebuffer_surface();
         acquired_surface = true;
-        if (frames % 60 == 1) ALOGI("gl_render_frame: nv2a_get_framebuffer_surface returned %d", tex);
         s_last_tex = tex;
         if (tex != 0) {
             s_last_synced_frame_time = cur_frame_time;
@@ -1056,9 +1196,7 @@ static void gl_render_frame(struct xemu_console *scon)
 #if !defined(__ANDROID__) && !defined(ANDROID)
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 #else
-    if (frames % 60 == 1) ALOGI("gl_render_frame: acquiring EGL context");
     set_egl_current(true);
-    if (frames % 60 == 1) ALOGI("gl_render_frame: context acquired");
     
     EGLint surface_width = 0, surface_height = 0;
     eglQuerySurface(egl_display, egl_surface, EGL_WIDTH, &surface_width);
@@ -1081,15 +1219,14 @@ static void gl_render_frame(struct xemu_console *scon)
     {
         GLenum _err = glGetError();
         if (_err != GL_NO_ERROR) {
-            if (frames % 60 == 1) ALOGE("gl_render_frame: residual GL error 0x%x (NV2A shared context)", _err);
+            ALOGE("gl_render_frame: residual GL error 0x%x (NV2A shared context)", _err);
         }
     }
 #endif
 
     if (tex == 0) {
         if (!scon->surface) {
-            if (frames % 60 == 1) ALOGI("gl_render_frame: No surface yet, skipping texture creation");
-            goto skip_render;
+                goto skip_render;
         }
 #if defined(__ANDROID__) || defined(ANDROID)
         /*
@@ -1128,13 +1265,10 @@ static void gl_render_frame(struct xemu_console *scon)
      * lock and perform rendering, but release before swap to avoid
      * possible lengthy blocking (for vsync).
      */
-    if (frames % 60 == 1) ALOGI("gl_render_frame: updating HUD");
     if (xemu_is_main_thread()) {
         xemu_main_loop_lock();
         xemu_hud_update();
         xemu_main_loop_unlock();
-
-        if (frames % 60 == 1) ALOGI("gl_render_frame: rendering HUD");
         xemu_hud_render();
     }
 #if defined(__ANDROID__) || defined(ANDROID)
@@ -1153,7 +1287,6 @@ static void gl_render_frame(struct xemu_console *scon)
         xemu_main_loop_unlock();
     }
 
-    if (frames % 60 == 1) ALOGI("gl_render_frame: swapping buffers");
 #if !defined(__ANDROID__) && !defined(ANDROID)
     SDL_GL_SwapWindow(scon->real_window);
     assert(glGetError() == GL_NO_ERROR);
@@ -1164,7 +1297,6 @@ static void gl_render_frame(struct xemu_console *scon)
     }
     eglSwapBuffers(egl_display, egl_surface);
     set_egl_current(false);
-    if (frames % 60 == 1) ALOGI("gl_render_frame: context released");
 #endif
 skip_render:
 #if defined(__ANDROID__) || defined(ANDROID)
@@ -1894,9 +2026,6 @@ int xemu_core_main(int argc, char **argv)
         if (!xemu_android_surface_valid()) {
             xemu_android_wait_for_surface();
             continue;
-        }
-        if (frames % 60 == 0) {
-            ALOGI("Main loop iteration %d", frames);
         }
 #endif
 #if !defined(__ANDROID__) && !defined(ANDROID)

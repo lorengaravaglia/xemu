@@ -271,7 +271,7 @@ static long get_file_size(const char *filename) {
  * builds a bitmask of cores at >= 80% of peak frequency, and calls
  * sched_setaffinity via raw syscall (Bionic does not expose cpu_set_t).
  * Silently falls back to all-cores if anything fails. */
-static void pin_to_big_cores(void) {
+void pin_to_big_cores(void) {
     int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
     if (ncpus <= 0 || ncpus > 64) return;
 

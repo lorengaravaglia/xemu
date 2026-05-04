@@ -70,4 +70,24 @@ object NativeInterface {
      * wide=false → 4:3 with pillarboxing/letterboxing.
      */
     external fun setAspectRatio(wide: Boolean)
+
+    /**
+     * Save current VM state to a named snapshot inside the qcow2 HDD image.
+     * Slot name convention: "slot_1" … "slot_8".
+     * Blocks briefly while the snapshot is written; call from a background thread
+     * if the UI must remain responsive during save.
+     */
+    external fun saveState(name: String)
+
+    /**
+     * Load a previously saved VM snapshot by name.
+     * Has no effect if the named snapshot does not exist.
+     */
+    external fun loadState(name: String)
+
+    /**
+     * Return the names of all snapshots currently stored in the HDD image.
+     * Returns an empty array when no snapshots exist or QEMU is not initialized.
+     */
+    external fun listStates(): Array<String>
 }

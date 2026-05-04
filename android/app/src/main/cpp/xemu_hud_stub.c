@@ -167,14 +167,9 @@ void xemu_hud_set_framebuffer_texture(uint32_t tex, bool flip) {
 
 void xemu_hud_update(void) {}
 
-static int s_blit_frame = 0;
-
 void xemu_hud_render(void)
 {
-    s_blit_frame++;
-
     if (s_blit_tex == 0) {
-        if (s_blit_frame % 60 == 1) LOGI("xemu_hud_render: s_blit_tex=0, skipping");
         return;
     }
 
@@ -209,12 +204,6 @@ void xemu_hud_render(void)
         }
     }
 
-    if (s_blit_frame % 60 == 1) {
-        LOGI("xemu_hud_render: tex=%u vp=%d,%d,%d,%d prog=%u ar=%s ndc=(%.3f,%.3f,%.3f,%.3f)",
-             s_blit_tex, vp[0], vp[1], vp[2], vp[3], s_blit_prog,
-             g_aspect_16x9 ? "16:9" : "4:3", x0, y0, x1, y1);
-    }
-
     /* Render to the EGL window surface (FBO 0) */
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(vp[0], vp[1], vp[2], vp[3]);
@@ -239,15 +228,6 @@ void xemu_hud_render(void)
 
     glBindVertexArray(s_blit_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-    /* Diagnostic: sample the center pixel to detect black output */
-    if (s_blit_frame % 60 == 1 && vp[2] > 0 && vp[3] > 0) {
-        unsigned char pixel[4] = {0};
-        glReadPixels(vp[2]/2, vp[3]/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-        GLenum err = glGetError();
-        LOGI("xemu_hud_render: center pixel rgba=(%d,%d,%d,%d) readpixels_err=0x%x",
-             pixel[0], pixel[1], pixel[2], pixel[3], (unsigned)err);
-    }
 }
 
 // ---- Notification stubs ----

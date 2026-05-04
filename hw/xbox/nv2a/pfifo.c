@@ -499,6 +499,12 @@ void *pfifo_thread(void *arg)
 {
     NV2AState *d = (NV2AState *)arg;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Pin to the highest-frequency CPU cores, same as the xemu_core thread. */
+    extern void pin_to_big_cores(void);
+    pin_to_big_cores();
+#endif
+
     pgraph_init_thread(d);
 
     rcu_register_thread();

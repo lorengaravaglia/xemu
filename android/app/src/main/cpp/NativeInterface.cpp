@@ -125,4 +125,32 @@ Java_com_xemu_NativeInterface_setAspectRatio(JNIEnv *env, jclass clazz, jboolean
     xemu_hud_set_aspect_16x9((bool)wide);
 }
 
+JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_saveState(JNIEnv *env, jclass clazz, jstring name) {
+    std::string s = jstringToString(env, name);
+    xemu_android_save_state(s.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_loadState(JNIEnv *env, jclass clazz, jstring name) {
+    std::string s = jstringToString(env, name);
+    xemu_android_load_state(s.c_str());
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_com_xemu_NativeInterface_listStates(JNIEnv *env, jclass clazz) {
+    char **names = nullptr;
+    int n = xemu_android_list_states(&names);
+
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray(n, stringClass, nullptr);
+    for (int i = 0; i < n; i++) {
+        jstring jstr = env->NewStringUTF(names[i] ? names[i] : "");
+        env->SetObjectArrayElement(result, i, jstr);
+        env->DeleteLocalRef(jstr);
+    }
+    xemu_android_free_state_names(names, n);
+    return result;
+}
+
 } // extern "C"

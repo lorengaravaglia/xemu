@@ -77,6 +77,20 @@ bool xemu_android_qemu_initialized(void);
  * Sample twice with a known interval to compute FPS. */
 int xemu_android_get_rendered_frame_count(void);
 
+/* Save/load a named VM snapshot (stored inside the qcow2 HDD image).
+ * Slot convention used by the UI: "slot_1" … "slot_8".
+ * Safe to call from any thread; acquires the BQL internally. */
+void xemu_android_save_state(const char *name);
+void xemu_android_load_state(const char *name);
+
+/* Return names of all existing snapshots in *out_names.
+ * Free the result with xemu_android_free_state_names(names, count).
+ * Returns the count; 0 on error or when no snapshots exist. */
+int xemu_android_list_states(char ***out_names);
+
+/* Free the name array returned by xemu_android_list_states(). */
+void xemu_android_free_state_names(char **names, int count);
+
 #ifdef __cplusplus
 }
 #endif
