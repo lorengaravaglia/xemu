@@ -3,6 +3,9 @@ package com.xemu.emulation
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.hardware.input.InputManager
 import android.os.Bundle
 import android.os.Handler
@@ -10,10 +13,14 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.view.*
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.xemu.MainActivity
 import com.xemu.NativeInterface
 
@@ -63,8 +70,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     private val prefs get() = getSharedPreferences("emulation_prefs", Context.MODE_PRIVATE)
 
+    // dp → px helper
+    private val Int.dp get() = (this * resources.displayMetrics.density).toInt()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Edge-to-edge: let content draw behind system bars (immersive mode hides them anyway)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         mapping = ControllerMapping(this)
@@ -91,34 +103,36 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
-        // ── FPS counter (top-left corner) ─────────────────────────────────────
+        // ── FPS counter pill (top-left corner) ────────────────────────────────
         fpsTextView = TextView(this).apply {
             text = "-- FPS"
-            textSize = 14f
+            textSize = 13f
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.argb(160, 30, 30, 30))
-            setPadding(20, 10, 20, 10)
+            background = pillDrawable(Color.argb(160, 20, 20, 20))
+            setPadding(12.dp, 6.dp, 12.dp, 6.dp)
         }
         root.addView(fpsTextView, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.START
-        ).apply { topMargin = 16; leftMargin = 16 })
+        ).apply { topMargin = 16.dp; leftMargin = 16.dp })
 
-        // ── Menu button (top-right corner) ────────────────────────────────────
+        // ── Menu button pill (top-right corner) ───────────────────────────────
         val menuBtn = TextView(this).apply {
-            text = "⏏ MENU"
-            textSize = 14f
+            text = "MENU"
+            textSize = 13f
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.argb(160, 30, 30, 30))
-            setPadding(20, 10, 20, 10)
-            setOnClickListener { showMenuDialog() }
+            background = pillDrawable(Color.argb(160, 20, 20, 20))
+            setPadding(12.dp, 6.dp, 12.dp, 6.dp)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showMenuSheet() }
         }
         root.addView(menuBtn, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.END
-        ).apply { topMargin = 16; rightMargin = 16 })
+        ).apply { topMargin = 16.dp; rightMargin = 16.dp })
 
         // ── SurfaceView callback — starts emulation once surface is ready ─────
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
@@ -256,29 +270,89 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (curr > 0.5f  && prev <= 0.5f)  NativeInterface.sendButtonDown(posMask)
     }
 
-    // ── Menu dialog ───────────────────────────────────────────────────────────
+    // ── Bottom sheet menu ─────────────────────────────────────────────────────
 
-    private fun showMenuDialog() {
+    private fun showMenuSheet() {
+        val sheet = BottomSheetDialog(this)
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#1E1E1E"))
+            setPadding(0, 8.dp, 0, 32.dp)
+        }
+
+        // Drag-handle visual
+        container.addView(View(this).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = 4.dp.toFloat()
+                setColor(Color.parseColor("#555555"))
+            }
+            layoutParams = LinearLayout.LayoutParams(40.dp, 4.dp).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = 8.dp
+                bottomMargin = 16.dp
+            }
+        })
+
         val overlayLabel = when (overlayMode) {
-            OverlayMode.AUTO        -> "Overlay: Auto (hide with controller)"
+            OverlayMode.AUTO        -> "Overlay: Auto"
             OverlayMode.ALWAYS_SHOW -> "Overlay: Always Show"
             OverlayMode.ALWAYS_HIDE -> "Overlay: Always Hide"
         }
-        val aspectLabel = if (aspect16x9) "Aspect: 16:9 (stretch)" else "Aspect: 4:3 (pillarbox)"
-        AlertDialog.Builder(this)
-            .setTitle("Menu")
-            .setItems(arrayOf(overlayLabel, aspectLabel, "Save State", "Load State", "Map Controls", "Exit")) { _, which ->
-                when (which) {
-                    0 -> cycleOverlayMode()
-                    1 -> toggleAspectRatio()
-                    2 -> showSaveStateDialog()
-                    3 -> showLoadStateDialog()
-                    4 -> startActivity(Intent(this, MappingActivity::class.java))
-                    5 -> confirmExit()
-                }
-            }
-            .show()
+        val aspectLabel = if (aspect16x9) "Aspect: 16:9" else "Aspect: 4:3"
+
+        fun item(label: String, danger: Boolean = false, action: () -> Unit) {
+            container.addView(sheetItem(label, danger) { sheet.dismiss(); action() })
+        }
+
+        item(overlayLabel)    { cycleOverlayMode() }
+        item(aspectLabel)     { toggleAspectRatio() }
+
+        container.addView(sheetDivider())
+
+        item("Save State")    { showSaveStateDialog() }
+        item("Load State")    { showLoadStateDialog() }
+        item("Map Controls")  { startActivity(Intent(this, MappingActivity::class.java)) }
+
+        container.addView(sheetDivider())
+
+        item("Exit", danger = true) { confirmExit() }
+
+        sheet.setContentView(container)
+        sheet.show()
     }
+
+    private fun sheetItem(label: String, danger: Boolean, onClick: () -> Unit): TextView {
+        val normalBg = ColorDrawable(Color.TRANSPARENT)
+        val pressedBg = ColorDrawable(Color.argb(40, 255, 255, 255))
+        return TextView(this).apply {
+            text = label
+            textSize = 15f
+            setTextColor(if (danger) Color.parseColor("#FF5252") else Color.WHITE)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(24.dp, 14.dp, 24.dp, 14.dp)
+            background = StateListDrawable().apply {
+                addState(intArrayOf(android.R.attr.state_pressed), pressedBg)
+                addState(intArrayOf(), normalBg)
+            }
+            isClickable = true
+            isFocusable = true
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun sheetDivider(): View = View(this).apply {
+        setBackgroundColor(Color.parseColor("#333333"))
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 1
+        ).apply { setMargins(0, 4.dp, 0, 4.dp) }
+    }
+
+    // ── Save / load state dialogs ─────────────────────────────────────────────
 
     private fun showSaveStateDialog() {
         val slotLabels = Array(8) { i -> "Slot ${i + 1}" }
@@ -329,7 +403,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun confirmExit() {
         AlertDialog.Builder(this)
             .setTitle("Exit Emulation")
-            .setMessage("Return to the file selection screen?\n\nUnsaved game progress will be lost.")
+            .setMessage("Return to the game library?\n\nUnsaved game progress will be lost.")
             .setPositiveButton("Exit") { _, _ -> NativeInterface.requestExit() }
             .setNegativeButton("Cancel", null)
             .show()
@@ -377,6 +451,14 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val path = MainActivity.getRealFilePath(this, uriStr, fileName)
         prefs.edit().putString(prefKey, uriStr).apply()
         return path
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Returns a rounded-pill GradientDrawable with the given fill color. */
+    private fun pillDrawable(colorArgb: Int) = GradientDrawable().apply {
+        cornerRadius = 100.dp.toFloat()
+        setColor(colorArgb)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
