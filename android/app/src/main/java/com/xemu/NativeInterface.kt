@@ -36,7 +36,8 @@ object NativeInterface {
         mcpxPath: String,
         biosPath: String,
         hddPath: String,
-        isoPath: String          // empty string = no disc (boot to dashboard)
+        isoPath: String,         // empty string = no disc (boot to dashboard)
+        renderer: String         // "VULKAN", "OPENGL", or "" for default
     )
 
     external fun stopEmulation()

@@ -419,6 +419,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val biosUri = intent.getStringExtra("bios") ?: ""
         val hddUri  = intent.getStringExtra("hdd")  ?: ""
         val isoUriStr = intent.getStringExtra("iso") ?: ""
+        val renderer = intent.getStringExtra("renderer") ?: ""
 
         val mcpxPath = MainActivity.getRealFilePath(this, mcpxUri, "mcpx.bin")
         val biosPath = MainActivity.getRealFilePath(this, biosUri, "bios.bin")
@@ -437,7 +438,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             mcpxPath,
             biosPath,
             hddPath,
-            isoPath
+            isoPath,
+            renderer
         )
     }
 

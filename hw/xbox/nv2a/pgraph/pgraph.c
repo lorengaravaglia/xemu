@@ -275,6 +275,19 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
 
 static CONFIG_DISPLAY_RENDERER get_default_renderer(void)
 {
+#ifdef __ANDROID__
+    /* On Android, prefer Vulkan for better performance on Adreno GPUs */
+#ifdef CONFIG_VULKAN
+    if (renderers[CONFIG_DISPLAY_RENDERER_VULKAN]) {
+        return CONFIG_DISPLAY_RENDERER_VULKAN;
+    }
+#endif
+#ifdef CONFIG_OPENGL
+    if (renderers[CONFIG_DISPLAY_RENDERER_OPENGL]) {
+        return CONFIG_DISPLAY_RENDERER_OPENGL;
+    }
+#endif
+#else
 #ifdef CONFIG_OPENGL
     if (renderers[CONFIG_DISPLAY_RENDERER_OPENGL]) {
         return CONFIG_DISPLAY_RENDERER_OPENGL;
@@ -285,6 +298,7 @@ static CONFIG_DISPLAY_RENDERER get_default_renderer(void)
         return CONFIG_DISPLAY_RENDERER_VULKAN;
     }
 #endif
+#endif /* __ANDROID__ */
     fprintf(stderr, "Warning: No available renderer\n");
     return CONFIG_DISPLAY_RENDERER_NULL;
 }

@@ -20,6 +20,7 @@ add_definitions(-DCONFIG_SLIRP=1)
 # qemu_display_register() to write to the wrong dpys[] slot.
 add_definitions(-DCONFIG_SDL=1)
 add_definitions(-DCONFIG_OPENGL=1)
+add_definitions(-DCONFIG_VULKAN=1)
 
 # CONFIG_GIO must match Meson's build/config-host.h (which defines CONFIG_GIO).
 # audio_int.h adds a set_dbus_server field to struct audio_driver when CONFIG_GIO
@@ -105,6 +106,7 @@ find_library(JNIGRAPHICS_LIB jnigraphics REQUIRED)
 find_library(GLESV3_LIB GLESv3 REQUIRED)
 find_library(EGL_LIB EGL REQUIRED)
 find_library(AAUDIO_LIB aaudio REQUIRED)
+find_library(VULKAN_LIB vulkan REQUIRED)
 
 # Link everything
 target_link_libraries(xemu
@@ -179,6 +181,7 @@ target_link_libraries(xemu
     ${GLESV3_LIB}
     ${EGL_LIB}
     ${AAUDIO_LIB}
+    ${VULKAN_LIB}
     ZLIB::ZLIB
     OpenSSL::SSL
     OpenSSL::Crypto

@@ -14,7 +14,8 @@ typedef struct {
     char *mcpxPath;
     char *biosPath;
     char *hddPath;
-    char *isoPath;   /* optional disc image; NULL or empty = no disc */
+    char *isoPath;      /* optional disc image; NULL or empty = no disc */
+    char *renderer;     /* "VULKAN", "OPENGL", or NULL to use saved config */
 } ThreadArgs;
 
 extern ThreadArgs *g_android_args;
@@ -30,6 +31,7 @@ void xemu_android_start(
     const char *biosPath,
     const char *hddPath,
     const char *isoPath,
+    const char *renderer,   /* "VULKAN", "OPENGL", or NULL for default */
     ANativeWindow *window
 );
 

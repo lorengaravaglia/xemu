@@ -1960,6 +1960,17 @@ int xemu_core_main(int argc, char **argv)
                                      g_android_args->isoPath);
         }
         g_config.general.show_welcome = false;
+
+        if (g_android_args->renderer) {
+            if (strcmp(g_android_args->renderer, "VULKAN") == 0) {
+                g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
+                ALOGI("Renderer override: VULKAN");
+            } else if (strcmp(g_android_args->renderer, "OPENGL") == 0) {
+                g_config.display.renderer = CONFIG_DISPLAY_RENDERER_OPENGL;
+                ALOGI("Renderer override: OPENGL");
+            }
+        }
+
         ALOGI("Android file overrides applied successfully. show_welcome set to false.");
     }
 #endif

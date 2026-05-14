@@ -542,6 +542,24 @@ static void destroy_current_display_image(PGRAPHState *pg)
     destroy_frame_buffer(pg);
 
 #if HAVE_EXTERNAL_MEMORY
+#ifdef __ANDROID__
+    if (d->readback_mapped) {
+        vkUnmapMemory(r->device, d->readback_memory);
+        d->readback_mapped = NULL;
+    }
+    if (d->readback_buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(r->device, d->readback_buffer, NULL);
+        d->readback_buffer = VK_NULL_HANDLE;
+    }
+    if (d->readback_memory != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, d->readback_memory, NULL);
+        d->readback_memory = VK_NULL_HANDLE;
+    }
+    if (d->gl_texture_id) {
+        glDeleteTextures(1, &d->gl_texture_id);
+        d->gl_texture_id = 0;
+    }
+#else /* !__ANDROID__ */
     glDeleteTextures(1, &d->gl_texture_id);
     d->gl_texture_id = 0;
 
@@ -552,7 +570,8 @@ static void destroy_current_display_image(PGRAPHState *pg)
     CloseHandle(d->handle);
     d->handle = 0;
 #endif
-#endif
+#endif /* __ANDROID__ */
+#endif /* HAVE_EXTERNAL_MEMORY */
 
     vkDestroyImageView(r->device, d->image_view, NULL);
     d->image_view = VK_NULL_HANDLE;
@@ -581,7 +600,10 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     const GLint gl_internal_format = GL_RGBA8;
     bool use_optimal_tiling = true;
 
-#if HAVE_EXTERNAL_MEMORY
+#if HAVE_EXTERNAL_MEMORY && !defined(__ANDROID__)
+    /* GL_NUM_TILING_TYPES_EXT / GL_TILING_TYPES_EXT require GL_EXT_memory_object
+     * which is not available on Android GLES. Skip on Android — the readback
+     * path ignores use_optimal_tiling entirely. */
     GLint num_tiling_types;
     glGetInternalformativ(GL_TEXTURE_2D, gl_internal_format,
                           GL_NUM_TILING_TYPES_EXT, 1, &num_tiling_types);
@@ -612,11 +634,18 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         .format = VK_FORMAT_R8G8B8A8_UNORM,
         .tiling = use_optimal_tiling ? VK_IMAGE_TILING_OPTIMAL : VK_IMAGE_TILING_LINEAR,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+#ifdef __ANDROID__
+                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT /* needed for readback copy */
+#endif
+                 ,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
 
+    /* On Android we use a CPU readback instead of Vulkan/GL memory sharing,
+     * so we must NOT attach external memory info to the image create info. */
+#ifndef __ANDROID__
     VkExternalMemoryImageCreateInfo external_memory_image_create_info = {
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
 #ifdef WIN32
@@ -626,6 +655,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 #endif
     };
     image_create_info.pNext = &external_memory_image_create_info;
+#endif /* !__ANDROID__ */
 
     VK_CHECK(vkCreateImage(r->device, &image_create_info, NULL, &d->image));
 
@@ -641,6 +671,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
     };
 
+#ifndef __ANDROID__
     VkExportMemoryAllocateInfo export_memory_alloc_info = {
         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
         .handleTypes =
@@ -652,6 +683,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
             ,
     };
     alloc_info.pNext = &export_memory_alloc_info;
+#endif /* !__ANDROID__ */
 
     VK_CHECK(vkAllocateMemory(r->device, &alloc_info, NULL, &d->memory));
     VK_CHECK(vkBindImageMemory(r->device, d->image, d->memory, 0));
@@ -670,6 +702,58 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                                &d->image_view));
 
 #if HAVE_EXTERNAL_MEMORY
+
+#ifdef __ANDROID__
+    /*
+     * Android readback path: Adreno does not reliably support OPAQUE_FD
+     * memory export for images (vkBindImageMemory returns
+     * VK_ERROR_INVALID_EXTERNAL_HANDLE). Instead we:
+     *  1. Create a persistently-mapped HOST_VISIBLE|HOST_COHERENT staging buffer.
+     *  2. Create a plain GL texture (no imported memory object).
+     *  3. After each frame render, copy disp->image → staging buffer and then
+     *     upload the data to the GL texture with glTexSubImage2D.
+     */
+    VkDeviceSize readback_size = (VkDeviceSize)width * height * 4;
+    VkBufferCreateInfo readback_buf_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = readback_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VK_CHECK(vkCreateBuffer(r->device, &readback_buf_info, NULL,
+                            &d->readback_buffer));
+
+    VkMemoryRequirements readback_reqs;
+    vkGetBufferMemoryRequirements(r->device, d->readback_buffer, &readback_reqs);
+
+    VkMemoryAllocateInfo readback_alloc = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = readback_reqs.size,
+        .memoryTypeIndex = pgraph_vk_get_memory_type(
+            pg, readback_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+    VK_CHECK(vkAllocateMemory(r->device, &readback_alloc, NULL,
+                              &d->readback_memory));
+    VK_CHECK(vkBindBufferMemory(r->device, d->readback_buffer,
+                                d->readback_memory, 0));
+    VK_CHECK(vkMapMemory(r->device, d->readback_memory, 0, readback_size, 0,
+                         &d->readback_mapped));
+
+    glGenTextures(1, &d->gl_texture_id);
+    glBindTexture(GL_TEXTURE_2D, d->gl_texture_id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, gl_internal_format,
+                 image_create_info.extent.width, image_create_info.extent.height,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    assert(glGetError() == GL_NO_ERROR);
+
+#else /* !__ANDROID__ */
 
 #ifdef WIN32
 
@@ -712,6 +796,8 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                          image_create_info.extent.width,
                          image_create_info.extent.height, d->gl_memory_obj, 0);
     assert(glGetError() == GL_NO_ERROR);
+
+#endif /* __ANDROID__ */
 
 #endif // HAVE_EXTERNAL_MEMORY
 
@@ -989,14 +1075,54 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
+#ifdef __ANDROID__
+    /*
+     * Android readback path: transition display image to TRANSFER_SRC and
+     * copy it into the host-visible staging buffer. The GL texture upload
+     * happens after end_single_time_commands (GPU work complete).
+     */
+    if (disp->readback_buffer != VK_NULL_HANDLE) {
+        pgraph_vk_transition_image_layout(
+            pg, cmd, disp->image, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+        VkBufferImageCopy copy_region = {
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .imageSubresource.mipLevel = 0,
+            .imageSubresource.baseArrayLayer = 0,
+            .imageSubresource.layerCount = 1,
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {disp->width, disp->height, 1},
+        };
+        vkCmdCopyImageToBuffer(cmd, disp->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               disp->readback_buffer, 1, &copy_region);
+    }
+#else /* !__ANDROID__ */
     pgraph_vk_transition_image_layout(pg, cmd, disp->image,
                                       VK_FORMAT_R8G8B8_UNORM,
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+#endif /* __ANDROID__ */
 
     pgraph_vk_end_debug_marker(r, cmd);
     pgraph_vk_end_single_time_commands(pg, cmd);
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
+
+#ifdef __ANDROID__
+    /* GPU work is done; upload staging buffer data to the GL texture */
+    if (disp->readback_buffer != VK_NULL_HANDLE && disp->gl_texture_id &&
+        disp->readback_mapped) {
+        glBindTexture(GL_TEXTURE_2D, disp->gl_texture_id);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, disp->width, disp->height,
+                        GL_RGBA, GL_UNSIGNED_BYTE, disp->readback_mapped);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+#endif
 
     disp->draw_time = surface->draw_time;
 }

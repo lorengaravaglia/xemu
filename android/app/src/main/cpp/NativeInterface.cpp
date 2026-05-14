@@ -26,17 +26,18 @@ JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_startEmulation(
     JNIEnv *env, jclass clazz, jobject surface,
     jstring configPath, jstring mcpxPath, jstring biosPath,
-    jstring hddPath, jstring isoPath) {
+    jstring hddPath, jstring isoPath, jstring renderer) {
 
     LOGI("NativeInterface.startEmulation called");
     // SDL_SetMainReady() tells SDL that app init is complete without SDLActivity.
     SDL_SetMainReady();
 
-    std::string c_config  = jstringToString(env, configPath);
-    std::string c_mcpx    = jstringToString(env, mcpxPath);
-    std::string c_bios    = jstringToString(env, biosPath);
-    std::string c_hdd     = jstringToString(env, hddPath);
-    std::string c_iso     = jstringToString(env, isoPath);
+    std::string c_config   = jstringToString(env, configPath);
+    std::string c_mcpx     = jstringToString(env, mcpxPath);
+    std::string c_bios     = jstringToString(env, biosPath);
+    std::string c_hdd      = jstringToString(env, hddPath);
+    std::string c_iso      = jstringToString(env, isoPath);
+    std::string c_renderer = jstringToString(env, renderer);
 
     ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
     if (!window) {
@@ -45,11 +46,12 @@ Java_com_xemu_NativeInterface_startEmulation(
     }
 
     LOGI("Starting xemu with System Files:");
-    LOGI("  Config: %s", c_config.c_str());
-    LOGI("  MCPX:   %s", c_mcpx.c_str());
-    LOGI("  BIOS:   %s", c_bios.c_str());
-    LOGI("  HDD:    %s", c_hdd.c_str());
-    LOGI("  ISO:    %s", c_iso.empty() ? "(none)" : c_iso.c_str());
+    LOGI("  Config:   %s", c_config.c_str());
+    LOGI("  MCPX:     %s", c_mcpx.c_str());
+    LOGI("  BIOS:     %s", c_bios.c_str());
+    LOGI("  HDD:      %s", c_hdd.c_str());
+    LOGI("  ISO:      %s", c_iso.empty() ? "(none)" : c_iso.c_str());
+    LOGI("  Renderer: %s", c_renderer.empty() ? "(default)" : c_renderer.c_str());
 
     xemu_android_start(
         c_config.c_str(),
@@ -57,6 +59,7 @@ Java_com_xemu_NativeInterface_startEmulation(
         c_bios.c_str(),
         c_hdd.c_str(),
         c_iso.c_str(),
+        c_renderer.empty() ? nullptr : c_renderer.c_str(),
         window
     );
 }

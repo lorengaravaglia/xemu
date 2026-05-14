@@ -12,6 +12,7 @@
 #include <sys/syscall.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <vulkan/vulkan.h>
 
 #define LOG_TAG "xemu-android"
 #define LOGI(...) do { \
@@ -367,6 +368,7 @@ void xemu_android_start(
     const char *biosPath,
     const char *hddPath,
     const char *isoPath,
+    const char *renderer,
     ANativeWindow *window) {
 
     if (native_window != NULL) return;
@@ -380,6 +382,7 @@ void xemu_android_start(
     g_android_args->biosPath = strdup(biosPath);
     g_android_args->hddPath = strdup(hddPath);
     g_android_args->isoPath = (isoPath && isoPath[0]) ? strdup(isoPath) : NULL;
+    g_android_args->renderer = (renderer && renderer[0]) ? strdup(renderer) : NULL;
     LOGI("g_android_args initialized at %p", (void*)g_android_args);
 
     pthread_attr_t attr;
@@ -395,4 +398,17 @@ void xemu_android_stop(void) {
 
 ANativeWindow *xemu_android_get_window(void) {
     return native_window;
+}
+
+/*
+ * Returns a custom vkGetInstanceProcAddr loaded via libadrenotools (Mesa
+ * Turnip or other custom Adreno driver), or NULL to use the system Vulkan
+ * loader. Called by the Vulkan renderer in instance.c before volkInitialize().
+ *
+ * TODO: Wire up libadrenotools for custom driver injection. For now the system
+ * loader is always used (returns NULL → volkInitialize() falls back to
+ * the standard Android Vulkan loader).
+ */
+PFN_vkGetInstanceProcAddr xemu_android_get_vk_proc_addr(void) {
+    return NULL;
 }

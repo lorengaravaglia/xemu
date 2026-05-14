@@ -294,6 +294,13 @@ typedef struct PGRAPHVkDisplayState {
 #endif
     GLuint gl_memory_obj;
     GLuint gl_texture_id;
+
+#ifdef __ANDROID__
+    /* Readback path (Android: Vulkan→CPU→GL, no OPAQUE_FD memory sharing) */
+    VkBuffer readback_buffer;
+    VkDeviceMemory readback_memory;
+    void *readback_mapped;
+#endif
 } PGRAPHVkDisplayState;
 
 typedef struct ComputePipelineKey {

@@ -22,8 +22,13 @@
 #include "renderer.h"
 #include "xemu-version.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <vulkan/vulkan_android.h>
+#else
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
+#endif
 
 #include <volk.h>
 
@@ -59,7 +64,19 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData, void *pUserData)
 {
+#ifdef __ANDROID__
+    int prio = ANDROID_LOG_VERBOSE;
+    if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+        prio = ANDROID_LOG_ERROR;
+    else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+        prio = ANDROID_LOG_WARN;
+    else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT)
+        prio = ANDROID_LOG_INFO;
+    __android_log_print(prio, "xemu-vk-validation", "%s",
+                        pCallbackData->pMessage);
+#else
     fprintf(stderr, "[vk] %s\n", pCallbackData->pMessage);
+#endif
 
     if ((messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) &&
         (messageSeverity & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
@@ -96,6 +113,7 @@ static bool check_validation_layer_support(void)
     return true;
 }
 
+#ifndef __ANDROID__
 static void create_window(PGRAPHVkState *r, Error **errp)
 {
     r->window = SDL_CreateWindow(
@@ -114,6 +132,7 @@ static void destroy_window(PGRAPHVkState *r)
         r->window = NULL;
     }
 }
+#endif /* !__ANDROID__ */
 
 static VkExtensionPropertiesArray *
 get_available_instance_extensions(PGRAPHState *pg)
@@ -150,6 +169,17 @@ is_extension_available(VkExtensionPropertiesArray *available_extensions,
 
 static StringArray *get_required_instance_extension_names(PGRAPHState *pg)
 {
+#ifdef __ANDROID__
+    /* On Android the NV2A renderer is entirely offscreen (it exports the final
+     * frame as a GL texture via external memory interop). No Vulkan surface /
+     * swapchain is needed, so no surface-related instance extensions are
+     * required here.
+     *
+     * The capability extensions (GET_PHYSICAL_DEVICE_PROPERTIES_2, etc.) are
+     * promoted to Vulkan 1.1+ core and need not be requested as extensions
+     * when apiVersion >= 1.1. */
+    return g_array_new(FALSE, FALSE, sizeof(char *));
+#else
     // Add instance extensions SDL lists as required
     Uint32 sdl_extension_count = 0;
     const char *const *sdl_extensions =
@@ -168,6 +198,7 @@ static StringArray *get_required_instance_extension_names(PGRAPHState *pg)
                         ARRAY_SIZE(required_instance_extensions));
 
     return extensions;
+#endif
 }
 
 static bool
@@ -203,15 +234,36 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
     PGRAPHVkState *r = pg->vk_renderer_state;
     VkResult result;
 
+#ifndef __ANDROID__
     create_window(r, errp);
     if (*errp) {
         return false;
     }
+#endif
 
+#ifdef __ANDROID__
+    /*
+     * On Android, prefer a custom Vulkan driver (e.g. Mesa Turnip loaded via
+     * libadrenotools) if one is available. Fall back to the system loader.
+     */
+    {
+        extern PFN_vkGetInstanceProcAddr xemu_android_get_vk_proc_addr(void);
+        PFN_vkGetInstanceProcAddr custom_proc = xemu_android_get_vk_proc_addr();
+        if (custom_proc) {
+            volkInitializeCustom(custom_proc);
+            result = VK_SUCCESS;
+        } else {
+            result = volkInitialize();
+        }
+    }
+#else
     result = volkInitialize();
+#endif
     if (result != VK_SUCCESS) {
         error_setg(errp, "volkInitialize failed");
+#ifndef __ANDROID__
         destroy_window(r);
+#endif
         return false;
     }
 
@@ -318,7 +370,9 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
 
 error:
     volkFinalize();
+#ifndef __ANDROID__
     destroy_window(r);
+#endif
     return false;
 }
 
@@ -555,7 +609,7 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         F(occlusionQueryPrecise, true),
         F(samplerAnisotropy, false),
         F(shaderClipDistance, true),
-        F(shaderTessellationAndGeometryPointSize, true),
+        F(shaderTessellationAndGeometryPointSize, false), /* not used by NV2A shaders; absent on Adreno */
         F(wideLines, false),
         #undef F
         // clang-format on
@@ -675,7 +729,15 @@ static bool init_allocator(PGRAPHState *pg, Error **errp)
     #endif
     #if VMA_MEMORY_BUDGET || VMA_VULKAN_VERSION >= 1001000
         /// Fetch from "vkGetPhysicalDeviceMemoryProperties2" on Vulkan >= 1.1, but you can also fetch it from "vkGetPhysicalDeviceMemoryProperties2KHR" if you enabled extension VK_KHR_get_physical_device_properties2.
+        #ifdef __ANDROID__
+        /* On Android we don't advertise VK_KHR_get_physical_device_properties2 in
+         * the instance extensions list, so volk never loads the KHR alias function
+         * pointer. Use the core Vulkan 1.1 function name directly — volk always
+         * populates it when the API version is >= 1.1. */
+        .vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2,
+        #else
         .vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2KHR,
+        #endif
     #endif
     #if VMA_KHR_MAINTENANCE4 || VMA_VULKAN_VERSION >= 1003000
         /// Fetch from "vkGetDeviceBufferMemoryRequirements" on Vulkan >= 1.3, but you can also fetch it from "vkGetDeviceBufferMemoryRequirementsKHR" if you enabled extension VK_KHR_maintenance4.
@@ -749,5 +811,7 @@ void pgraph_vk_finalize_instance(PGRAPHState *pg)
     }
 
     volkFinalize();
+#ifndef __ANDROID__
     destroy_window(r);
+#endif
 }
