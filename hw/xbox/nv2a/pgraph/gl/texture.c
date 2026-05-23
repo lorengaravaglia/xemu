@@ -426,7 +426,7 @@ gl_internal_format_to_s3tc_enum(GLint gl_internal_format)
     case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
         return S3TC_DECOMPRESS_FORMAT_DXT5;
     default:
-        assert(!"Invalid format");
+        assert(!"Invalid gl_internal_format");
     }
 }
 
@@ -600,7 +600,7 @@ static void upload_gl_texture(GLenum gl_target,
 
     switch(gl_target) {
     case GL_TEXTURE_1D:
-        assert(false);
+        assert(!"Invalid 1D gl target texture");
         break;
     case GL_TEXTURE_2D:
         if (f.linear) {
@@ -846,7 +846,7 @@ static void upload_gl_texture(GLenum gl_target,
         break;
     }
     default:
-        assert(false);
+        assert(!"Invalid gl target texture type");
         break;
     }
 }
@@ -902,7 +902,8 @@ static TextureBinding* generate_texture(const TextureShape s,
             case 2: gl_target = GL_TEXTURE_2D; break;
             case 3: gl_target = GL_TEXTURE_3D; break;
             default:
-                assert(false);
+                NV2A_GL_DPRINTF(true, "Invalid texture dimensionality: %u", (unsigned)s.dimensionality);
+                assert(!"Invalid texture dimensionality");
                 break;
             }
         }
