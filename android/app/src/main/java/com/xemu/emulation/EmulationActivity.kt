@@ -75,8 +75,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 frametimeLine.text = "Frame: ${worstMs} ms"
             }
             if (memoryLine.visibility == View.VISIBLE) {
-                val mb = android.os.Debug.getNativeHeapAllocatedSize() / 1024 / 1024
-                memoryLine.text = "RAM: ${mb} MB"
+                val kb = java.io.File("/proc/self/status").readLines()
+                    .firstOrNull { it.startsWith("VmRSS:") }
+                    ?.filter { it.isDigit() }
+                    ?.toLongOrNull() ?: 0L
+                memoryLine.text = "RAM: ${kb / 1024} MB"
             }
             if (shadersLine.visibility == View.VISIBLE) {
                 val n = NativeInterface.getCompiledShaderCount()
