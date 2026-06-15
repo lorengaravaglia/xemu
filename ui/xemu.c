@@ -124,6 +124,19 @@ int xemu_android_get_rendered_frame_count(void)
     return g_rendered_frame_count;
 }
 
+/* Worst frame time (ms) seen since the last call to
+ * xemu_android_get_worst_frame_time_ms().  Written on the render thread,
+ * read and reset on the JNI thread — the race is benign for a display metric. */
+static volatile int g_worst_frame_time_ms = 0;
+static int64_t s_last_swap_ms = 0;  /* render-thread-only; no sharing */
+
+int xemu_android_get_worst_frame_time_ms(void)
+{
+    int val = g_worst_frame_time_ms;
+    g_worst_frame_time_ms = 0;
+    return val;
+}
+
 /* save_snapshot(), load_snapshot(), and bdrv_drain_all_begin() all assert
  * qemu_in_main_thread() — they must run on the QEMU main loop thread.
  * We dispatch all such work via a single bottom-half handler and block the
@@ -1296,6 +1309,16 @@ static void gl_render_frame(struct xemu_console *scon)
         ALOGE("gl_render_frame: GL error before swap: 0x%x (continuing)", err);
     }
     eglSwapBuffers(egl_display, egl_surface);
+    {
+        int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        if (s_last_swap_ms != 0) {
+            int ft = (int)(now - s_last_swap_ms);
+            if (ft > g_worst_frame_time_ms) {
+                g_worst_frame_time_ms = ft;
+            }
+        }
+        s_last_swap_ms = now;
+    }
     set_egl_current(false);
 #endif
 skip_render:

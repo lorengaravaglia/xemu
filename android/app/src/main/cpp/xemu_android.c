@@ -419,6 +419,11 @@ ANativeWindow *xemu_android_get_window(void) {
  * custom driver via adrenotools_open_libvulkan(). Falls back to the system
  * loader (returns NULL) on any failure.
  */
+extern int g_shaders_compiled_count;
+int xemu_android_get_compiled_shader_count(void) {
+    return g_shaders_compiled_count;
+}
+
 PFN_vkGetInstanceProcAddr xemu_android_get_vk_proc_addr(void) {
 #ifdef HAVE_ADRENOTOOLS
     if (!g_android_args ||

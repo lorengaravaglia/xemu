@@ -30,13 +30,18 @@ fun SettingsScreen(
     libraryViewModel: LibraryViewModel,
 ) {
     val context = LocalContext.current
-    val mcpx          by settingsViewModel.mcpxUri.collectAsState()
-    val bios          by settingsViewModel.biosUri.collectAsState()
-    val hdd           by settingsViewModel.hddUri.collectAsState()
-    val dirs          by libraryViewModel.dirs.collectAsState()
-    val renderer      by settingsViewModel.renderer.collectAsState()
-    val driverEnabled by settingsViewModel.driverEnabled.collectAsState()
-    val driverLabel   by settingsViewModel.driverLabel.collectAsState()
+    val mcpx               by settingsViewModel.mcpxUri.collectAsState()
+    val bios               by settingsViewModel.biosUri.collectAsState()
+    val hdd                by settingsViewModel.hddUri.collectAsState()
+    val dirs               by libraryViewModel.dirs.collectAsState()
+    val renderer           by settingsViewModel.renderer.collectAsState()
+    val driverEnabled      by settingsViewModel.driverEnabled.collectAsState()
+    val driverLabel        by settingsViewModel.driverLabel.collectAsState()
+    val overlayPosition    by settingsViewModel.overlayPosition.collectAsState()
+    val overlayShowFps     by settingsViewModel.overlayShowFps.collectAsState()
+    val overlayShowFrametime by settingsViewModel.overlayShowFrametime.collectAsState()
+    val overlayShowMemory  by settingsViewModel.overlayShowMemory.collectAsState()
+    val overlayShowShaders by settingsViewModel.overlayShowShaders.collectAsState()
 
     val pickMcpx = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
@@ -187,6 +192,71 @@ fun SettingsScreen(
 
             item {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text("Advanced", style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 4.dp))
+            }
+            item {
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp),
+                           verticalArrangement = Arrangement.spacedBy(12.dp)) {
+
+                        // Overlay position
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Overlay Position", style = MaterialTheme.typography.labelLarge)
+                            val positions = listOf(
+                                "TOP_LEFT" to "Top Left",
+                                "TOP_RIGHT" to "Top Right",
+                                "BOTTOM_LEFT" to "Bottom Left",
+                                "BOTTOM_RIGHT" to "Bottom Right",
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth()) {
+                                positions.take(2).forEach { (key, label) ->
+                                    FilterChip(
+                                        selected = overlayPosition == key,
+                                        onClick = { settingsViewModel.setOverlayPosition(key) },
+                                        label = { Text(label) },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth()) {
+                                positions.drop(2).forEach { (key, label) ->
+                                    FilterChip(
+                                        selected = overlayPosition == key,
+                                        onClick = { settingsViewModel.setOverlayPosition(key) },
+                                        label = { Text(label) },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+
+                        HorizontalDivider()
+
+                        // Overlay metrics toggles
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Show in Overlay", style = MaterialTheme.typography.labelLarge)
+                            OverlayToggleRow("FPS", overlayShowFps) {
+                                settingsViewModel.setOverlayShowFps(it)
+                            }
+                            OverlayToggleRow("Frame Time", overlayShowFrametime) {
+                                settingsViewModel.setOverlayShowFrametime(it)
+                            }
+                            OverlayToggleRow("Memory Usage", overlayShowMemory) {
+                                settingsViewModel.setOverlayShowMemory(it)
+                            }
+                            OverlayToggleRow("Shaders Compiled", overlayShowShaders) {
+                                settingsViewModel.setOverlayShowShaders(it)
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -230,6 +300,18 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun OverlayToggleRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 

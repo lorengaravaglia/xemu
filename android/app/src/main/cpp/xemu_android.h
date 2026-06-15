@@ -85,6 +85,15 @@ bool xemu_android_qemu_initialized(void);
  * Sample twice with a known interval to compute FPS. */
 int xemu_android_get_rendered_frame_count(void);
 
+/* Returns the worst frame time (ms) seen since the last call and resets the
+ * accumulator.  Measures time between successive eglSwapBuffers calls on the
+ * render thread — call once per second from the Kotlin overlay runnable. */
+int xemu_android_get_worst_frame_time_ms(void);
+
+/* Returns the running total of GL shader programs compiled this session.
+ * Increments each time pgraph_gl_compile_shader() succeeds. */
+int xemu_android_get_compiled_shader_count(void);
+
 /* Save/load a named VM snapshot (stored inside the qcow2 HDD image).
  * Slot convention used by the UI: "slot_1" … "slot_8".
  * Safe to call from any thread; acquires the BQL internally. */

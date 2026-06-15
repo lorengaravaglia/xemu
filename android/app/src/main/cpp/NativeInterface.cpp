@@ -98,6 +98,16 @@ Java_com_xemu_NativeInterface_getRenderedFrameCount(JNIEnv *env, jclass clazz) {
     return xemu_android_get_rendered_frame_count();
 }
 
+JNIEXPORT jint JNICALL
+Java_com_xemu_NativeInterface_getWorstFrameTimeMs(JNIEnv *env, jclass clazz) {
+    return xemu_android_get_worst_frame_time_ms();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_xemu_NativeInterface_getCompiledShaderCount(JNIEnv *env, jclass clazz) {
+    return xemu_android_get_compiled_shader_count();
+}
+
 JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_setSurface(JNIEnv *env, jclass clazz, jobject surface) {
     if (surface == nullptr) {

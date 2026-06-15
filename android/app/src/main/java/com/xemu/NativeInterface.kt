@@ -69,6 +69,16 @@ object NativeInterface {
     external fun getRenderedFrameCount(): Int
 
     /**
+     * Returns the worst frame time (ms) seen since the last call, then resets
+     * the accumulator. Measures real eglSwapBuffers intervals — call once per
+     * second from the overlay runnable.
+     */
+    external fun getWorstFrameTimeMs(): Int
+
+    /** Returns the running total of GL shader programs compiled this session. */
+    external fun getCompiledShaderCount(): Int
+
+    /**
      * Set the display aspect ratio.
      * wide=true  → 16:9 stretch (default).
      * wide=false → 4:3 with pillarboxing/letterboxing.

@@ -51,8 +51,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private var lastHatX = 0f
     private var lastHatY = 0f
 
-    // FPS counter overlay
-    private lateinit var fpsTextView: TextView
+    // Performance overlay
+    private lateinit var overlayContainer: LinearLayout
+    private lateinit var fpsLine: TextView
+    private lateinit var frametimeLine: TextView
+    private lateinit var memoryLine: TextView
+    private lateinit var shadersLine: TextView
     private val fpsHandler = Handler(Looper.getMainLooper())
     private var lastFrameCount = 0
     private var lastFpsTime = 0L
@@ -63,7 +67,20 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             val elapsed = now - lastFpsTime
             if (lastFpsTime != 0L && elapsed > 0) {
                 val fps = (count - lastFrameCount) * 1000f / elapsed
-                fpsTextView.text = "%.1f FPS".format(fps)
+                if (fpsLine.visibility == View.VISIBLE)
+                    fpsLine.text = "FPS: %.1f".format(fps)
+            }
+            if (frametimeLine.visibility == View.VISIBLE) {
+                val worstMs = NativeInterface.getWorstFrameTimeMs()
+                frametimeLine.text = "Frame: ${worstMs} ms"
+            }
+            if (memoryLine.visibility == View.VISIBLE) {
+                val mb = android.os.Debug.getNativeHeapAllocatedSize() / 1024 / 1024
+                memoryLine.text = "RAM: ${mb} MB"
+            }
+            if (shadersLine.visibility == View.VISIBLE) {
+                val n = NativeInterface.getCompiledShaderCount()
+                shadersLine.text = "Shaders: $n"
             }
             lastFrameCount = count
             lastFpsTime = now
@@ -72,6 +89,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     }
 
     private val prefs get() = getSharedPreferences("emulation_prefs", Context.MODE_PRIVATE)
+    private val mainPrefs get() = getSharedPreferences("main_prefs", Context.MODE_PRIVATE)
 
     // dp → px helper
     private val Int.dp get() = (this * resources.displayMetrics.density).toInt()
@@ -106,19 +124,29 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
-        // ── FPS counter pill (top-left corner) ────────────────────────────────
-        fpsTextView = TextView(this).apply {
-            text = "-- FPS"
-            textSize = 13f
+        // ── Performance overlay (configurable corner + metrics) ───────────────
+        fun overlayLine() = TextView(this).apply {
+            textSize = 11f
             setTextColor(Color.WHITE)
-            background = pillDrawable(Color.argb(160, 20, 20, 20))
-            setPadding(12.dp, 6.dp, 12.dp, 6.dp)
+            visibility = View.GONE
         }
-        root.addView(fpsTextView, FrameLayout.LayoutParams(
+        fpsLine       = overlayLine()
+        frametimeLine = overlayLine()
+        memoryLine    = overlayLine()
+        shadersLine   = overlayLine()
+        overlayContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rectDrawable(Color.argb(160, 20, 20, 20))
+            setPadding(10.dp, 6.dp, 10.dp, 6.dp)
+            addView(fpsLine)
+            addView(frametimeLine)
+            addView(memoryLine)
+            addView(shadersLine)
+        }
+        root.addView(overlayContainer, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP or Gravity.START
-        ).apply { topMargin = 16.dp; leftMargin = 16.dp })
+        ))
 
         // ── Menu button pill (top-right corner) ───────────────────────────────
         val menuBtn = TextView(this).apply {
@@ -158,6 +186,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             }
         })
 
+        applyOverlaySettings()
         updateOverlayVisibility()
     }
 
@@ -167,6 +196,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         inputManager.registerInputDeviceListener(this, null)
         lastFpsTime = 0L
         fpsHandler.post(fpsRunnable)
+        applyOverlaySettings()
         updateOverlayVisibility()
     }
 
@@ -486,6 +516,48 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun pillDrawable(colorArgb: Int) = GradientDrawable().apply {
         cornerRadius = 100.dp.toFloat()
         setColor(colorArgb)
+    }
+
+    /** Returns a rectangle GradientDrawable with the given fill color. */
+    private fun rectDrawable(colorArgb: Int) = GradientDrawable().apply {
+        cornerRadius = 4.dp.toFloat()
+        setColor(colorArgb)
+    }
+
+    /** Read overlay settings from main_prefs and apply position + visibility. */
+    private fun applyOverlaySettings() {
+        val showFps       = mainPrefs.getBoolean("overlay_show_fps", true)
+        val showFrametime = mainPrefs.getBoolean("overlay_show_frametime", false)
+        val showMemory    = mainPrefs.getBoolean("overlay_show_memory", false)
+        val showShaders   = mainPrefs.getBoolean("overlay_show_shaders", false)
+
+        fpsLine.visibility       = if (showFps)       View.VISIBLE else View.GONE
+        frametimeLine.visibility = if (showFrametime) View.VISIBLE else View.GONE
+        memoryLine.visibility    = if (showMemory)    View.VISIBLE else View.GONE
+        shadersLine.visibility   = if (showShaders)   View.VISIBLE else View.GONE
+
+        val anyVisible = showFps || showFrametime || showMemory || showShaders
+        overlayContainer.visibility = if (anyVisible) View.VISIBLE else View.GONE
+
+        val position = mainPrefs.getString("overlay_position", "TOP_LEFT") ?: "TOP_LEFT"
+        val gravity = when (position) {
+            "TOP_RIGHT"    -> Gravity.TOP    or Gravity.END
+            "BOTTOM_LEFT"  -> Gravity.BOTTOM or Gravity.START
+            "BOTTOM_RIGHT" -> Gravity.BOTTOM or Gravity.END
+            else           -> Gravity.TOP    or Gravity.START
+        }
+        val lp = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            gravity,
+        ).apply {
+            val margin = 16.dp
+            topMargin    = if (position.startsWith("TOP"))    margin else 0
+            bottomMargin = if (position.startsWith("BOTTOM")) margin else 0
+            leftMargin   = if (position.endsWith("LEFT"))     margin else 0
+            rightMargin  = if (position.endsWith("RIGHT"))    margin else 0
+        }
+        overlayContainer.layoutParams = lp
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

@@ -1196,6 +1196,10 @@ update_uniforms:
     update_shader_uniforms(pg, r->shader_binding);
 }
 
+/* Running total of GL programs compiled this session — readable from Android
+ * overlay via xemu_android_get_compiled_shader_count(). */
+int g_shaders_compiled_count = 0;
+
 GLuint pgraph_gl_compile_shader(const char *vs_src, const char *fs_src)
 {
     GLint status;
@@ -1270,5 +1274,6 @@ GLuint pgraph_gl_compile_shader(const char *vs_src, const char *fs_src)
     g_free(patched_fs);
 #endif
 
+    g_shaders_compiled_count++;
     return prog;
 }

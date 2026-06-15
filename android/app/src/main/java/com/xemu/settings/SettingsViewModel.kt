@@ -126,6 +126,47 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         return label
     }
 
+    // ── Performance overlay (advanced) ────────────────────────────────────────
+
+    /** Corner where the overlay is anchored: "TOP_LEFT", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_RIGHT" */
+    private val _overlayPosition = MutableStateFlow(
+        prefs.getString("overlay_position", "TOP_LEFT") ?: "TOP_LEFT"
+    )
+    val overlayPosition: StateFlow<String> = _overlayPosition
+
+    private val _overlayShowFps = MutableStateFlow(prefs.getBoolean("overlay_show_fps", true))
+    val overlayShowFps: StateFlow<Boolean> = _overlayShowFps
+
+    private val _overlayShowFrametime = MutableStateFlow(prefs.getBoolean("overlay_show_frametime", false))
+    val overlayShowFrametime: StateFlow<Boolean> = _overlayShowFrametime
+
+    private val _overlayShowMemory = MutableStateFlow(prefs.getBoolean("overlay_show_memory", false))
+    val overlayShowMemory: StateFlow<Boolean> = _overlayShowMemory
+
+    private val _overlayShowShaders = MutableStateFlow(prefs.getBoolean("overlay_show_shaders", false))
+    val overlayShowShaders: StateFlow<Boolean> = _overlayShowShaders
+
+    fun setOverlayPosition(value: String) {
+        _overlayPosition.value = value
+        prefs.edit().putString("overlay_position", value).apply()
+    }
+    fun setOverlayShowFps(value: Boolean) {
+        _overlayShowFps.value = value
+        prefs.edit().putBoolean("overlay_show_fps", value).apply()
+    }
+    fun setOverlayShowFrametime(value: Boolean) {
+        _overlayShowFrametime.value = value
+        prefs.edit().putBoolean("overlay_show_frametime", value).apply()
+    }
+    fun setOverlayShowMemory(value: Boolean) {
+        _overlayShowMemory.value = value
+        prefs.edit().putBoolean("overlay_show_memory", value).apply()
+    }
+    fun setOverlayShowShaders(value: Boolean) {
+        _overlayShowShaders.value = value
+        prefs.edit().putBoolean("overlay_show_shaders", value).apply()
+    }
+
     /** Remove the installed custom driver and revert to the system Vulkan loader. */
     fun clearDriver(context: Context) {
         File(context.filesDir, "driver").deleteRecursively()
