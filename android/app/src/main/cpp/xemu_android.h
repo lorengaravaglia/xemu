@@ -16,6 +16,9 @@ typedef struct {
     char *hddPath;
     char *isoPath;      /* optional disc image; NULL or empty = no disc */
     char *renderer;     /* "VULKAN", "OPENGL", or NULL to use saved config */
+    char *hookLibDir;   /* app's nativeLibraryDir (holds adrenotools hook .so files) */
+    char *driverDir;    /* dir containing custom Vulkan driver .so; NULL = system driver */
+    char *driverName;   /* soname of custom Vulkan driver; NULL = system driver */
 } ThreadArgs;
 
 extern ThreadArgs *g_android_args;
@@ -31,7 +34,10 @@ void xemu_android_start(
     const char *biosPath,
     const char *hddPath,
     const char *isoPath,
-    const char *renderer,   /* "VULKAN", "OPENGL", or NULL for default */
+    const char *renderer,    /* "VULKAN", "OPENGL", or NULL for default */
+    const char *hookLibDir,  /* app's nativeLibraryDir for adrenotools hook .so files */
+    const char *driverDir,   /* dir containing custom Vulkan driver .so; NULL = system */
+    const char *driverName,  /* soname of custom Vulkan driver; NULL = system */
     ANativeWindow *window
 );
 

@@ -49,6 +49,13 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        // Required by libadrenotools: hook .so files must be extracted to
+        // nativeLibraryDir on disk so adrenotools_open_libvulkan() can find them.
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")

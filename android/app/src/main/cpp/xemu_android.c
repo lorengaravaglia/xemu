@@ -1,5 +1,9 @@
 #include "qemu/osdep.h"
 #include "xemu_android.h"
+#ifdef HAVE_ADRENOTOOLS
+#include <adrenotools/driver.h>
+#include <dlfcn.h>
+#endif
 #include "ui/xemu-input.h"
 #include <pthread.h>
 #include <android/log.h>
@@ -369,6 +373,9 @@ void xemu_android_start(
     const char *hddPath,
     const char *isoPath,
     const char *renderer,
+    const char *hookLibDir,
+    const char *driverDir,
+    const char *driverName,
     ANativeWindow *window) {
 
     if (native_window != NULL) return;
@@ -383,6 +390,9 @@ void xemu_android_start(
     g_android_args->hddPath = strdup(hddPath);
     g_android_args->isoPath = (isoPath && isoPath[0]) ? strdup(isoPath) : NULL;
     g_android_args->renderer = (renderer && renderer[0]) ? strdup(renderer) : NULL;
+    g_android_args->hookLibDir = (hookLibDir && hookLibDir[0]) ? strdup(hookLibDir) : NULL;
+    g_android_args->driverDir  = (driverDir && driverDir[0]) ? strdup(driverDir) : NULL;
+    g_android_args->driverName = (driverName && driverName[0]) ? strdup(driverName) : NULL;
     LOGI("g_android_args initialized at %p", (void*)g_android_args);
 
     pthread_attr_t attr;
@@ -405,10 +415,45 @@ ANativeWindow *xemu_android_get_window(void) {
  * Turnip or other custom Adreno driver), or NULL to use the system Vulkan
  * loader. Called by the Vulkan renderer in instance.c before volkInitialize().
  *
- * TODO: Wire up libadrenotools for custom driver injection. For now the system
- * loader is always used (returns NULL → volkInitialize() falls back to
- * the standard Android Vulkan loader).
+ * When g_android_args->driverDir and driverName are set, attempts to load the
+ * custom driver via adrenotools_open_libvulkan(). Falls back to the system
+ * loader (returns NULL) on any failure.
  */
 PFN_vkGetInstanceProcAddr xemu_android_get_vk_proc_addr(void) {
+#ifdef HAVE_ADRENOTOOLS
+    if (!g_android_args ||
+        !g_android_args->hookLibDir ||
+        !g_android_args->driverDir  ||
+        !g_android_args->driverName) {
+        return NULL;  /* no custom driver configured — use system loader */
+    }
+
+    void *handle = adrenotools_open_libvulkan(
+        RTLD_NOW | RTLD_LOCAL,
+        ADRENOTOOLS_DRIVER_CUSTOM,
+        NULL,                          /* tmpLibDir — not needed on API 29+ */
+        g_android_args->hookLibDir,
+        g_android_args->driverDir,
+        g_android_args->driverName,
+        NULL,                          /* fileRedirectDir — unused */
+        NULL                           /* userMappingHandle — unused */
+    );
+    if (!handle) {
+        LOGE("adrenotools_open_libvulkan failed — falling back to system Vulkan loader");
+        return NULL;
+    }
+
+    PFN_vkGetInstanceProcAddr proc =
+        (PFN_vkGetInstanceProcAddr)dlsym(handle, "vkGetInstanceProcAddr");
+    if (!proc) {
+        LOGE("dlsym(vkGetInstanceProcAddr) failed in custom driver — falling back");
+        return NULL;
+    }
+
+    LOGI("Custom Vulkan driver loaded: %s/%s",
+         g_android_args->driverDir, g_android_args->driverName);
+    return proc;
+#else
     return NULL;
+#endif
 }

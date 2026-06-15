@@ -26,18 +26,22 @@ JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_startEmulation(
     JNIEnv *env, jclass clazz, jobject surface,
     jstring configPath, jstring mcpxPath, jstring biosPath,
-    jstring hddPath, jstring isoPath, jstring renderer) {
+    jstring hddPath, jstring isoPath, jstring renderer,
+    jstring hookLibDir, jstring driverDir, jstring driverName) {
 
     LOGI("NativeInterface.startEmulation called");
     // SDL_SetMainReady() tells SDL that app init is complete without SDLActivity.
     SDL_SetMainReady();
 
-    std::string c_config   = jstringToString(env, configPath);
-    std::string c_mcpx     = jstringToString(env, mcpxPath);
-    std::string c_bios     = jstringToString(env, biosPath);
-    std::string c_hdd      = jstringToString(env, hddPath);
-    std::string c_iso      = jstringToString(env, isoPath);
-    std::string c_renderer = jstringToString(env, renderer);
+    std::string c_config       = jstringToString(env, configPath);
+    std::string c_mcpx         = jstringToString(env, mcpxPath);
+    std::string c_bios         = jstringToString(env, biosPath);
+    std::string c_hdd          = jstringToString(env, hddPath);
+    std::string c_iso          = jstringToString(env, isoPath);
+    std::string c_renderer     = jstringToString(env, renderer);
+    std::string c_hook_lib_dir = jstringToString(env, hookLibDir);
+    std::string c_driver_dir   = jstringToString(env, driverDir);
+    std::string c_driver_name  = jstringToString(env, driverName);
 
     ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
     if (!window) {
@@ -52,6 +56,8 @@ Java_com_xemu_NativeInterface_startEmulation(
     LOGI("  HDD:      %s", c_hdd.c_str());
     LOGI("  ISO:      %s", c_iso.empty() ? "(none)" : c_iso.c_str());
     LOGI("  Renderer: %s", c_renderer.empty() ? "(default)" : c_renderer.c_str());
+    LOGI("  Driver:   %s/%s", c_driver_dir.empty() ? "(system)" : c_driver_dir.c_str(),
+                               c_driver_name.empty() ? "" : c_driver_name.c_str());
 
     xemu_android_start(
         c_config.c_str(),
@@ -60,6 +66,9 @@ Java_com_xemu_NativeInterface_startEmulation(
         c_hdd.c_str(),
         c_iso.c_str(),
         c_renderer.empty() ? nullptr : c_renderer.c_str(),
+        c_hook_lib_dir.empty() ? nullptr : c_hook_lib_dir.c_str(),
+        c_driver_dir.empty() ? nullptr : c_driver_dir.c_str(),
+        c_driver_name.empty() ? nullptr : c_driver_name.c_str(),
         window
     );
 }

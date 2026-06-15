@@ -44,6 +44,18 @@ pkg_check_modules(SAMPLERATE REQUIRED samplerate)
 
 set(XEMU_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../..")
 
+# Custom Vulkan driver loading via libadrenotools (Mesa Turnip etc.)
+set(ADRENOTOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../libs/libadrenotools")
+if(EXISTS "${ADRENOTOOLS_DIR}/CMakeLists.txt")
+    add_subdirectory(${ADRENOTOOLS_DIR} ${CMAKE_CURRENT_BINARY_DIR}/libadrenotools)
+    add_definitions(-DHAVE_ADRENOTOOLS=1)
+    set(HAVE_ADRENOTOOLS TRUE)
+    message(STATUS "libadrenotools found — custom Vulkan driver loading enabled")
+else()
+    set(HAVE_ADRENOTOOLS FALSE)
+    message(STATUS "libadrenotools not found — using system Vulkan loader only")
+endif()
+
 # Include directories
 include_directories(
     .
@@ -67,6 +79,7 @@ include_directories(
     ${PIXMAN_INCLUDE_DIRS}
     ${EPOXY_INCLUDE_DIRS}
     ${SAMPLERATE_INCLUDE_DIRS}
+    $<$<BOOL:${HAVE_ADRENOTOOLS}>:${ADRENOTOOLS_DIR}/include>
 )
 
 # Core xemu shared library for Android
@@ -192,4 +205,5 @@ target_link_libraries(xemu
     ${EPOXY_LIBRARIES}
     ${SAMPLERATE_LIBRARIES}
     -latomic
+    $<$<BOOL:${HAVE_ADRENOTOOLS}>:adrenotools>
 )

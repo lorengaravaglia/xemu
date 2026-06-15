@@ -37,6 +37,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     // True after the first startEmulation() call — subsequent surface events use setSurface()
     private var emulationStarted = false
 
+    // Per-game snapshot prefix derived from the ISO filename (e.g. "halo" → slots "halo_slot_1"…)
+    private var gameId: String = "game"
+
     // Overlay visibility mode
     private enum class OverlayMode { AUTO, ALWAYS_SHOW, ALWAYS_HIDE }
     private var overlayMode = OverlayMode.AUTO
@@ -359,7 +362,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         AlertDialog.Builder(this)
             .setTitle("Save State")
             .setItems(slotLabels) { _, which ->
-                NativeInterface.saveState("slot_${which + 1}")
+                NativeInterface.saveState("${gameId}_slot_${which + 1}")
                 Toast.makeText(this, "Saved to Slot ${which + 1}", Toast.LENGTH_SHORT).show()
             }
             .show()
@@ -368,13 +371,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun showLoadStateDialog() {
         val existingSlots = NativeInterface.listStates().toSet()
         val slotLabels = Array(8) { i ->
-            val name = "slot_${i + 1}"
+            val name = "${gameId}_slot_${i + 1}"
             if (name in existingSlots) "Slot ${i + 1}" else "Slot ${i + 1} (empty)"
         }
         AlertDialog.Builder(this)
             .setTitle("Load State")
             .setItems(slotLabels) { _, which ->
-                val name = "slot_${which + 1}"
+                val name = "${gameId}_slot_${which + 1}"
                 if (name in existingSlots) {
                     NativeInterface.loadState(name)
                 } else {
@@ -382,6 +385,21 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 }
             }
             .show()
+    }
+
+    /** Derive a short, filesystem-safe game ID from the ISO URI for snapshot namespacing. */
+    private fun isoUriToGameId(uriStr: String): String {
+        if (uriStr.isEmpty()) return "dashboard"
+        val basename = android.net.Uri.parse(uriStr).lastPathSegment
+            ?.substringAfterLast('/')
+            ?.substringBeforeLast('.')
+            ?: return "game"
+        return basename
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .trim('_')
+            .take(24)
+            .ifEmpty { "game" }
     }
 
     private fun toggleAspectRatio() {
@@ -419,7 +437,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val biosUri = intent.getStringExtra("bios") ?: ""
         val hddUri  = intent.getStringExtra("hdd")  ?: ""
         val isoUriStr = intent.getStringExtra("iso") ?: ""
-        val renderer = intent.getStringExtra("renderer") ?: ""
+        gameId = isoUriToGameId(isoUriStr)
+        val renderer  = intent.getStringExtra("renderer") ?: ""
+        val driverDir  = intent.getStringExtra("driverDir")  ?: ""
+        val driverName = intent.getStringExtra("driverName") ?: ""
+        val hookLibDir = applicationInfo.nativeLibraryDir
 
         val mcpxPath = MainActivity.getRealFilePath(this, mcpxUri, "mcpx.bin")
         val biosPath = MainActivity.getRealFilePath(this, biosUri, "bios.bin")
@@ -439,7 +461,10 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             biosPath,
             hddPath,
             isoPath,
-            renderer
+            renderer,
+            hookLibDir,
+            driverDir,
+            driverName
         )
     }
 

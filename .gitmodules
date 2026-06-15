@@ -45,3 +45,6 @@
 [submodule "tests/lcitool/libvirt-ci"]
 	path = tests/lcitool/libvirt-ci
 	url = https://gitlab.com/libvirt/libvirt-ci.git
+[submodule "android/app/libs/libadrenotools"]
+	path = android/app/libs/libadrenotools
+	url = https://github.com/bylaws/libadrenotools

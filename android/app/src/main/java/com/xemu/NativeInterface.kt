@@ -37,7 +37,10 @@ object NativeInterface {
         biosPath: String,
         hddPath: String,
         isoPath: String,         // empty string = no disc (boot to dashboard)
-        renderer: String         // "VULKAN", "OPENGL", or "" for default
+        renderer: String,        // "VULKAN", "OPENGL", or "" for default
+        hookLibDir: String,      // applicationInfo.nativeLibraryDir (adrenotools hook .so location)
+        driverDir: String,       // dir containing custom Vulkan driver .so; "" = system driver
+        driverName: String       // soname of custom Vulkan driver; "" = system driver
     )
 
     external fun stopEmulation()
