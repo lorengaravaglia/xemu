@@ -14,8 +14,7 @@ import androidx.navigation.compose.rememberNavController
 import com.xemu.library.GameLibraryScreen
 import com.xemu.library.LibraryViewModel
 import com.xemu.onboarding.SetupScreen
-import com.xemu.settings.SettingsScreen
-import com.xemu.settings.SettingsViewModel
+import com.xemu.settings.*
 import com.xemu.ui.theme.XemuTheme
 
 class MainActivity : ComponentActivity() {
@@ -37,7 +36,25 @@ class MainActivity : ComponentActivity() {
                         GameLibraryScreen(navController, libraryViewModel, settingsViewModel)
                     }
                     composable("settings") {
-                        SettingsScreen(navController, settingsViewModel, libraryViewModel)
+                        SettingsScreen(navController)
+                    }
+                    composable("settings/system") {
+                        SystemSettingsScreen(navController, settingsViewModel, libraryViewModel)
+                    }
+                    composable("settings/graphics") {
+                        GraphicsSettingsScreen(navController, settingsViewModel)
+                    }
+                    composable("settings/controls") {
+                        ControlsSettingsScreen(navController)
+                    }
+                    composable("settings/audio") {
+                        AudioSettingsScreen(navController)
+                    }
+                    composable("settings/overlay") {
+                        OverlaySettingsScreen(navController, settingsViewModel)
+                    }
+                    composable("settings/advanced") {
+                        AdvancedSettingsScreen(navController)
                     }
                 }
             }

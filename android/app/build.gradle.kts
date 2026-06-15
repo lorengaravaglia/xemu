@@ -81,6 +81,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.documentfile:documentfile:1.0.1")
 
+    // Extended Material icon set (Outlined style used throughout settings)
+    implementation("androidx.compose.material:material-icons-extended")
+
     // Cover art image loading
     implementation("io.coil-kt:coil-compose:2.6.0")
 
