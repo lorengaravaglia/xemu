@@ -7,9 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -54,20 +52,21 @@ fun GraphicsSettingsScreen(
             SettingsSectionLabel("Renderer")
             OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp),
-                       verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                       verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Backend", style = MaterialTheme.typography.labelLarge)
                     Text("Takes effect on next launch",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("VULKAN" to "Vulkan", "OPENGL" to "OpenGL").forEach { (key, label) ->
-                            FilterChip(
-                                selected = renderer == key,
-                                onClick = { settingsViewModel.setRenderer(key) },
-                                label = { Text(label) },
+                    val rendererOptions = listOf("VULKAN" to "Vulkan", "OPENGL" to "OpenGL")
+                    SettingsDropdown(
+                        value = rendererOptions.first { it.first == renderer }.second,
+                        options = rendererOptions.map { it.second },
+                        onSelect = { label ->
+                            settingsViewModel.setRenderer(
+                                rendererOptions.first { it.second == label }.first
                             )
-                        }
-                    }
+                        },
+                    )
                 }
             }
 

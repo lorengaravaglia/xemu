@@ -35,36 +35,22 @@ fun OverlaySettingsScreen(
 
             SettingsSectionLabel("Position")
             OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp),
-                       verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(modifier = Modifier.padding(12.dp)) {
                     val positions = listOf(
                         "TOP_LEFT"     to "Top Left",
                         "TOP_RIGHT"    to "Top Right",
                         "BOTTOM_LEFT"  to "Bottom Left",
                         "BOTTOM_RIGHT" to "Bottom Right",
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()) {
-                        positions.take(2).forEach { (key, label) ->
-                            FilterChip(
-                                selected = overlayPosition == key,
-                                onClick = { settingsViewModel.setOverlayPosition(key) },
-                                label = { Text(label) },
-                                modifier = Modifier.weight(1f),
+                    SettingsDropdown(
+                        value = positions.first { it.first == overlayPosition }.second,
+                        options = positions.map { it.second },
+                        onSelect = { label ->
+                            settingsViewModel.setOverlayPosition(
+                                positions.first { it.second == label }.first
                             )
-                        }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()) {
-                        positions.drop(2).forEach { (key, label) ->
-                            FilterChip(
-                                selected = overlayPosition == key,
-                                onClick = { settingsViewModel.setOverlayPosition(key) },
-                                label = { Text(label) },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
+                        },
+                    )
                 }
             }
 
