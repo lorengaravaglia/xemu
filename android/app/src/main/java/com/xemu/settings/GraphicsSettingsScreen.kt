@@ -23,6 +23,9 @@ fun GraphicsSettingsScreen(
     val renderer      by settingsViewModel.renderer.collectAsState()
     val driverEnabled by settingsViewModel.driverEnabled.collectAsState()
     val driverLabel   by settingsViewModel.driverLabel.collectAsState()
+    val aspectRatio   by settingsViewModel.aspectRatio.collectAsState()
+    val surfaceScale  by settingsViewModel.surfaceScale.collectAsState()
+    val filterNearest by settingsViewModel.filterNearest.collectAsState()
 
     val driverPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -47,6 +50,62 @@ fun GraphicsSettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Spacer(Modifier.height(0.dp))
+
+            // Aspect Ratio
+            SettingsSectionLabel("Aspect Ratio")
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp),
+                       verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val aspectOptions = listOf(
+                        0 to "Native (640×480 integer scale)",
+                        1 to "Auto (stretch)",
+                        2 to "4:3 (pillarbox / letterbox)",
+                        3 to "16:9 (stretch to fill)",
+                    )
+                    SettingsDropdown(
+                        value = aspectOptions.first { it.first == aspectRatio }.second,
+                        options = aspectOptions.map { it.second },
+                        onSelect = { label ->
+                            settingsViewModel.setAspectRatio(
+                                aspectOptions.first { it.second == label }.first
+                            )
+                        },
+                    )
+                }
+            }
+
+            // Internal Resolution Scale
+            SettingsSectionLabel("Internal Resolution Scale")
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp),
+                       verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Multiplies NV2A surface render resolution. Takes effect on next launch.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val scaleOptions = listOf(1 to "1× (Native)", 2 to "2×", 3 to "3×")
+                    SettingsDropdown(
+                        value = scaleOptions.first { it.first == surfaceScale }.second,
+                        options = scaleOptions.map { it.second },
+                        onSelect = { label ->
+                            settingsViewModel.setSurfaceScale(
+                                scaleOptions.first { it.second == label }.first
+                            )
+                        },
+                    )
+                }
+            }
+
+            // Filter Method
+            SettingsSectionLabel("Filter Method")
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    SettingsSwitchRow(
+                        label = "Nearest Neighbour",
+                        subtitle = "Sharp pixel scaling instead of smooth interpolation",
+                        checked = filterNearest,
+                    ) { settingsViewModel.setFilterNearest(it) }
+                }
+            }
 
             // Renderer
             SettingsSectionLabel("Renderer")

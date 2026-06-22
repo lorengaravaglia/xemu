@@ -50,6 +50,35 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString("renderer", value).apply()
     }
 
+    // ── Display settings ──────────────────────────────────────────────────────
+
+    /** 0=Native, 1=Auto, 2=4:3, 3=16:9 (default) */
+    private val _aspectRatio = MutableStateFlow(prefs.getInt("aspect_ratio", 3))
+    val aspectRatio: StateFlow<Int> = _aspectRatio
+
+    /** 1=1× (native), 2=2×, 3=3× */
+    private val _surfaceScale = MutableStateFlow(prefs.getInt("surface_scale", 1))
+    val surfaceScale: StateFlow<Int> = _surfaceScale
+
+    /** false=Linear (default, smooth), true=Nearest (sharp/pixel-art) */
+    private val _filterNearest = MutableStateFlow(prefs.getBoolean("filter_nearest", false))
+    val filterNearest: StateFlow<Boolean> = _filterNearest
+
+    fun setAspectRatio(value: Int) {
+        _aspectRatio.value = value
+        prefs.edit().putInt("aspect_ratio", value).apply()
+    }
+
+    fun setSurfaceScale(value: Int) {
+        _surfaceScale.value = value
+        prefs.edit().putInt("surface_scale", value).apply()
+    }
+
+    fun setFilterNearest(value: Boolean) {
+        _filterNearest.value = value
+        prefs.edit().putBoolean("filter_nearest", value).apply()
+    }
+
     // ── Custom Vulkan driver (adrenotools) ────────────────────────────────────
 
     private val _driverEnabled = MutableStateFlow(prefs.getBoolean("driver_enabled", false))
@@ -124,6 +153,19 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             .apply()
 
         return label
+    }
+
+    // ── Controller overlay visibility ─────────────────────────────────────────
+
+    /** "AUTO", "ALWAYS_SHOW", or "ALWAYS_HIDE" */
+    private val _overlayMode = MutableStateFlow(
+        prefs.getString("overlay_mode", "AUTO") ?: "AUTO"
+    )
+    val overlayMode: StateFlow<String> = _overlayMode
+
+    fun setOverlayMode(value: String) {
+        _overlayMode.value = value
+        prefs.edit().putString("overlay_mode", value).apply()
     }
 
     // ── Performance overlay (advanced) ────────────────────────────────────────

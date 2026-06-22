@@ -44,9 +44,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private enum class OverlayMode { AUTO, ALWAYS_SHOW, ALWAYS_HIDE }
     private var overlayMode = OverlayMode.AUTO
 
-    // Display aspect ratio: true = 16:9 stretch (default), false = 4:3 pillarbox
-    private var aspect16x9 = true
-
     // D-pad hat axis state (for AXIS_HAT_X / AXIS_HAT_Y)
     private var lastHatX = 0f
     private var lastHatY = 0f
@@ -106,9 +103,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         mapping = ControllerMapping(this)
         inputManager = getSystemService(Context.INPUT_SERVICE) as InputManager
         overlayMode = OverlayMode.valueOf(
-            prefs.getString("overlay_mode", OverlayMode.AUTO.name) ?: OverlayMode.AUTO.name
+            mainPrefs.getString("overlay_mode", OverlayMode.AUTO.name) ?: OverlayMode.AUTO.name
         )
-        aspect16x9 = prefs.getBoolean("aspect_16x9", true)
 
         val root = FrameLayout(this)
         setContentView(root)
@@ -173,7 +169,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             override fun surfaceCreated(holder: SurfaceHolder) {
                 if (!emulationStarted) {
                     startEmulation(holder)
-                    NativeInterface.setAspectRatio(aspect16x9)
+                    applyGraphicsSettings()
                     emulationStarted = true
                 } else {
                     // Surface recreated after going to background or rotating — hand the
@@ -199,7 +195,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         inputManager.registerInputDeviceListener(this, null)
         lastFpsTime = 0L
         fpsHandler.post(fpsRunnable)
+        // Re-read overlay mode from main_prefs in case it changed in Settings
+        overlayMode = OverlayMode.valueOf(
+            mainPrefs.getString("overlay_mode", OverlayMode.AUTO.name) ?: OverlayMode.AUTO.name
+        )
         applyOverlaySettings()
+        applyGraphicsSettings()
         updateOverlayVisibility()
     }
 
@@ -335,14 +336,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             OverlayMode.ALWAYS_SHOW -> "Overlay: Always Show"
             OverlayMode.ALWAYS_HIDE -> "Overlay: Always Hide"
         }
-        val aspectLabel = if (aspect16x9) "Aspect: 16:9" else "Aspect: 4:3"
 
         fun item(label: String, danger: Boolean = false, action: () -> Unit) {
             container.addView(sheetItem(label, danger) { sheet.dismiss(); action() })
         }
 
         item(overlayLabel)    { cycleOverlayMode() }
-        item(aspectLabel)     { toggleAspectRatio() }
 
         container.addView(sheetDivider())
 
@@ -435,19 +434,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             .ifEmpty { "game" }
     }
 
-    private fun toggleAspectRatio() {
-        aspect16x9 = !aspect16x9
-        prefs.edit().putBoolean("aspect_16x9", aspect16x9).apply()
-        NativeInterface.setAspectRatio(aspect16x9)
-    }
-
     private fun cycleOverlayMode() {
         overlayMode = when (overlayMode) {
             OverlayMode.AUTO        -> OverlayMode.ALWAYS_SHOW
             OverlayMode.ALWAYS_SHOW -> OverlayMode.ALWAYS_HIDE
             OverlayMode.ALWAYS_HIDE -> OverlayMode.AUTO
         }
-        prefs.edit().putString("overlay_mode", overlayMode.name).apply()
+        mainPrefs.edit().putString("overlay_mode", overlayMode.name).apply()
         updateOverlayVisibility()
     }
 
@@ -525,6 +518,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun rectDrawable(colorArgb: Int) = GradientDrawable().apply {
         cornerRadius = 4.dp.toFloat()
         setColor(colorArgb)
+    }
+
+    /** Read graphics settings from main_prefs and push to native layer. */
+    private fun applyGraphicsSettings() {
+        NativeInterface.setAspectRatio(mainPrefs.getInt("aspect_ratio", 3))
+        NativeInterface.setFilterNearest(mainPrefs.getBoolean("filter_nearest", false))
+        NativeInterface.setSurfaceScale(mainPrefs.getInt("surface_scale", 1))
     }
 
     /** Read overlay settings from main_prefs and apply position + visibility. */

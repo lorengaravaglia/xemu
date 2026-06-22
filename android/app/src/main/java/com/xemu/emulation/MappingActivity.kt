@@ -1,12 +1,21 @@
 package com.xemu.emulation
 
-import android.graphics.Color
-import android.hardware.input.InputManager
+import android.view.InputDevice
+import android.view.KeyEvent
 import android.os.Bundle
-import android.view.*
-import android.widget.*
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.xemu.settings.SettingsSectionLabel
+import com.xemu.ui.theme.XemuTheme
 
 /**
  * Controller remapping screen.
@@ -14,201 +23,218 @@ import androidx.appcompat.app.AppCompatActivity
  * Shows each Xbox button with its currently-assigned Android keycode.
  * Tap a row → the activity listens for the next physical gamepad button
  * press and assigns it.
- *
- * Launched from the in-game menu; can also be reached from MainActivity.
  */
-class MappingActivity : AppCompatActivity() {
+class MappingActivity : ComponentActivity() {
 
     private lateinit var mapping: ControllerMapping
-    private var capturingFor: ControllerMapping.XboxButton? = null
-
-    private lateinit var statusText: TextView
-    private lateinit var rowContainer: LinearLayout
+    private val capturingFor = mutableStateOf<ControllerMapping.XboxButton?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mapping = ControllerMapping(this)
-
-        val scroll = ScrollView(this)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#1A1A1A"))
-            setPadding(32, 32, 32, 64)
-        }
-        scroll.addView(root)
-        setContentView(scroll)
-
-        // ── Title ─────────────────────────────────────────────────────────────
-        root.addView(TextView(this).apply {
-            text = "Controller Mapping"
-            textSize = 22f
-            setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, 8)
-        })
-
-        // ── Status / capture prompt ────────────────────────────────────────────
-        statusText = TextView(this).apply {
-            setIdlePrompt()
-            textSize = 15f
-            setPadding(0, 8, 0, 16)
-        }
-        root.addView(statusText)
-
-        // ── Reset button ──────────────────────────────────────────────────────
-        val resetBtn = Button(this).apply {
-            text = "Reset to Defaults"
-            setOnClickListener {
-                if (capturingFor != null) cancelCapture()
-                AlertDialog.Builder(this@MappingActivity)
-                    .setTitle("Reset Mappings")
-                    .setMessage("Reset all button mappings to defaults?")
-                    .setPositiveButton("Reset") { _, _ ->
-                        mapping.resetToDefaults()
-                        mapping.save()
-                        refreshRows()
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
+        setContent {
+            XemuTheme {
+                MappingScreen(
+                    mapping = mapping,
+                    capturingFor = capturingFor.value,
+                    onStartCapture = { capturingFor.value = it },
+                    onCancelCapture = { capturingFor.value = null },
+                    onReset = { mapping.resetToDefaults(); mapping.save() },
+                    onNavigateBack = { finish() },
+                )
             }
         }
-        root.addView(resetBtn)
-
-        // ── Divider / section header ───────────────────────────────────────────
-        root.addView(sectionHeader("BUTTONS"))
-
-        // ── Mapping rows ──────────────────────────────────────────────────────
-        rowContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(rowContainer)
-        refreshRows()
-
-        // ── Axes info (read-only) ─────────────────────────────────────────────
-        root.addView(sectionHeader("AXES (auto-detected)"))
-        root.addView(TextView(this).apply {
-            text = "Standard axis layout is used automatically:\n" +
-                   "Left stick → AXIS_X / AXIS_Y\n" +
-                   "Right stick → AXIS_Z / AXIS_RZ\n" +
-                   "Triggers → AXIS_LTRIGGER / AXIS_RTRIGGER"
-            setTextColor(Color.LTGRAY)
-            textSize = 13f
-            setPadding(8, 8, 8, 8)
-        })
-
-        // ── Cancel capture on outside tap via back button ──────────────────────
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
     }
-
-    override fun onSupportNavigateUp(): Boolean {
-        finish(); return true
-    }
-
-    // ── Build / refresh the button rows ───────────────────────────────────────
-
-    private fun refreshRows() {
-        rowContainer.removeAllViews()
-        // Build reverse map: XboxButton → list of bound keycodes
-        val reverse = mutableMapOf<ControllerMapping.XboxButton, MutableList<Int>>()
-        mapping.allButtonMappings().forEach { (kc, btn) ->
-            reverse.getOrPut(btn) { mutableListOf() }.add(kc)
-        }
-        for (btn in ControllerMapping.XboxButton.values()) {
-            val bound = reverse[btn]?.joinToString(", ") {
-                ControllerMapping.keycodeLabel(it)
-            } ?: "(none)"
-            rowContainer.addView(buildRow(btn, bound))
-        }
-    }
-
-    private fun buildRow(btn: ControllerMapping.XboxButton, currentLabel: String): View {
-        val bg = if (capturingFor == btn)
-            Color.parseColor("#3A3A00") else Color.parseColor("#2A2A2A")
-
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(bg)
-            setPadding(16, 20, 16, 20)
-        }
-
-        row.addView(TextView(this).apply {
-            text = btn.label
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
-
-        row.addView(TextView(this).apply {
-            text = currentLabel
-            setTextColor(if (capturingFor == btn) Color.YELLOW else Color.LTGRAY)
-            textSize = 14f
-            textAlignment = View.TEXT_ALIGNMENT_TEXT_END
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
-
-        row.setOnClickListener { startCapturing(btn) }
-
-        // Divider
-        val wrapper = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        wrapper.addView(row)
-        wrapper.addView(View(this).apply {
-            setBackgroundColor(Color.parseColor("#333333"))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 1)
-        })
-        return wrapper
-    }
-
-    // ── Capture logic ─────────────────────────────────────────────────────────
-
-    private fun startCapturing(btn: ControllerMapping.XboxButton) {
-        capturingFor = btn
-        statusText.text = "Press button on controller for: ${btn.label}  (tap here to cancel)"
-        statusText.setTextColor(Color.YELLOW)
-        statusText.setOnClickListener { cancelCapture() }
-        refreshRows()
-    }
-
-    private fun cancelCapture() {
-        capturingFor = null
-        statusText.setOnClickListener(null)
-        statusText.setIdlePrompt()
-        refreshRows()
-    }
-
-    private fun TextView.setIdlePrompt() {
-        text = "Tap a button row, then press on your physical controller to assign it."
-        setTextColor(Color.GRAY)
-    }
-
-    // ── Intercept physical gamepad button presses ─────────────────────────────
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val capturing = capturingFor
+        val capturing = capturingFor.value
         if (capturing != null && event.action == KeyEvent.ACTION_DOWN) {
             val isGamepad = (event.source and InputDevice.SOURCE_GAMEPAD != 0) ||
                             (event.source and InputDevice.SOURCE_DPAD != 0)
             if (isGamepad) {
                 mapping.assignButton(event.keyCode, capturing)
                 mapping.save()
-                cancelCapture()
+                capturingFor.value = null
                 return true
             }
         }
         return super.dispatchKeyEvent(event)
     }
+}
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MappingScreen(
+    mapping: ControllerMapping,
+    capturingFor: ControllerMapping.XboxButton?,
+    onStartCapture: (ControllerMapping.XboxButton) -> Unit,
+    onCancelCapture: () -> Unit,
+    onReset: () -> Unit,
+    onNavigateBack: () -> Unit,
+) {
+    var showResetDialog by remember { mutableStateOf(false) }
 
-    private fun sectionHeader(text: String): View {
-        val wrapper = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        wrapper.addView(TextView(this).apply {
-            this.text = text
-            textSize = 12f
-            setTextColor(Color.parseColor("#888888"))
-            setPadding(8, 24, 8, 8)
-        })
-        wrapper.addView(View(this).apply {
-            setBackgroundColor(Color.parseColor("#444444"))
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
-        })
-        return wrapper
+    // Build reverse map: XboxButton → bound keycode label string
+    // Recomputed on each recomposition (triggered by capturingFor changes or reset)
+    val buttonLabels = remember(capturingFor, showResetDialog) {
+        val reverse = mutableMapOf<ControllerMapping.XboxButton, MutableList<Int>>()
+        mapping.allButtonMappings().forEach { (kc, btn) ->
+            reverse.getOrPut(btn) { mutableListOf() }.add(kc)
+        }
+        ControllerMapping.XboxButton.values().associateWith { btn ->
+            reverse[btn]?.joinToString(", ") { ControllerMapping.keycodeLabel(it) } ?: "(none)"
+        }
+    }
+
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            title = { Text("Reset Mappings") },
+            text = { Text("Reset all button mappings to defaults?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onReset()
+                    showResetDialog = false
+                }) { Text("Reset") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Controller Mapping") },
+                navigationIcon = {
+                    IconButton(onClick = onNavigateBack) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    TextButton(onClick = { showResetDialog = true }) {
+                        Text("Reset")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(vertical = 16.dp),
+        ) {
+            // Status / capture prompt
+            item {
+                val isCapturing = capturingFor != null
+                OutlinedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.outlinedCardColors(
+                        containerColor = if (isCapturing)
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                        else
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                    ),
+                    onClick = { if (isCapturing) onCancelCapture() },
+                ) {
+                    Text(
+                        text = if (isCapturing)
+                            "Press a button on your controller for: ${capturingFor!!.label}  •  Tap to cancel"
+                        else
+                            "Tap a row below, then press a button on your physical controller to assign it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isCapturing)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    )
+                }
+            }
+
+            // Button mapping rows
+            item { SettingsSectionLabel("Buttons") }
+            item {
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column {
+                        ControllerMapping.XboxButton.values().forEachIndexed { index, btn ->
+                            val label = buttonLabels[btn] ?: "(none)"
+                            val isBeingCaptured = capturingFor == btn
+                            ButtonMappingRow(
+                                buttonName = btn.label,
+                                assignedLabel = label,
+                                isCapturing = isBeingCaptured,
+                                onClick = {
+                                    if (isBeingCaptured) onCancelCapture() else onStartCapture(btn)
+                                },
+                            )
+                            if (index < ControllerMapping.XboxButton.values().size - 1) {
+                                HorizontalDivider()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Axes info (read-only)
+            item { SettingsSectionLabel("Axes (auto-detected)") }
+            item {
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Standard axis layout is used automatically:\n" +
+                               "Left stick → AXIS_X / AXIS_Y\n" +
+                               "Right stick → AXIS_Z / AXIS_RZ\n" +
+                               "Triggers → AXIS_LTRIGGER / AXIS_RTRIGGER",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    )
+                }
+            }
+
+            item { Spacer(Modifier.height(8.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ButtonMappingRow(
+    buttonName: String,
+    assignedLabel: String,
+    isCapturing: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        color = if (isCapturing)
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+        else
+            MaterialTheme.colorScheme.surface,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = buttonName,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = assignedLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isCapturing)
+                    MaterialTheme.colorScheme.primary
+                else
+                    MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }

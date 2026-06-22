@@ -424,6 +424,18 @@ int xemu_android_get_compiled_shader_count(void) {
     return g_shaders_compiled_count;
 }
 
+/* Internal resolution scale — stored here, applied in gl_render_frame (ui/xemu.c)
+ * on the first frame after QEMU/NV2A is fully initialized. */
+static volatile unsigned int g_surface_scale = 1;
+
+void xemu_android_set_surface_scale(unsigned int scale) {
+    g_surface_scale = (scale >= 1 && scale <= 4) ? scale : 1;
+}
+
+unsigned int xemu_android_get_surface_scale(void) {
+    return g_surface_scale;
+}
+
 PFN_vkGetInstanceProcAddr xemu_android_get_vk_proc_addr(void) {
 #ifdef HAVE_ADRENOTOOLS
     if (!g_android_args ||

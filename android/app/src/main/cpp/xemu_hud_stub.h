@@ -19,9 +19,15 @@ void xemu_hud_update(void);
 void xemu_hud_render(void);
 
 /* Aspect ratio control.
- * wide=true  → 16:9 stretch (default).
- * wide=false → 4:3 with pillarboxing/letterboxing. */
+ * ratio: 0=Native (integer scale), 1=Auto (stretch), 2=4:3 (pillarbox), 3=16:9 (stretch).
+ * xemu_hud_set_aspect_16x9 kept for legacy callers. */
+void xemu_hud_set_aspect_ratio(int ratio);
 void xemu_hud_set_aspect_16x9(bool wide);
+
+/* Texture filter for the final blit.
+ * nearest=true → GL_NEAREST (pixel-art / sharp scaling).
+ * nearest=false → GL_LINEAR (default, smooth). */
+void xemu_hud_set_filter_nearest(bool nearest);
 
 #ifdef __cplusplus
 }

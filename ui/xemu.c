@@ -1163,6 +1163,18 @@ static void gl_render_frame(struct xemu_console *scon)
     }
 #endif
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Apply internal resolution scale once, after NV2A is initialized.
+     * xemu_android_set_surface_scale() stores the pending value; we apply it
+     * here on the first eligible frame so nv2a_set_surface_scale_factor()
+     * finds g_nv2a already set. */
+    static bool s_scale_applied = false;
+    if (!s_scale_applied && xemu_android_qemu_initialized()) {
+        nv2a_set_surface_scale_factor(xemu_android_get_surface_scale());
+        s_scale_applied = true;
+    }
+#endif
+
     bool flip_required = false;
     bool release_surface_texture = false;
 #if defined(__ANDROID__) || defined(ANDROID)

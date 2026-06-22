@@ -143,8 +143,18 @@ Java_com_xemu_NativeInterface_requestExit(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setAspectRatio(JNIEnv *env, jclass clazz, jboolean wide) {
-    xemu_hud_set_aspect_16x9((bool)wide);
+Java_com_xemu_NativeInterface_setAspectRatio(JNIEnv *env, jclass clazz, jint ratio) {
+    xemu_hud_set_aspect_ratio((int)ratio);
+}
+
+JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_setFilterNearest(JNIEnv *env, jclass clazz, jboolean nearest) {
+    xemu_hud_set_filter_nearest((bool)nearest);
+}
+
+JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_setSurfaceScale(JNIEnv *env, jclass clazz, jint scale) {
+    xemu_android_set_surface_scale((unsigned int)scale);
 }
 
 JNIEXPORT void JNICALL

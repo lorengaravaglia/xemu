@@ -19,12 +19,27 @@ bool g_screenshot_pending = false;
 float g_main_menu_height = 0.0f;
 
 // ---- Aspect ratio ----
-// true  = 16:9 (stretch to fill screen, default)
-// false = 4:3  (pillarbox/letterbox to preserve Xbox AR)
-static bool g_aspect_16x9 = true;
+// 0 = Native (largest integer multiple of 640x480, centered)
+// 1 = Auto   (stretch to fill — same as 16:9 on widescreen phones)
+// 2 = 4:3    (pillarbox/letterbox)
+// 3 = 16:9   (stretch to fill, default)
+static int g_aspect_ratio = 3;
+
+void xemu_hud_set_aspect_ratio(int ratio) {
+    g_aspect_ratio = ratio;
+}
 
 void xemu_hud_set_aspect_16x9(bool wide) {
-    g_aspect_16x9 = wide;
+    g_aspect_ratio = wide ? 3 : 2;
+}
+
+// ---- Texture filter ----
+// false = GL_LINEAR (default, smooth)
+// true  = GL_NEAREST (pixel-art / sharp)
+static bool g_filter_nearest = false;
+
+void xemu_hud_set_filter_nearest(bool nearest) {
+    g_filter_nearest = nearest;
 }
 
 // ---- Fullscreen blit state ----
@@ -185,23 +200,37 @@ void xemu_hud_render(void)
     float h = (float)vp[3];
 
     /* Compute destination rect in NDC space.
-     * 16:9 mode: fill the whole viewport (NDC -1..1).
-     * 4:3 mode:  pillarbox or letterbox to preserve 4:3 Xbox output. */
+     * g_aspect_ratio:
+     *   0 = Native  — largest integer multiple of Xbox 640x480, centered
+     *   1 = Auto    — stretch to fill (same as 16:9 on widescreen)
+     *   2 = 4:3     — pillarbox/letterbox to preserve 4:3 AR
+     *   3 = 16:9    — stretch to fill viewport (default) */
     float x0 = -1.0f, y0 = -1.0f, x1 = 1.0f, y1 = 1.0f;
-    if (!g_aspect_16x9 && w > 0.0f && h > 0.0f) {
-        const float target_ar = 4.0f / 3.0f;
-        float screen_ar = w / h;
-        if (screen_ar > target_ar) {
-            /* Screen is wider than 4:3 → pillarbox: shrink x */
-            float rect_w_ndc = target_ar / screen_ar; /* fraction of half-width */
-            x0 = -rect_w_ndc;
-            x1 =  rect_w_ndc;
-        } else if (screen_ar < target_ar) {
-            /* Screen is taller than 4:3 → letterbox: shrink y */
-            float rect_h_ndc = screen_ar / target_ar;
-            y0 = -rect_h_ndc;
-            y1 =  rect_h_ndc;
+    if (w > 0.0f && h > 0.0f) {
+        if (g_aspect_ratio == 0) {
+            /* Native: largest integer scale of 640×480 that fits */
+            int scale = (int)(w / 640.0f);
+            int scaleh = (int)(h / 480.0f);
+            if (scaleh < scale) scale = scaleh;
+            if (scale < 1) scale = 1;
+            float rw = (640.0f * scale) / w;
+            float rh = (480.0f * scale) / h;
+            x0 = -rw; x1 = rw; y0 = -rh; y1 = rh;
+        } else if (g_aspect_ratio == 2) {
+            /* 4:3: pillarbox or letterbox */
+            const float target_ar = 4.0f / 3.0f;
+            float screen_ar = w / h;
+            if (screen_ar > target_ar) {
+                float rect_w_ndc = target_ar / screen_ar;
+                x0 = -rect_w_ndc;
+                x1 =  rect_w_ndc;
+            } else if (screen_ar < target_ar) {
+                float rect_h_ndc = screen_ar / target_ar;
+                y0 = -rect_h_ndc;
+                y1 =  rect_h_ndc;
+            }
         }
+        /* ratio 1 (Auto) and 3 (16:9): fill viewport — NDC -1..1, no change */
     }
 
     /* Render to the EGL window surface (FBO 0) */
@@ -223,6 +252,11 @@ void xemu_hud_render(void)
     glUseProgram(s_blit_prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, s_blit_tex);
+    {
+        GLenum filter = g_filter_nearest ? GL_NEAREST : GL_LINEAR;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    }
     glUniform1i(s_blit_tex_loc, 0);
     glUniform4f(s_blit_ndc_loc, x0, y0, x1, y1);
 

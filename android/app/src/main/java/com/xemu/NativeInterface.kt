@@ -80,10 +80,26 @@ object NativeInterface {
 
     /**
      * Set the display aspect ratio.
-     * wide=true  → 16:9 stretch (default).
-     * wide=false → 4:3 with pillarboxing/letterboxing.
+     * 0 = Native (integer scale of 640×480, centered)
+     * 1 = Auto   (stretch to fill)
+     * 2 = 4:3    (pillarbox/letterbox)
+     * 3 = 16:9   (stretch to fill, default)
      */
-    external fun setAspectRatio(wide: Boolean)
+    external fun setAspectRatio(ratio: Int)
+
+    /**
+     * Set the blit texture filter.
+     * nearest=true → GL_NEAREST (sharp/pixel-art).
+     * nearest=false → GL_LINEAR (smooth, default).
+     */
+    external fun setFilterNearest(nearest: Boolean)
+
+    /**
+     * Set the internal NV2A surface render scale (1=native, 2=2×, 3=3×).
+     * Applied once on the first frame after QEMU/NV2A is initialized.
+     * Takes effect on the current session (pass before or shortly after startEmulation).
+     */
+    external fun setSurfaceScale(scale: Int)
 
     /**
      * Save current VM state to a named snapshot inside the qcow2 HDD image.

@@ -45,7 +45,7 @@ class MainActivity : ComponentActivity() {
                         GraphicsSettingsScreen(navController, settingsViewModel)
                     }
                     composable("settings/controls") {
-                        ControlsSettingsScreen(navController)
+                        ControlsSettingsScreen(navController, settingsViewModel)
                     }
                     composable("settings/audio") {
                         AudioSettingsScreen(navController)

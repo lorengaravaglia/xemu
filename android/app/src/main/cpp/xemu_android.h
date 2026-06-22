@@ -94,6 +94,12 @@ int xemu_android_get_worst_frame_time_ms(void);
  * Increments each time pgraph_gl_compile_shader() succeeds. */
 int xemu_android_get_compiled_shader_count(void);
 
+/* Internal resolution scale factor passed to nv2a_set_surface_scale_factor().
+ * Set before or just after startEmulation; applied on first frame after QEMU init.
+ * Valid values: 1 (native), 2 (2×), 3 (3×). */
+void xemu_android_set_surface_scale(unsigned int scale);
+unsigned int xemu_android_get_surface_scale(void);
+
 /* Save/load a named VM snapshot (stored inside the qcow2 HDD image).
  * Slot convention used by the UI: "slot_1" … "slot_8".
  * Safe to call from any thread; acquires the BQL internally. */
