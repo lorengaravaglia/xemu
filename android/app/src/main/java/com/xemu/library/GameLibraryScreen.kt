@@ -33,6 +33,7 @@ fun GameLibraryScreen(
     val games by libraryViewModel.games.collectAsState()
     val context = LocalContext.current
 
+    val steamGridDbKey by settingsViewModel.steamGridDbKey.collectAsState()
     val dirPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -41,7 +42,7 @@ fun GameLibraryScreen(
                 it,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
-            libraryViewModel.addDirectory(it)
+            libraryViewModel.addDirectory(it, steamGridDbKey)
         }
     }
 

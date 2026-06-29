@@ -9,10 +9,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -31,6 +33,7 @@ fun SystemSettingsScreen(
     val bios by settingsViewModel.biosUri.collectAsState()
     val hdd  by settingsViewModel.hddUri.collectAsState()
     val dirs by libraryViewModel.dirs.collectAsState()
+    val steamGridDbKey by settingsViewModel.steamGridDbKey.collectAsState()
 
     val pickMcpx = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
@@ -116,6 +119,53 @@ fun SystemSettingsScreen(
                                 Icon(Icons.Outlined.Delete, contentDescription = "Remove",
                                     tint = MaterialTheme.colorScheme.error)
                             }
+                        }
+                    }
+                }
+            }
+
+            // Box Art
+            item {
+                Spacer(Modifier.height(8.dp))
+                SettingsSectionLabel("Box Art")
+            }
+            item {
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            "Art is fetched automatically when games are scanned. " +
+                            "Get a free API key at steamgriddb.com → Profile → Preferences → API.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        var keyVisible by remember { mutableStateOf(false) }
+                        OutlinedTextField(
+                            value = steamGridDbKey,
+                            onValueChange = { settingsViewModel.setSteamGridDbKey(it) },
+                            label = { Text("SteamGridDB API Key") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            visualTransformation = if (keyVisible) VisualTransformation.None
+                                                   else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { keyVisible = !keyVisible }) {
+                                    Icon(
+                                        imageVector = if (keyVisible) Icons.Outlined.VisibilityOff
+                                                      else Icons.Outlined.Visibility,
+                                        contentDescription = if (keyVisible) "Hide key" else "Show key",
+                                    )
+                                }
+                            },
+                        )
+                        OutlinedButton(
+                            onClick = { libraryViewModel.refetchArt(steamGridDbKey) },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = steamGridDbKey.isNotEmpty(),
+                        ) {
+                            Text("Re-fetch All Art")
                         }
                     }
                 }

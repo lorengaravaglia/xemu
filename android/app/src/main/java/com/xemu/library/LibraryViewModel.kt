@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONArray
+import java.io.File
 
 private val GAME_EXTENSIONS = setOf("iso")
 
@@ -41,11 +42,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString("game_dirs", arr.toString()).apply()
     }
 
-    fun addDirectory(uri: Uri) {
+    fun addDirectory(uri: Uri, steamGridDbKey: String = "") {
         if (_dirs.value.none { it == uri }) {
             _dirs.value = _dirs.value + uri
             saveDirs()
-            rescan()
+            rescan(steamGridDbKey)
         }
     }
 
@@ -55,7 +56,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         rescan()
     }
 
-    fun rescan() {
+    fun rescan(steamGridDbKey: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
             val ctx = getApplication<Application>()
             val found = mutableListOf<GameEntry>()
@@ -65,8 +66,27 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 scanDirectory(dir, displayNameOverride = null, found)
             }
             found.sortBy { it.displayName.lowercase() }
-            _games.value = found
+
+            // Apply locally cached artwork immediately (no network round-trip)
+            _games.value = found.map { game ->
+                if (game.coverUri != null) game
+                else {
+                    val cached = ArtworkRepository.cachedFile(ctx, game.displayName)
+                    if (cached.exists()) game.copy(coverUri = Uri.fromFile(cached)) else game
+                }
+            }
+
+            // Fetch missing art from network sources in the background
+            if (steamGridDbKey.isNotEmpty()) {
+                fetchMissingArt(ctx, steamGridDbKey)
+            }
         }
+    }
+
+    /** Delete all cached artwork and re-fetch from scratch. */
+    fun refetchArt(steamGridDbKey: String) {
+        ArtworkRepository.artworkDir(getApplication()).deleteRecursively()
+        rescan(steamGridDbKey)
     }
 
     /**
@@ -102,6 +122,21 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 displayName = displayNameOverride ?: base,
                 coverUri = coverUri,
             )
+        }
+    }
+
+    // ── Art fetching ──────────────────────────────────────────────────────────
+
+    private fun fetchMissingArt(ctx: Context, steamKey: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            for (game in _games.value.filter { it.coverUri == null }) {
+                val file = ArtworkRepository.fetchArt(ctx, game.displayName, steamKey)
+                if (file != null) {
+                    _games.value = _games.value.map { g ->
+                        if (g.uri == game.uri) g.copy(coverUri = Uri.fromFile(file)) else g
+                    }
+                }
+            }
         }
     }
 }

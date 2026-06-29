@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONObject
@@ -13,6 +15,16 @@ import java.util.zip.ZipInputStream
 class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("main_prefs", Context.MODE_PRIVATE)
+
+    // Separate encrypted store for sensitive values (API keys, credentials).
+    // Uses Android Keystore-backed AES-256-GCM; only SettingsViewModel reads/writes this file.
+    private val securePrefs = EncryptedSharedPreferences.create(
+        app,
+        "secure_prefs",
+        MasterKey.Builder(app).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+    )
 
     private val _mcpxUri = MutableStateFlow(prefs.getString("mcpx_uri", null)?.let { Uri.parse(it) })
     val mcpxUri: StateFlow<Uri?> = _mcpxUri
@@ -49,6 +61,20 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         _renderer.value = value
         prefs.edit().putString("renderer", value).apply()
     }
+
+    // ── Box art ───────────────────────────────────────────────────────────────
+
+    /** API key from https://www.steamgriddb.com/profile/preferences */
+    private val _steamGridDbKey = MutableStateFlow(securePrefs.getString("steamgriddb_key", "") ?: "")
+    val steamGridDbKey: StateFlow<String> = _steamGridDbKey
+
+    fun setSteamGridDbKey(value: String) {
+        _steamGridDbKey.value = value
+        securePrefs.edit().putString("steamgriddb_key", value).apply()
+    }
+
+    // TODO: ScreenScraper (screenscraper.fr) — username + password, system ID 15 for Xbox
+    // TODO: ScreenScraper credentials should also use securePrefs
 
     // ── Display settings ──────────────────────────────────────────────────────
 
