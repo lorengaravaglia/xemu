@@ -21,6 +21,9 @@
 #include "qemu/osdep.h"
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <android/log.h>
+/* Rumble state polled by the Kotlin layer via xemu_android_get_rumble(). */
+volatile uint16_t g_android_rumble_l = 0;
+volatile uint16_t g_android_rumble_r = 0;
 #endif
 #include "hw/qdev-core.h"
 #include "hw/qdev-properties.h"
@@ -655,6 +658,12 @@ void xemu_input_update_sdl_controller_state(ControllerState *state)
 
 void xemu_input_update_rumble(ControllerState *state)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Store latest rumble values; polled by EmulationActivity every 100 ms. */
+    g_android_rumble_l = state->rumble_l;
+    g_android_rumble_r = state->rumble_r;
+    return;
+#endif
     if (state->type != INPUT_DEVICE_SDL_GAMEPAD) {
         return;
     }

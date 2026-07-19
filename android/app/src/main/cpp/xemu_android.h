@@ -100,6 +100,10 @@ int xemu_android_get_compiled_shader_count(void);
 void xemu_android_set_surface_scale(unsigned int scale);
 unsigned int xemu_android_get_surface_scale(void);
 
+/* Returns the current Xbox rumble motor intensities (0–65535 each).
+ * Written by xemu_input_update_rumble(); polled from Kotlin every ~100 ms. */
+void xemu_android_get_rumble(uint16_t *left, uint16_t *right);
+
 /* Save/load a named VM snapshot (stored inside the qcow2 HDD image).
  * Slot convention used by the UI: "slot_1" … "slot_8".
  * Safe to call from any thread; acquires the BQL internally. */

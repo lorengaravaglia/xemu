@@ -169,6 +169,16 @@ Java_com_xemu_NativeInterface_loadState(JNIEnv *env, jclass clazz, jstring name)
     xemu_android_load_state(s.c_str());
 }
 
+JNIEXPORT jintArray JNICALL
+Java_com_xemu_NativeInterface_getRumble(JNIEnv *env, jclass clazz) {
+    uint16_t l = 0, r = 0;
+    xemu_android_get_rumble(&l, &r);
+    jintArray result = env->NewIntArray(2);
+    jint vals[2] = { (jint)l, (jint)r };
+    env->SetIntArrayRegion(result, 0, 2, vals);
+    return result;
+}
+
 JNIEXPORT jobjectArray JNICALL
 Java_com_xemu_NativeInterface_listStates(JNIEnv *env, jclass clazz) {
     char **names = nullptr;

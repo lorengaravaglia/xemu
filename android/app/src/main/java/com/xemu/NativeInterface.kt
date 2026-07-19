@@ -120,4 +120,10 @@ object NativeInterface {
      * Returns an empty array when no snapshots exist or QEMU is not initialized.
      */
     external fun listStates(): Array<String>
+
+    /**
+     * Returns the current Xbox rumble motor intensities as [left, right],
+     * each in range 0–65535. Poll at ~100 ms intervals during emulation.
+     */
+    external fun getRumble(): IntArray
 }

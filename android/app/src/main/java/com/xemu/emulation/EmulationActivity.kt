@@ -7,10 +7,16 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.hardware.input.InputManager
+import android.os.Build
 import android.os.Bundle
+import android.os.CombinedVibration
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import androidx.annotation.RequiresApi
 import android.view.*
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -85,6 +91,55 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             lastFrameCount = count
             lastFpsTime = now
             fpsHandler.postDelayed(this, 1000)
+        }
+    }
+
+    // Rumble
+    private val vibrator: Vibrator by lazy {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
+    }
+    private val rumbleHandler = Handler(Looper.getMainLooper())
+    private val rumbleRunnable = object : Runnable {
+        override fun run() {
+            val vals = NativeInterface.getRumble()
+            val l = vals[0]  // left/heavy motor, 0–65535
+            val r = vals[1]  // right/light motor, 0–65535
+
+            if (l == 0 && r == 0) {
+                vibrator.cancel()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) cancelControllerRumble()
+            } else {
+                // ── Device vibrator ───────────────────────────────────────────
+                // Blend both motors: left (heavy) weighted 60%, right (light) 40%.
+                // When right motor strongly dominates, approximate its high-frequency
+                // character with a rapid on/off waveform instead of a solid pulse.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val effect = if (r > l * 3 / 2) {
+                        val amp = (r * 255 / 65535).coerceIn(1, 255)
+                        VibrationEffect.createWaveform(
+                            longArrayOf(0, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10),
+                            intArrayOf(0, amp, 0, amp, 0, amp, 0, amp, 0, amp, 0),
+                            -1
+                        )
+                    } else {
+                        val blended = ((l * 0.6f + r * 0.4f) * 255f / 65535f).toInt().coerceIn(1, 255)
+                        VibrationEffect.createOneShot(150, blended)
+                    }
+                    vibrator.vibrate(effect)
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(150)
+                }
+                // ── Physical controller (API 31+) ─────────────────────────────
+                // Drive each motor independently on the controller itself.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) vibrateController(l, r)
+            }
+            rumbleHandler.postDelayed(this, 100)
         }
     }
 
@@ -195,6 +250,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         inputManager.registerInputDeviceListener(this, null)
         lastFpsTime = 0L
         fpsHandler.post(fpsRunnable)
+        rumbleHandler.post(rumbleRunnable)
         // Re-read overlay mode from main_prefs in case it changed in Settings
         overlayMode = OverlayMode.valueOf(
             mainPrefs.getString("overlay_mode", OverlayMode.AUTO.name) ?: OverlayMode.AUTO.name
@@ -207,6 +263,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     override fun onPause() {
         super.onPause()
         fpsHandler.removeCallbacks(fpsRunnable)
+        rumbleHandler.removeCallbacks(rumbleRunnable)
+        vibrator.cancel()
         NativeInterface.pauseEmulation()
         inputManager.unregisterInputDeviceListener(this)
     }
@@ -518,6 +576,43 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun rectDrawable(colorArgb: Int) = GradientDrawable().apply {
         cornerRadius = 4.dp.toFloat()
         setColor(colorArgb)
+    }
+
+    /** Returns the first connected physical gamepad/joystick device ID, or null. */
+    private fun physicalGamepadDeviceId(): Int? =
+        InputDevice.getDeviceIds().toList()
+            .mapNotNull { id -> InputDevice.getDevice(id) }
+            .firstOrNull { dev ->
+                !dev.isVirtual &&
+                (dev.sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
+                 dev.sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK)
+            }?.id
+
+    /** Drive the physical controller's own left/right rumble motors independently (API 31+). */
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun vibrateController(l: Int, r: Int) {
+        val dev = physicalGamepadDeviceId()?.let { InputDevice.getDevice(it) } ?: return
+        val vm = dev.vibratorManager
+        val ids = vm.vibratorIds
+        if (ids.isEmpty()) return
+        val parallel = CombinedVibration.startParallel()
+        var hasAny = false
+        if (l > 0) {
+            val amp = (l * 255 / 65535).coerceIn(1, 255)
+            parallel.addVibrator(ids[0], VibrationEffect.createOneShot(150, amp))
+            hasAny = true
+        }
+        if (ids.size >= 2 && r > 0) {
+            val amp = (r * 255 / 65535).coerceIn(1, 255)
+            parallel.addVibrator(ids[1], VibrationEffect.createOneShot(150, amp))
+            hasAny = true
+        }
+        if (hasAny) vm.vibrate(parallel.combine()) else vm.cancel()
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun cancelControllerRumble() {
+        physicalGamepadDeviceId()?.let { InputDevice.getDevice(it)?.vibratorManager?.cancel() }
     }
 
     /** Read graphics settings from main_prefs and push to native layer. */

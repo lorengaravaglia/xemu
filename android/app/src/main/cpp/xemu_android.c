@@ -428,6 +428,16 @@ int xemu_android_get_compiled_shader_count(void) {
  * on the first frame after QEMU/NV2A is fully initialized. */
 static volatile unsigned int g_surface_scale = 1;
 
+/* Rumble state written by xemu_input_update_rumble() in ui/xemu-input.c. */
+extern volatile uint16_t g_android_rumble_l;
+extern volatile uint16_t g_android_rumble_r;
+
+void xemu_android_get_rumble(uint16_t *left, uint16_t *right)
+{
+    *left  = g_android_rumble_l;
+    *right = g_android_rumble_r;
+}
+
 void xemu_android_set_surface_scale(unsigned int scale) {
     g_surface_scale = (scale >= 1 && scale <= 4) ? scale : 1;
 }
