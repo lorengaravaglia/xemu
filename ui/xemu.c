@@ -137,6 +137,32 @@ int xemu_android_get_worst_frame_time_ms(void)
     return val;
 }
 
+/* Rolling frame time history — 60 samples, oldest-first on read.
+ * Written by the render thread; read by JNI.  The race on head/values is
+ * benign for a display metric. */
+#define FRAME_TIME_RING_SIZE 60
+static volatile int g_frame_time_ring[FRAME_TIME_RING_SIZE];
+static volatile int g_frame_time_head = 0; /* next slot to write */
+
+/* Time (ms) spent blocked in nv2a_get_framebuffer_surface() waiting for
+ * the PGRAPH thread to signal sync_complete.  High values = GPU bottleneck. */
+static volatile int g_pgraph_sync_wait_ms = 0;
+
+void xemu_android_get_frame_time_history(int *buf, int capacity, int *out_count)
+{
+    int n = capacity < FRAME_TIME_RING_SIZE ? capacity : FRAME_TIME_RING_SIZE;
+    int head = g_frame_time_head;
+    for (int i = 0; i < n; i++) {
+        buf[i] = g_frame_time_ring[(head + i) % FRAME_TIME_RING_SIZE];
+    }
+    *out_count = n;
+}
+
+int xemu_android_get_pgraph_sync_wait_ms(void)
+{
+    return g_pgraph_sync_wait_ms;
+}
+
 /* save_snapshot(), load_snapshot(), and bdrv_drain_all_begin() all assert
  * qemu_in_main_thread() — they must run on the QEMU main loop thread.
  * We dispatch all such work via a single bottom-half handler and block the
@@ -1170,7 +1196,12 @@ static void gl_render_frame(struct xemu_console *scon)
      * finds g_nv2a already set. */
     static bool s_scale_applied = false;
     if (!s_scale_applied && xemu_android_qemu_initialized()) {
+        /* nv2a_set_surface_scale_factor() calls bql_unlock() internally and
+         * therefore requires the caller to hold BQL.  The render thread does
+         * not normally hold BQL, so acquire it here for this one call. */
+        bql_lock();
         nv2a_set_surface_scale_factor(xemu_android_get_surface_scale());
+        bql_unlock();
         s_scale_applied = true;
     }
 #endif
@@ -1204,7 +1235,11 @@ static void gl_render_frame(struct xemu_console *scon)
     if (s_last_tex != 0 && cur_frame_time == s_last_synced_frame_time) {
         tex = s_last_tex;
     } else {
-        tex = nv2a_get_framebuffer_surface();
+        {
+            int64_t sync_t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            tex = nv2a_get_framebuffer_surface();
+            g_pgraph_sync_wait_ms = (int)(qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - sync_t0);
+        }
         acquired_surface = true;
         s_last_tex = tex;
         if (tex != 0) {
@@ -1328,6 +1363,9 @@ static void gl_render_frame(struct xemu_console *scon)
             if (ft > g_worst_frame_time_ms) {
                 g_worst_frame_time_ms = ft;
             }
+            int head = g_frame_time_head;
+            g_frame_time_ring[head] = ft;
+            g_frame_time_head = (head + 1) % FRAME_TIME_RING_SIZE;
         }
         s_last_swap_ms = now;
     }

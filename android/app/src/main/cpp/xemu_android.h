@@ -90,6 +90,16 @@ int xemu_android_get_rendered_frame_count(void);
  * render thread — call once per second from the Kotlin overlay runnable. */
 int xemu_android_get_worst_frame_time_ms(void);
 
+/* Copies up to [capacity] frame time samples (ms) into [buf] in chronological
+ * order (oldest first) and sets *out_count to the number written.
+ * Capacity should be at least 60. */
+void xemu_android_get_frame_time_history(int *buf, int capacity, int *out_count);
+
+/* Returns the time (ms) the render thread last spent blocked waiting for
+ * the PGRAPH thread to signal sync_complete (nv2a_get_framebuffer_surface).
+ * High values indicate the GPU is the bottleneck. */
+int xemu_android_get_pgraph_sync_wait_ms(void);
+
 /* Returns the running total of GL shader programs compiled this session.
  * Increments each time pgraph_gl_compile_shader() succeeds. */
 int xemu_android_get_compiled_shader_count(void);

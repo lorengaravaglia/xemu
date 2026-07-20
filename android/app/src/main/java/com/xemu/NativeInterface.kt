@@ -126,4 +126,18 @@ object NativeInterface {
      * each in range 0–65535. Poll at ~100 ms intervals during emulation.
      */
     external fun getRumble(): IntArray
+
+    /**
+     * Returns up to 60 frame time samples (ms) in chronological order (oldest first).
+     * Each value is the eglSwapBuffers interval for one rendered frame.
+     * Use for a rolling frame time bar graph.
+     */
+    external fun getFrameTimeHistory(): IntArray
+
+    /**
+     * Returns the time (ms) the render thread spent waiting for the PGRAPH thread
+     * to finish compositing the last frame (nv2a_get_framebuffer_surface sync wait).
+     * High values indicate GPU rendering is the bottleneck.
+     */
+    external fun getPgraphSyncWaitMs(): Int
 }

@@ -4,7 +4,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
@@ -72,6 +74,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private lateinit var overlayContainer: LinearLayout
     private lateinit var fpsLine: TextView
     private lateinit var frametimeLine: TextView
+    private lateinit var frameTimeGraph: FrameTimeBarView
+    private lateinit var pgraphLine: TextView
     private lateinit var memoryLine: TextView
     private lateinit var shadersLine: TextView
     private val fpsHandler = Handler(Looper.getMainLooper())
@@ -89,7 +93,15 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             }
             if (frametimeLine.visibility == View.VISIBLE) {
                 val worstMs = NativeInterface.getWorstFrameTimeMs()
-                frametimeLine.text = "Frame: ${worstMs} ms"
+                frametimeLine.text = "Frame: ${worstMs} ms worst"
+            }
+            if (frameTimeGraph.visibility == View.VISIBLE) {
+                frameTimeGraph.samples = NativeInterface.getFrameTimeHistory()
+                frameTimeGraph.invalidate()
+            }
+            if (pgraphLine.visibility == View.VISIBLE) {
+                val syncMs = NativeInterface.getPgraphSyncWaitMs()
+                pgraphLine.text = "GPU wait: ${syncMs} ms"
             }
             if (memoryLine.visibility == View.VISIBLE) {
                 val kb = java.io.File("/proc/self/status").readLines()
@@ -105,6 +117,45 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             lastFrameCount = count
             lastFpsTime = now
             fpsHandler.postDelayed(this, 1000)
+        }
+    }
+
+    /**
+     * Canvas-based rolling frame time bar graph.
+     * Bars are color-coded: green ≤ 16 ms, yellow ≤ 33 ms, red > 33 ms.
+     * A dashed line marks the 33 ms / 30 fps target.
+     * Y-axis scale: 0–100 ms (bars are clamped to 100 ms).
+     */
+    private inner class FrameTimeBarView(context: Context) : View(context) {
+        var samples: IntArray = IntArray(0)
+        private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(160, 255, 220, 0)
+            strokeWidth = 1.5f
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            if (samples.isEmpty()) return
+            val n = samples.size
+            val barW = width.toFloat() / n
+            val maxMs = 100f
+            for (i in samples.indices) {
+                val ms = samples[i].coerceAtLeast(0)
+                barPaint.color = when {
+                    ms <= 16 -> Color.argb(200, 80, 200, 80)
+                    ms <= 33 -> Color.argb(200, 220, 200, 60)
+                    else     -> Color.argb(200, 220, 80, 80)
+                }
+                val barH = (ms.coerceAtMost(100) / maxMs * height)
+                canvas.drawRect(
+                    i * barW + 0.5f, height - barH,
+                    (i + 1) * barW - 0.5f, height.toFloat(),
+                    barPaint
+                )
+            }
+            // 33 ms target line (30 fps)
+            val targetY = height - (33f / maxMs * height)
+            canvas.drawLine(0f, targetY, width.toFloat(), targetY, linePaint)
         }
     }
 
@@ -200,14 +251,21 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         }
         fpsLine       = overlayLine()
         frametimeLine = overlayLine()
+        pgraphLine    = overlayLine()
         memoryLine    = overlayLine()
         shadersLine   = overlayLine()
+        frameTimeGraph = FrameTimeBarView(this).apply {
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(200.dp, 40.dp)
+        }
         overlayContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = rectDrawable(Color.argb(160, 20, 20, 20))
             setPadding(10.dp, 6.dp, 10.dp, 6.dp)
             addView(fpsLine)
             addView(frametimeLine)
+            addView(frameTimeGraph)
+            addView(pgraphLine)
             addView(memoryLine)
             addView(shadersLine)
         }
@@ -798,6 +856,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
         fpsLine.visibility       = if (showFps)       View.VISIBLE else View.GONE
         frametimeLine.visibility = if (showFrametime) View.VISIBLE else View.GONE
+        frameTimeGraph.visibility = if (showFrametime) View.VISIBLE else View.GONE
+        pgraphLine.visibility    = if (showFrametime) View.VISIBLE else View.GONE
         memoryLine.visibility    = if (showMemory)    View.VISIBLE else View.GONE
         shadersLine.visibility   = if (showShaders)   View.VISIBLE else View.GONE
 

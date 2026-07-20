@@ -179,6 +179,23 @@ Java_com_xemu_NativeInterface_getRumble(JNIEnv *env, jclass clazz) {
     return result;
 }
 
+JNIEXPORT jintArray JNICALL
+Java_com_xemu_NativeInterface_getFrameTimeHistory(JNIEnv *env, jclass clazz) {
+    int buf[60];
+    int count = 0;
+    xemu_android_get_frame_time_history(buf, 60, &count);
+    jintArray result = env->NewIntArray(count);
+    if (count > 0) {
+        env->SetIntArrayRegion(result, 0, count, (jint *)buf);
+    }
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_xemu_NativeInterface_getPgraphSyncWaitMs(JNIEnv *env, jclass clazz) {
+    return (jint)xemu_android_get_pgraph_sync_wait_ms();
+}
+
 JNIEXPORT jobjectArray JNICALL
 Java_com_xemu_NativeInterface_listStates(JNIEnv *env, jclass clazz) {
     char **names = nullptr;
