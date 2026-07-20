@@ -1,7 +1,9 @@
 package com.xemu.emulation
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -10,14 +12,16 @@ import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Bundle
 import android.os.CombinedVibration
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import androidx.annotation.RequiresApi
+import android.provider.MediaStore
 import android.view.*
+import androidx.annotation.RequiresApi
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -53,6 +57,16 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     // D-pad hat axis state (for AXIS_HAT_X / AXIS_HAT_Y)
     private var lastHatX = 0f
     private var lastHatY = 0f
+
+    // Hotkey state
+    // Buttons that appear in any combo are held "pending" (not sent to emulator) until we know
+    // whether a combo completed. If the combo fires they're suppressed; if released alone they
+    // tap through as a normal button press.
+    private val heldGamepadKeycodes = mutableSetOf<Int>()      // all physically held gamepad keys
+    private val pendingGamepadKeycodes = mutableSetOf<Int>()   // held back from emulator (in a combo)
+    private val suppressedGamepadKeycodes = mutableSetOf<Int>()// consumed by a fired combo this press
+    private var quickSaveSlot = 1                              // 1–8, cycled via hotkey
+    private var userPaused = false                             // user explicitly paused in-game
 
     // Performance overlay
     private lateinit var overlayContainer: LinearLayout
@@ -246,7 +260,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     override fun onResume() {
         super.onResume()
-        NativeInterface.resumeEmulation()
+        if (!userPaused) NativeInterface.resumeEmulation()
         inputManager.registerInputDeviceListener(this, null)
         lastFpsTime = 0L
         fpsHandler.post(fpsRunnable)
@@ -255,6 +269,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         overlayMode = OverlayMode.valueOf(
             mainPrefs.getString("overlay_mode", OverlayMode.AUTO.name) ?: OverlayMode.AUTO.name
         )
+        mapping.reloadHotkeys()
         applyOverlaySettings()
         applyGraphicsSettings()
         updateOverlayVisibility()
@@ -265,7 +280,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         fpsHandler.removeCallbacks(fpsRunnable)
         rumbleHandler.removeCallbacks(rumbleRunnable)
         vibrator.cancel()
-        NativeInterface.pauseEmulation()
+        NativeInterface.pauseEmulation()  // idempotent: safe even if already user-paused
         inputManager.unregisterInputDeviceListener(this)
     }
 
@@ -309,9 +324,54 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (!isGamepad) return super.dispatchKeyEvent(event)
 
         val xboxBtn = mapping.getXboxButton(event.keyCode) ?: return super.dispatchKeyEvent(event)
+        val keycode = event.keyCode
+
         when (event.action) {
-            KeyEvent.ACTION_DOWN -> NativeInterface.sendButtonDown(xboxBtn.mask)
-            KeyEvent.ACTION_UP   -> NativeInterface.sendButtonUp(xboxBtn.mask)
+            KeyEvent.ACTION_DOWN -> {
+                heldGamepadKeycodes.add(keycode)
+
+                if (keycode in suppressedGamepadKeycodes) {
+                    // Already consumed as part of an active combo — eat the repeat
+                    return true
+                }
+
+                if (mapping.isInAnyHotkey(keycode)) {
+                    // This key participates in a hotkey combo — hold it pending
+                    pendingGamepadKeycodes.add(keycode)
+
+                    // Check if the full held set now completes a combo
+                    val fn = mapping.matchHotkey(heldGamepadKeycodes)
+                    if (fn != null) {
+                        // Fire the hotkey action
+                        executeHotkeyFunction(fn)
+                        // Suppress all combo keycodes (including pending ones)
+                        val combo = mapping.hotkeyMappings[fn] ?: emptySet()
+                        suppressedGamepadKeycodes.addAll(combo)
+                        pendingGamepadKeycodes.removeAll(combo)
+                    }
+                } else {
+                    // Not in any hotkey — send immediately
+                    NativeInterface.sendButtonDown(xboxBtn.mask)
+                }
+            }
+
+            KeyEvent.ACTION_UP -> {
+                heldGamepadKeycodes.remove(keycode)
+
+                when {
+                    keycode in suppressedGamepadKeycodes -> {
+                        suppressedGamepadKeycodes.remove(keycode)
+                        // Clean up suppressed set once all combo keys are physically released
+                    }
+                    keycode in pendingGamepadKeycodes -> {
+                        pendingGamepadKeycodes.remove(keycode)
+                        // Was pending but no combo fired — pass through as a tap
+                        NativeInterface.sendButtonDown(xboxBtn.mask)
+                        NativeInterface.sendButtonUp(xboxBtn.mask)
+                    }
+                    else -> NativeInterface.sendButtonUp(xboxBtn.mask)
+                }
+            }
         }
         return true
     }
@@ -576,6 +636,113 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun rectDrawable(colorArgb: Int) = GradientDrawable().apply {
         cornerRadius = 4.dp.toFloat()
         setColor(colorArgb)
+    }
+
+    // ── Hotkey actions ────────────────────────────────────────────────────────
+
+    private fun executeHotkeyFunction(fn: ControllerMapping.HotkeyFunction) {
+        when (fn) {
+            ControllerMapping.HotkeyFunction.QUICK_SAVE    -> executeQuickSave()
+            ControllerMapping.HotkeyFunction.QUICK_LOAD    -> executeQuickLoad()
+            ControllerMapping.HotkeyFunction.SLOT_NEXT     -> changeQuickSaveSlot(+1)
+            ControllerMapping.HotkeyFunction.SLOT_PREV     -> changeQuickSaveSlot(-1)
+            ControllerMapping.HotkeyFunction.SCREENSHOT    -> takeScreenshot()
+            ControllerMapping.HotkeyFunction.TOGGLE_PAUSE  -> toggleUserPause()
+            ControllerMapping.HotkeyFunction.OPEN_MENU     -> showMenuSheet()
+            ControllerMapping.HotkeyFunction.CYCLE_OVERLAY -> cycleOverlayMode()
+            ControllerMapping.HotkeyFunction.TOGGLE_FPS    -> toggleFpsOverlay()
+        }
+    }
+
+    private fun executeQuickSave() {
+        val name = "${gameId}_slot_$quickSaveSlot"
+        NativeInterface.saveState(name)
+        Toast.makeText(this, "Saved to Slot $quickSaveSlot", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun executeQuickLoad() {
+        val name = "${gameId}_slot_$quickSaveSlot"
+        if (name in NativeInterface.listStates()) {
+            NativeInterface.loadState(name)
+            Toast.makeText(this, "Loaded Slot $quickSaveSlot", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Slot $quickSaveSlot is empty", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun changeQuickSaveSlot(delta: Int) {
+        quickSaveSlot = ((quickSaveSlot - 1 + delta + 8) % 8) + 1
+        Toast.makeText(this, "Quick-save slot: $quickSaveSlot", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun toggleUserPause() {
+        if (userPaused) {
+            NativeInterface.resumeEmulation()
+            userPaused = false
+            Toast.makeText(this, "Resumed", Toast.LENGTH_SHORT).show()
+        } else {
+            NativeInterface.pauseEmulation()
+            userPaused = true
+            Toast.makeText(this, "Paused — press hotkey again to resume", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun toggleFpsOverlay() {
+        val showFps = !mainPrefs.getBoolean("overlay_show_fps", true)
+        mainPrefs.edit().putBoolean("overlay_show_fps", showFps).apply()
+        applyOverlaySettings()
+    }
+
+    private fun takeScreenshot() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            takeScreenshotApi26()
+        } else {
+            Toast.makeText(this, "Screenshot requires Android 8+", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun takeScreenshotApi26() {
+        val w = surfaceView.width
+        val h = surfaceView.height
+        if (w == 0 || h == 0) return
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        PixelCopy.request(surfaceView, bmp, { result ->
+            if (result == PixelCopy.SUCCESS) saveScreenshot(bmp)
+            else Toast.makeText(this, "Screenshot failed", Toast.LENGTH_SHORT).show()
+        }, Handler(Looper.getMainLooper()))
+    }
+
+    private fun saveScreenshot(bmp: Bitmap) {
+        val filename = "xemu_${System.currentTimeMillis()}.png"
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    put(MediaStore.Images.Media.RELATIVE_PATH,
+                        Environment.DIRECTORY_PICTURES + "/xemu")
+                }
+                val uri = contentResolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                uri?.let { u ->
+                    contentResolver.openOutputStream(u)?.use {
+                        bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    Toast.makeText(this, "Screenshot saved to Pictures/xemu",
+                        Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                val dir = java.io.File(filesDir, "screenshots").also { it.mkdirs() }
+                java.io.File(dir, filename).outputStream().use {
+                    bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+                Toast.makeText(this, "Screenshot saved to app storage",
+                    Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Screenshot failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     /** Returns the first connected physical gamepad/joystick device ID, or null. */

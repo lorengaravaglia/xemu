@@ -20,25 +20,53 @@ import com.xemu.ui.theme.XemuTheme
 /**
  * Controller remapping screen.
  *
- * Shows each Xbox button with its currently-assigned Android keycode.
- * Tap a row → the activity listens for the next physical gamepad button
- * press and assigns it.
+ * Buttons: tap a row → press a single button to assign.
+ * Functions: tap a row → hold your desired combo, release all buttons to assign.
  */
 class MappingActivity : ComponentActivity() {
 
     private lateinit var mapping: ControllerMapping
+
+    // Single-button capture (Xbox buttons)
     private val capturingFor = mutableStateOf<ControllerMapping.XboxButton?>(null)
+
+    // Multi-button capture (hotkey functions)
+    private val capturingForHotkey = mutableStateOf<ControllerMapping.HotkeyFunction?>(null)
+    private val heldHotkeyKeycodes = mutableSetOf<Int>()    // currently held during capture
+    private val capturedHotkeyKeycodes = mutableSetOf<Int>() // all pressed since capture started
+
+    // Drives recomposition of hotkey label rows
+    private val hotkeyLabels = mutableStateOf(emptyMap<ControllerMapping.HotkeyFunction, String>())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mapping = ControllerMapping(this)
+        hotkeyLabels.value = mapping.hotkeyLabelMap()
         setContent {
             XemuTheme {
                 MappingScreen(
                     mapping = mapping,
                     capturingFor = capturingFor.value,
-                    onStartCapture = { capturingFor.value = it },
+                    capturingForHotkey = capturingForHotkey.value,
+                    hotkeyLabels = hotkeyLabels.value,
+                    onStartCapture = { capturingFor.value = it; capturingForHotkey.value = null },
                     onCancelCapture = { capturingFor.value = null },
+                    onStartHotkeyCapture = {
+                        capturingForHotkey.value = it
+                        capturingFor.value = null
+                        heldHotkeyKeycodes.clear()
+                        capturedHotkeyKeycodes.clear()
+                    },
+                    onCancelHotkeyCapture = {
+                        capturingForHotkey.value = null
+                        heldHotkeyKeycodes.clear()
+                        capturedHotkeyKeycodes.clear()
+                    },
+                    onClearHotkey = { fn ->
+                        mapping.clearHotkey(fn)
+                        mapping.saveHotkeys()
+                        hotkeyLabels.value = mapping.hotkeyLabelMap()
+                    },
                     onReset = { mapping.resetToDefaults(); mapping.save() },
                     onNavigateBack = { finish() },
                 )
@@ -47,17 +75,41 @@ class MappingActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val capturing = capturingFor.value
-        if (capturing != null && event.action == KeyEvent.ACTION_DOWN) {
-            val isGamepad = (event.source and InputDevice.SOURCE_GAMEPAD != 0) ||
-                            (event.source and InputDevice.SOURCE_DPAD != 0)
-            if (isGamepad) {
-                mapping.assignButton(event.keyCode, capturing)
-                mapping.save()
-                capturingFor.value = null
-                return true
-            }
+        val isGamepad = (event.source and InputDevice.SOURCE_GAMEPAD != 0) ||
+                        (event.source and InputDevice.SOURCE_DPAD != 0)
+        if (!isGamepad) return super.dispatchKeyEvent(event)
+
+        // Single-button capture
+        val capturingBtn = capturingFor.value
+        if (capturingBtn != null && event.action == KeyEvent.ACTION_DOWN) {
+            mapping.assignButton(event.keyCode, capturingBtn)
+            mapping.save()
+            capturingFor.value = null
+            return true
         }
+
+        // Multi-button combo capture
+        val capturingFn = capturingForHotkey.value
+        if (capturingFn != null) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    heldHotkeyKeycodes.add(event.keyCode)
+                    capturedHotkeyKeycodes.add(event.keyCode)
+                }
+                KeyEvent.ACTION_UP -> {
+                    heldHotkeyKeycodes.remove(event.keyCode)
+                    if (heldHotkeyKeycodes.isEmpty() && capturedHotkeyKeycodes.isNotEmpty()) {
+                        mapping.assignHotkey(capturingFn, capturedHotkeyKeycodes.toSet())
+                        mapping.saveHotkeys()
+                        hotkeyLabels.value = mapping.hotkeyLabelMap()
+                        capturingForHotkey.value = null
+                        capturedHotkeyKeycodes.clear()
+                    }
+                }
+            }
+            return true
+        }
+
         return super.dispatchKeyEvent(event)
     }
 }
@@ -67,15 +119,18 @@ class MappingActivity : ComponentActivity() {
 private fun MappingScreen(
     mapping: ControllerMapping,
     capturingFor: ControllerMapping.XboxButton?,
+    capturingForHotkey: ControllerMapping.HotkeyFunction?,
+    hotkeyLabels: Map<ControllerMapping.HotkeyFunction, String>,
     onStartCapture: (ControllerMapping.XboxButton) -> Unit,
     onCancelCapture: () -> Unit,
+    onStartHotkeyCapture: (ControllerMapping.HotkeyFunction) -> Unit,
+    onCancelHotkeyCapture: () -> Unit,
+    onClearHotkey: (ControllerMapping.HotkeyFunction) -> Unit,
     onReset: () -> Unit,
     onNavigateBack: () -> Unit,
 ) {
     var showResetDialog by remember { mutableStateOf(false) }
 
-    // Build reverse map: XboxButton → bound keycode label string
-    // Recomputed on each recomposition (triggered by capturingFor changes or reset)
     val buttonLabels = remember(capturingFor, showResetDialog) {
         val reverse = mutableMapOf<ControllerMapping.XboxButton, MutableList<Int>>()
         mapping.allButtonMappings().forEach { (kc, btn) ->
@@ -92,10 +147,7 @@ private fun MappingScreen(
             title = { Text("Reset Mappings") },
             text = { Text("Reset all button mappings to defaults?") },
             confirmButton = {
-                TextButton(onClick = {
-                    onReset()
-                    showResetDialog = false
-                }) { Text("Reset") }
+                TextButton(onClick = { onReset(); showResetDialog = false }) { Text("Reset") }
             },
             dismissButton = {
                 TextButton(onClick = { showResetDialog = false }) { Text("Cancel") }
@@ -113,9 +165,7 @@ private fun MappingScreen(
                     }
                 },
                 actions = {
-                    TextButton(onClick = { showResetDialog = true }) {
-                        Text("Reset")
-                    }
+                    TextButton(onClick = { showResetDialog = true }) { Text("Reset") }
                 },
             )
         },
@@ -130,7 +180,7 @@ private fun MappingScreen(
         ) {
             // Status / capture prompt
             item {
-                val isCapturing = capturingFor != null
+                val isCapturing = capturingFor != null || capturingForHotkey != null
                 OutlinedCard(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.outlinedCardColors(
@@ -139,18 +189,22 @@ private fun MappingScreen(
                         else
                             MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                     ),
-                    onClick = { if (isCapturing) onCancelCapture() },
+                    onClick = { if (capturingFor != null) onCancelCapture()
+                                else if (capturingForHotkey != null) onCancelHotkeyCapture() },
                 ) {
                     Text(
-                        text = if (isCapturing)
-                            "Press a button on your controller for: ${capturingFor!!.label}  •  Tap to cancel"
-                        else
-                            "Tap a row below, then press a button on your physical controller to assign it.",
+                        text = when {
+                            capturingFor != null ->
+                                "Press a button on your controller for: ${capturingFor.label}  •  Tap to cancel"
+                            capturingForHotkey != null ->
+                                "Hold your combo for: ${capturingForHotkey.label}\nRelease all buttons to assign  •  Tap to cancel"
+                            else ->
+                                "Buttons: tap a row, then press a button.\n" +
+                                "Functions: tap a row, hold your combo, then release all buttons."
+                        },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (isCapturing)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (isCapturing) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     )
                 }
@@ -164,8 +218,8 @@ private fun MappingScreen(
                         ControllerMapping.XboxButton.values().forEachIndexed { index, btn ->
                             val label = buttonLabels[btn] ?: "(none)"
                             val isBeingCaptured = capturingFor == btn
-                            ButtonMappingRow(
-                                buttonName = btn.label,
+                            MappingRow(
+                                name = btn.label,
                                 assignedLabel = label,
                                 isCapturing = isBeingCaptured,
                                 onClick = {
@@ -173,6 +227,33 @@ private fun MappingScreen(
                                 },
                             )
                             if (index < ControllerMapping.XboxButton.values().size - 1) {
+                                HorizontalDivider()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Hotkey function rows
+            item { SettingsSectionLabel("Functions") }
+            item {
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column {
+                        ControllerMapping.HotkeyFunction.values().forEachIndexed { index, fn ->
+                            val label = hotkeyLabels[fn] ?: "(not set)"
+                            val isBeingCaptured = capturingForHotkey == fn
+                            MappingRow(
+                                name = fn.label,
+                                assignedLabel = label,
+                                isCapturing = isBeingCaptured,
+                                showClear = label != "(not set)",
+                                onClick = {
+                                    if (isBeingCaptured) onCancelHotkeyCapture()
+                                    else onStartHotkeyCapture(fn)
+                                },
+                                onClear = { onClearHotkey(fn) },
+                            )
+                            if (index < ControllerMapping.HotkeyFunction.values().size - 1) {
                                 HorizontalDivider()
                             }
                         }
@@ -202,11 +283,13 @@ private fun MappingScreen(
 }
 
 @Composable
-private fun ButtonMappingRow(
-    buttonName: String,
+private fun MappingRow(
+    name: String,
     assignedLabel: String,
     isCapturing: Boolean,
+    showClear: Boolean = false,
     onClick: () -> Unit,
+    onClear: (() -> Unit)? = null,
 ) {
     Surface(
         onClick = onClick,
@@ -218,23 +301,29 @@ private fun ButtonMappingRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(start = 16.dp, end = if (showClear) 4.dp else 16.dp, top = 14.dp, bottom = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = buttonName,
+                text = name,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
             Text(
                 text = assignedLabel,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (isCapturing)
-                    MaterialTheme.colorScheme.primary
-                else
-                    MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (isCapturing) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (showClear && onClear != null) {
+                TextButton(
+                    onClick = onClear,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text("Clear", style = MaterialTheme.typography.labelSmall)
+                }
+            }
         }
     }
 }

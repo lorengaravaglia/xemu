@@ -81,7 +81,74 @@ class ControllerMapping(context: Context) {
     private val buttonMap = DEFAULT_BUTTONS.toMutableMap()
     private val axisMap   = DEFAULT_AXES.toMutableMap()
 
-    init { load() }
+    // ── Hotkey functions ──────────────────────────────────────────────────────
+
+    enum class HotkeyFunction(val label: String) {
+        QUICK_SAVE("Quick Save"),
+        QUICK_LOAD("Quick Load"),
+        SLOT_NEXT("Save Slot +"),
+        SLOT_PREV("Save Slot -"),
+        SCREENSHOT("Screenshot"),
+        TOGGLE_PAUSE("Pause / Resume"),
+        OPEN_MENU("Open Menu"),
+        CYCLE_OVERLAY("Cycle Touch Overlay"),
+        TOGGLE_FPS("Toggle FPS Overlay"),
+    }
+
+    private val hotkeyMap = mutableMapOf<HotkeyFunction, Set<Int>>()
+
+    /** All configured hotkey combos. */
+    val hotkeyMappings: Map<HotkeyFunction, Set<Int>> get() = hotkeyMap.toMap()
+
+    /** True if [keycode] participates in any configured hotkey combo. */
+    fun isInAnyHotkey(keycode: Int): Boolean =
+        hotkeyMap.values.any { it.contains(keycode) }
+
+    /** First hotkey function whose full combo is a subset of [heldKeycodes], or null. */
+    fun matchHotkey(heldKeycodes: Set<Int>): HotkeyFunction? =
+        hotkeyMap.entries.firstOrNull { (_, combo) ->
+            combo.isNotEmpty() && heldKeycodes.containsAll(combo)
+        }?.key
+
+    fun assignHotkey(fn: HotkeyFunction, keycodes: Set<Int>) {
+        hotkeyMap[fn] = keycodes
+    }
+
+    fun clearHotkey(fn: HotkeyFunction) { hotkeyMap.remove(fn) }
+
+    fun hotkeyLabel(fn: HotkeyFunction): String {
+        val keycodes = hotkeyMap[fn]
+        return if (keycodes.isNullOrEmpty()) "(not set)"
+               else keycodes.sorted().joinToString(" + ") { keycodeLabel(it) }
+    }
+
+    fun hotkeyLabelMap(): Map<HotkeyFunction, String> =
+        HotkeyFunction.values().associateWith { hotkeyLabel(it) }
+
+    fun saveHotkeys() {
+        prefs.edit().apply {
+            HotkeyFunction.values().forEach { fn ->
+                val keycodes = hotkeyMap[fn]
+                if (keycodes.isNullOrEmpty()) remove("hotkey_${fn.name}")
+                else putString("hotkey_${fn.name}", keycodes.sorted().joinToString(","))
+            }
+            apply()
+        }
+    }
+
+    fun reloadHotkeys() { hotkeyMap.clear(); loadHotkeys() }
+
+    private fun loadHotkeys() {
+        HotkeyFunction.values().forEach { fn ->
+            val raw = prefs.getString("hotkey_${fn.name}", null) ?: return@forEach
+            val keycodes = raw.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
+            if (keycodes.isNotEmpty()) hotkeyMap[fn] = keycodes
+        }
+    }
+
+    // ── Button / axis mappings ────────────────────────────────────────────────
+
+    init { load(); loadHotkeys() }
 
     private fun load() {
         prefs.all.forEach { (key, value) ->
@@ -101,7 +168,10 @@ class ControllerMapping(context: Context) {
 
     fun save() {
         prefs.edit().apply {
-            clear()
+            // Remove only btn_ / axis_ entries so hotkey_ entries are preserved
+            prefs.all.keys
+                .filter { it.startsWith("btn_") || it.startsWith("axis_") }
+                .forEach { remove(it) }
             buttonMap.forEach { (keycode, btn) ->
                 if (DEFAULT_BUTTONS[keycode] != btn) putInt("btn_$keycode", btn.ordinal)
             }
@@ -113,7 +183,12 @@ class ControllerMapping(context: Context) {
     }
 
     fun resetToDefaults() {
-        prefs.edit().clear().apply()
+        prefs.edit().apply {
+            prefs.all.keys
+                .filter { it.startsWith("btn_") || it.startsWith("axis_") }
+                .forEach { remove(it) }
+            apply()
+        }
         buttonMap.clear(); buttonMap.putAll(DEFAULT_BUTTONS)
         axisMap.clear();   axisMap.putAll(DEFAULT_AXES)
     }
