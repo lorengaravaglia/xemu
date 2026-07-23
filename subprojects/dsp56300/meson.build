@@ -5,7 +5,12 @@ fs = import('fs')
 host_cpu = host_machine.cpu_family()
 host_os = host_machine.system()
 
-if host_os == 'darwin'
+if host_os == 'android'
+  # No pre-built DSP JIT library for Android; the C interpreter will be used.
+  dsp56300_dep = declare_dependency()
+  meson.override_dependency('dsp56300-emu-ffi', dsp56300_dep)
+  subdir_done()
+elif host_os == 'darwin'
   os_suffix = 'apple-darwin'
 elif host_os == 'windows'
   os_suffix = (host_cpu == 'aarch64') ? 'pc-windows-gnullvm' : 'pc-windows-gnu'

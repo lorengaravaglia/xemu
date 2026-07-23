@@ -183,6 +183,7 @@ target_link_libraries(xemu
     ${XEMU_ROOT}/build/subprojects/nv2a_vsh_cpu/libnv2a_vsh_cpu.a
     ${XEMU_ROOT}/build/hw/xbox/nv2a/pgraph/thirdparty/liblibgloffscreen.a
     ${XEMU_ROOT}/build/hw/xbox/mcpx/apu/dsp/libdsp.a
+    ${XEMU_ROOT}/build/hw/xbox/mcpx/apu/dsp/interp/libdsp_cpu_interp.a
     ${XEMU_ROOT}/build/thirdparty/libvma.a
     ${XEMU_ROOT}/build/ui/thirdparty/libstb_image.a
     ${XEMU_ROOT}/build/ui/thirdparty/libfpng.a
