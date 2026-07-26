@@ -35,6 +35,6 @@ cmake_android_native_api_level = api
 cmake_make_program = 'ninja'
 
 [built-in options]
-c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack']
-cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack']
+c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-mtune=cortex-x4']
+cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-mtune=cortex-x4']
 b_staticpic = true

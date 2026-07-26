@@ -710,24 +710,29 @@ if get_option('cfi')
 endif
 
 # Check further flags that make QEMU more robust against malicious parties
+# Skip on Android: the OS provides its own security model (ASLR, seccomp,
+# SELinux). These flags add measurable overhead (stack init + register zeroing
+# at every function entry/exit) for negligible benefit in an emulator app.
+hardening_flags = []
+if host_os != 'android'
+  hardening_flags = [
+      # Initialize all stack variables to zero. This makes
+      # it harder to take advantage of uninitialized stack
+      # data to drive exploits
+      '-ftrivial-auto-var-init=zero',
+  ]
 
-hardening_flags = [
-    # Initialize all stack variables to zero. This makes
-    # it harder to take advantage of uninitialized stack
-    # data to drive exploits
-    '-ftrivial-auto-var-init=zero',
-]
-
-# Zero out registers used during a function call
-# upon its return. This makes it harder to assemble
-# ROP gadgets into something usable
-#
-# NB: Clang 17 is broken and SEGVs
-# https://github.com/llvm/llvm-project/issues/75168
-if cc.compiles('extern struct { void (*cb)(void); } s; void f(void) { s.cb(); }',
-               name: '-fzero-call-used-regs=used-gpr',
-               args: ['-O2', '-fzero-call-used-regs=used-gpr'])
-    hardening_flags += '-fzero-call-used-regs=used-gpr'
+  # Zero out registers used during a function call
+  # upon its return. This makes it harder to assemble
+  # ROP gadgets into something usable
+  #
+  # NB: Clang 17 is broken and SEGVs
+  # https://github.com/llvm/llvm-project/issues/75168
+  if cc.compiles('extern struct { void (*cb)(void); } s; void f(void) { s.cb(); }',
+                 name: '-fzero-call-used-regs=used-gpr',
+                 args: ['-O2', '-fzero-call-used-regs=used-gpr'])
+      hardening_flags += '-fzero-call-used-regs=used-gpr'
+  endif
 endif
 
 qemu_common_flags += cc.get_supported_arguments(hardening_flags)

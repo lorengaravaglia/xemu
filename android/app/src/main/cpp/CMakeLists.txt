@@ -109,6 +109,8 @@ add_library(xemu SHARED
 target_compile_options(xemu PRIVATE
     -mbranch-protection=none
     -fno-sanitize=shadow-call-stack
+    -fno-emulated-tls
+    -mtune=cortex-x4
     -O2
 )
 
