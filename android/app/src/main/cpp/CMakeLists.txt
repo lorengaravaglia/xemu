@@ -186,6 +186,7 @@ target_link_libraries(xemu
     ${XEMU_ROOT}/build/hw/xbox/nv2a/pgraph/thirdparty/liblibgloffscreen.a
     ${XEMU_ROOT}/build/hw/xbox/mcpx/apu/dsp/libdsp.a
     ${XEMU_ROOT}/build/hw/xbox/mcpx/apu/dsp/interp/libdsp_cpu_interp.a
+    ${XEMU_ROOT}/subprojects/dsp56300/dsp56300-0.1.3-aarch64-linux-android/lib/libdsp56300_emu_ffi.a
     ${XEMU_ROOT}/build/thirdparty/libvma.a
     ${XEMU_ROOT}/build/ui/thirdparty/libstb_image.a
     ${XEMU_ROOT}/build/ui/thirdparty/libfpng.a

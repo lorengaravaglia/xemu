@@ -41,3 +41,4 @@ json-*
 SDL3-*
 /dsp56300/*
 !/dsp56300/meson.build
+!/dsp56300/dsp56300-0.1.3-aarch64-linux-android/

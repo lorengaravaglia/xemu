@@ -6,10 +6,9 @@ host_cpu = host_machine.cpu_family()
 host_os = host_machine.system()
 
 if host_os == 'android'
-  # No pre-built DSP JIT library for Android; the C interpreter will be used.
-  dsp56300_dep = declare_dependency()
-  meson.override_dependency('dsp56300-emu-ffi', dsp56300_dep)
-  subdir_done()
+  # Use our locally-built AArch64 Android library (compiled from source with
+  # Rust's aarch64-linux-android target and the NDK clang toolchain).
+  os_suffix = 'linux-android'
 elif host_os == 'darwin'
   os_suffix = 'apple-darwin'
 elif host_os == 'windows'
@@ -23,22 +22,32 @@ rust_target = host_cpu + '-' + os_suffix
 
 ver = meson.project_version()
 prefix = 'dsp56300-@0@-@1@'.format(ver, rust_target)
-archive = '@0@.tar.gz'.format(prefix)
-url = 'https://github.com/mborgerson/dsp56300/releases/download/v@0@/@1@'.format(ver, archive)
-lib = meson.current_build_dir() / prefix / 'lib' / 'libdsp56300_emu_ffi.a'
 
-if not fs.exists(lib)
-  src_archive = meson.current_source_dir() / archive
-  if not fs.exists(src_archive)
-    message('Downloading dsp56300 @0@ for @1@...'.format(ver, rust_target))
-    run_command(find_program('curl'), '-fsSL', url, '-o', src_archive, check: true)
+# Android: pre-built library lives in the source tree (built from source with
+# Rust's aarch64-linux-android target; see subprojects/dsp56300/README.android).
+# Other platforms: download the upstream release archive on demand.
+if host_os == 'android'
+  lib = meson.current_source_dir() / prefix / 'lib' / 'libdsp56300_emu_ffi.a'
+else
+  archive = '@0@.tar.gz'.format(prefix)
+  url = 'https://github.com/mborgerson/dsp56300/releases/download/v@0@/@1@'.format(ver, archive)
+  lib = meson.current_build_dir() / prefix / 'lib' / 'libdsp56300_emu_ffi.a'
+
+  if not fs.exists(lib)
+    src_archive = meson.current_source_dir() / archive
+    if not fs.exists(src_archive)
+      message('Downloading dsp56300 @0@ for @1@...'.format(ver, rust_target))
+      run_command(find_program('curl'), '-fsSL', url, '-o', src_archive, check: true)
+    endif
+    run_command('tar', 'xzf', src_archive, '-C', meson.current_build_dir(), check: true)
   endif
-  run_command('tar', 'xzf', src_archive, '-C', meson.current_build_dir(), check: true)
 endif
 
 link_args = []
 if host_os == 'linux'
   link_args = ['-lpthread', '-ldl', '-lm']
+elif host_os == 'android'
+  link_args = ['-ldl', '-lm']
 elif host_os == 'windows'
   link_args = ['-lbcrypt', '-lntdll', '-luserenv', '-lws2_32']
 elif host_os == 'darwin'

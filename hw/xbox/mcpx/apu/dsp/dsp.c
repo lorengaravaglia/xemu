@@ -119,15 +119,11 @@ DSPState *dsp_init(void *rw_opaque, dsp_scratch_rw_func scratch_rw,
     dsp->dma.scratch_rw = scratch_rw;
     dsp->dma.fifo_rw = fifo_rw;
 
-#if defined(__ANDROID__) || defined(ANDROID)
-    dsp_c_init(dsp);
-#else
     if (g_config.audio.use_dsp_jit) {
         dsp_jit_init(dsp);
     } else {
         dsp_c_init(dsp);
     }
-#endif
 
     dsp_reset(dsp);
 
@@ -216,9 +212,6 @@ void dsp_sync_from_vm(DSPState *dsp)
 
 void dsp_set_engine(DSPState *dsp, bool use_jit)
 {
-#if defined(__ANDROID__) || defined(ANDROID)
-    (void)use_jit; /* JIT not available on Android; always use C interpreter */
-#else
     bool currently_jit = (dsp->ops == &jit_dsp_ops);
     if (use_jit == currently_jit) {
         return;
@@ -234,5 +227,4 @@ void dsp_set_engine(DSPState *dsp, bool use_jit)
     }
 
     dsp_sync_from_vm(dsp);
-#endif
 }

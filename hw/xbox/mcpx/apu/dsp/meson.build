@@ -2,13 +2,7 @@ dsp56300_emu_ffi = dependency('dsp56300-emu-ffi', fallback: ['dsp56300', 'dsp563
 
 subdir('interp')
 
-# The DSP JIT backend requires a pre-built Rust library not available for
-# Android; on Android always fall back to the C interpreter.
-if host_machine.system() == 'android'
-  dsp_jit_sources = []
-else
-  dsp_jit_sources = files(['dsp_jit.c'])
-endif
+dsp_jit_sources = files(['dsp_jit.c'])
 
 libdsp = static_library(
   'dsp',
