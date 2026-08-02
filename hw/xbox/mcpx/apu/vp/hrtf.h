@@ -32,10 +32,24 @@
 #define HRTF_BUFLEN             (HRTF_NUM_TAPS + HRTF_MAX_DELAY_SAMPLES)
 #define HRTF_PARAM_SMOOTH_ALPHA 0.01f
 
+// Round HRTF_BUFLEN up to the next power of 2 so the ring buffer wrap can use
+// bitwise AND instead of integer modulo (% 73 requires a divide on every tap).
+// HRTF_BUF_SIZE must satisfy: HRTF_BUF_SIZE >= HRTF_BUFLEN and is a power of 2.
+// Validity: max look-back = HRTF_MAX_DELAY_SAMPLES + HRTF_NUM_TAPS - 1 = 72,
+// which is < 128, so the unused entries [73..127] are never accessed.
+#define HRTF_BUF_SIZE           128
+#define HRTF_BUF_MASK           (HRTF_BUF_SIZE - 1)
+
+// Per-frame equivalent of HRTF_PARAM_SMOOTH_ALPHA applied per sample.
+// alpha_frame = 1 - (1 - alpha_sample)^HRTF_SAMPLES_PER_FRAME
+// = 1 - 0.99^32 ≈ 0.275f. This yields the same exponential time constant
+// when applied once per frame instead of once per sample.
+#define HRTF_PARAM_SMOOTH_ALPHA_FRAME 0.275f
+
 typedef struct {
     int buf_pos;
     struct {
-        float buf[HRTF_BUFLEN];
+        float buf[HRTF_BUF_SIZE];
         float hrir_coeff_cur[HRTF_NUM_TAPS];
         float hrir_coeff_tar[HRTF_NUM_TAPS];
     } ch[2];
@@ -83,7 +97,8 @@ hrtf_filter_set_target_params(HrtfFilter *f, float hrir_coeff[2][HRTF_NUM_TAPS],
 static inline float hrtf_filter_smooth_param(float cur, float tar)
 {
     // FIXME: Match hardware parameter transition
-    return cur + HRTF_PARAM_SMOOTH_ALPHA * (tar - cur);
+    // Uses per-frame alpha; called once per frame, not per sample.
+    return cur + HRTF_PARAM_SMOOTH_ALPHA_FRAME * (tar - cur);
 }
 
 static inline void hrtf_filter_step_parameters(HrtfFilter *f)
@@ -102,9 +117,11 @@ static inline void hrtf_filter_process(HrtfFilter *f,
                                        float in[HRTF_SAMPLES_PER_FRAME][2],
                                        float out[HRTF_SAMPLES_PER_FRAME][2])
 {
-    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
-        hrtf_filter_step_parameters(f);
+    // Step parameters once per frame (equivalent time constant to per-sample
+    // with HRTF_PARAM_SMOOTH_ALPHA via HRTF_PARAM_SMOOTH_ALPHA_FRAME).
+    hrtf_filter_step_parameters(f);
 
+    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
         for (int ch = 0; ch < 2; ch++) {
             float *buf = f->ch[ch].buf;
             float *coeff = f->ch[ch].hrir_coeff_cur;
@@ -117,27 +134,31 @@ static inline void hrtf_filter_process(HrtfFilter *f,
             if (d < 0.0f) {
                 d = 0.0f;
             }
-            int di = d;
+            int di = (int)d;
             float dfrac = d - di;
 
-            // HRIR Convolution
+            // HRIR Convolution — two paths to hoist the dfrac branch out of
+            // the inner loop. Indices wrap via bitwise AND (HRTF_BUF_MASK=127,
+            // power-of-2 size) instead of % 73, eliminating integer division.
             float acc = 0.0f;
-            for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-                int idx1 = (f->buf_pos - di - k + HRTF_BUFLEN) % HRTF_BUFLEN;
-                float s = buf[idx1];
-
-                // Linear interpolation for fractional part
-                if (dfrac > 0.0f) {
-                    int idx2 = (idx1 - 1 + HRTF_BUFLEN) % HRTF_BUFLEN;
-                    s = s * (1 - dfrac) + buf[idx2] * dfrac;
+            int base = f->buf_pos - di;
+            if (dfrac > 0.0f) {
+                float w0 = 1.0f - dfrac;
+                for (int k = 0; k < HRTF_NUM_TAPS; k++) {
+                    int idx1 = (base - k) & HRTF_BUF_MASK;
+                    int idx2 = (idx1 - 1) & HRTF_BUF_MASK;
+                    acc += coeff[k] * (buf[idx1] * w0 + buf[idx2] * dfrac);
                 }
-                acc += coeff[k] * s;
+            } else {
+                for (int k = 0; k < HRTF_NUM_TAPS; k++) {
+                    acc += coeff[k] * buf[(base - k) & HRTF_BUF_MASK];
+                }
             }
 
             out[n][ch] = acc;
         }
 
-        f->buf_pos = (f->buf_pos + 1) % HRTF_BUFLEN;
+        f->buf_pos = (f->buf_pos + 1) & HRTF_BUF_MASK;
     }
 }
 
