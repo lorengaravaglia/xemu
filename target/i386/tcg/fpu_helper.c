@@ -73,12 +73,16 @@
 #define floatx80_ln2_d make_floatx80(0x3ffe, 0xb17217f7d1cf79abLL)
 #define floatx80_pi_d make_floatx80(0x4000, 0xc90fdaa22168c234LL)
 
-#if defined(XBOX) && defined(__x86_64__)
+#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
 #ifdef USE_HARD_FPU
 /*
  * FIXME: rounding and exceptions
  */
 
+#if defined(__x86_64__)
+/*
+ * x86-64: use native long double (80-bit x87) via the floatx80.fval union member.
+ */
 static inline
 floatx80 pack(floatx80 v, float_status *status)
 {
@@ -165,6 +169,121 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
     return (floatx80){ .fval = a };
 }
 
+#else /* __aarch64__ */
+/*
+ * AArch64: approximate x87 extended precision with native double (64-bit).
+ * AArch64 has no 80-bit FP type; long double is 128-bit quad precision.
+ * Using double gives exact results for double-precision FPU mode (FLDCW
+ * PC=10), which is the MSVC default used by most PC games including Halo CE.
+ * FIXME: rounding mode sync, exception flags, extended-precision edge cases
+ */
+
+/* Convert 80-bit floatx80 {uint64_t low, uint16_t high} to native double. */
+static inline double fx80_to_d(floatx80 a)
+{
+    int sign = (a.high >> 15) & 1;
+    int exp80 = a.high & 0x7fff;
+    uint64_t mant = a.low;
+    uint64_t bits;
+
+    if (exp80 == 0x7fff) {
+        /* Inf or NaN */
+        bits = ((uint64_t)sign << 63) | (0x7ffULL << 52);
+        if (mant & 0x7fffffffffffffffULL)
+            bits |= ((mant & 0x7fffffffffffffffULL) >> 11) | 1;
+    } else if (exp80 == 0) {
+        /* Zero or pseudo-denormal */
+        bits = (uint64_t)sign << 63;
+    } else {
+        /* Normal: rebias exponent (80-bit bias=16383, 64-bit bias=1023) */
+        int exp64 = exp80 - 16383 + 1023;
+        if (exp64 <= 0) {
+            bits = (uint64_t)sign << 63;
+        } else if (exp64 >= 0x7ff) {
+            bits = ((uint64_t)sign << 63) | (0x7ffULL << 52);
+        } else {
+            bits = ((uint64_t)sign << 63)
+                 | ((uint64_t)exp64 << 52)
+                 | ((mant >> 11) & 0x000fffffffffffffULL);
+        }
+    }
+    double d;
+    memcpy(&d, &bits, sizeof(d));
+    return d;
+}
+
+/* Convert native double back to 80-bit floatx80. */
+static inline floatx80 d_to_fx80(double d)
+{
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof(bits));
+    int sign = (bits >> 63) & 1;
+    int exp64 = (bits >> 52) & 0x7ff;
+    uint64_t mant = bits & 0x000fffffffffffffULL;
+    floatx80 r;
+    if (exp64 == 0x7ff) {
+        r.high = (uint16_t)((sign << 15) | 0x7fff);
+        r.low = (mant == 0) ? (1ULL << 63) : (0x8000000000000000ULL | (mant << 11));
+    } else if (exp64 == 0) {
+        r.high = (uint16_t)(sign << 15);
+        r.low = mant << 11;
+    } else {
+        /* Normal: rebias and set explicit integer bit required by 80-bit format */
+        r.high = (uint16_t)((sign << 15) | (exp64 - 1023 + 16383));
+        r.low = 0x8000000000000000ULL | (mant << 11);
+    }
+    return r;
+}
+
+static inline floatx80
+floatx80_add__hard(floatx80 a, floatx80 b, float_status *status)
+{ return d_to_fx80(fx80_to_d(a) + fx80_to_d(b)); }
+
+static inline floatx80
+floatx80_sub__hard(floatx80 a, floatx80 b, float_status *status)
+{ return d_to_fx80(fx80_to_d(a) - fx80_to_d(b)); }
+
+static inline floatx80
+floatx80_mul__hard(floatx80 a, floatx80 b, float_status *status)
+{ return d_to_fx80(fx80_to_d(a) * fx80_to_d(b)); }
+
+static inline floatx80
+floatx80_div__hard(floatx80 a, floatx80 b, float_status *status)
+{ return d_to_fx80(fx80_to_d(a) / fx80_to_d(b)); }
+
+static inline FloatRelation
+floatx80_compare__hard(floatx80 a, floatx80 b, float_status *status)
+{
+    double da = fx80_to_d(a), db = fx80_to_d(b);
+    if (da < db) return float_relation_less;
+    if (da > db) return float_relation_greater;
+    if (da == db) return float_relation_equal;
+    return float_relation_unordered;
+}
+
+static inline floatx80
+float32_to_floatx80__hard(float32 val, float_status *status)
+{ float f; memcpy(&f, &val, sizeof(f)); return d_to_fx80((double)f); }
+
+static inline float32
+floatx80_to_float32__hard(floatx80 a, float_status *status)
+{ float f = (float)fx80_to_d(a); float32 r; memcpy(&r, &f, sizeof(r)); return r; }
+
+static inline floatx80
+float64_to_floatx80__hard(float64 val, float_status *status)
+{ double d; memcpy(&d, &val, sizeof(d)); return d_to_fx80(d); }
+
+static inline float64
+floatx80_to_float64__hard(floatx80 a, float_status *status)
+{ double d = fx80_to_d(a); float64 r; memcpy(&r, &d, sizeof(r)); return r; }
+
+static inline floatx80
+int32_to_floatx80__hard(int32_t a, float_status *status)
+{ return d_to_fx80((double)a); }
+
+#endif /* __x86_64__ / __aarch64__ */
+
+/* Common aliases for both architectures */
 #define floatx80_add          floatx80_add__hard
 #define floatx80_sub          floatx80_sub__hard
 #define floatx80_mul          floatx80_mul__hard
@@ -264,7 +383,7 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
 #define helper_fsave          MAP_HELPER_SOFT_HARD(fsave)
 #define helper_frstor         MAP_HELPER_SOFT_HARD(frstor)
 
-#endif /* defined(XBOX) && defined(__x86_64__) */
+#endif /* defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__)) */
 
 static inline void fpush(CPUX86State *env)
 {
