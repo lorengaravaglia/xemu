@@ -305,6 +305,42 @@ Located at `/Users/lorengaravaglia/projects/vcpkg/installed/arm64-android/`. Key
 
 The `pkg-config` path must be set to the vcpkg pkgconfig dir when running Meson (handled by `android_arm64.txt` `[properties]` section).
 
+### Custom port patches (overlay ports, not a vcpkg fork)
+
+Some vcpkg packages need project-specific patches (e.g. NEON-optimizing a hot audio
+path). These live in `vcpkg-overlay-ports/<port>/` **inside this repo** — never edit
+files directly under the vcpkg checkout itself (e.g. `/Users/lorengaravaglia/projects/vcpkg/ports/...`).
+That checkout is a plain, unmodified clone of upstream `microsoft/vcpkg` and should stay
+that way: no fork to maintain, and the patch travels with this repo for anyone who
+clones it against their own stock vcpkg checkout.
+
+To (re)install a patched package, pass the overlay dir explicitly:
+
+```bash
+export ANDROID_NDK_HOME='/Users/lorengaravaglia/Library/Android/sdk/ndk/29.0.14206865'  # needed for vcpkg's compiler detection
+cd /Users/lorengaravaglia/projects/vcpkg
+./vcpkg remove <port>:arm64-android
+./vcpkg install <port>:arm64-android --recurse --no-binarycaching \
+    --overlay-ports=/Users/lorengaravaglia/projects/xemu/vcpkg-overlay-ports
+```
+
+Reinstalling a package **without** `--overlay-ports` silently drops back to the
+unpatched upstream version — no error, just lost optimizations. After reinstalling,
+the final `.so` won't pick up the change until forced to relink (CMake doesn't track
+vcpkg's external `.a` as a dependency):
+
+```bash
+find android/app/build/intermediates/cxx -iname "libxemu.so" -delete
+find android/app/build -iname "libxemu.so" -delete
+cd android && ./gradlew assembleDebug
+```
+
+**Currently patched**: `libsamplerate` (`vcpkg-overlay-ports/libsamplerate/`) — adds a
+NEON stereo fast path and a cached-reciprocal fix to `linear_vari_process` in
+`src_linear.c` (the `SRC_LINEAR` resampler used for voice resampling). See
+`neon-stereo-linear-resample.patch` and [[project_tcg_perf]] memory for the profiling
+history.
+
 ## Style Guide
 
 From `.github/copilot-instructions.md`: developer style guide is at `docs/devel/style.rst`.

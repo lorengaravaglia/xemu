@@ -1,0 +1,98 @@
+--- a/src/src_linear.c	2026-08-03 23:20:11
++++ b/src/src_linear.c	2026-08-04 21:07:29
+@@ -16,6 +16,10 @@
+ #include <string.h>
+ #include <math.h>
+ 
++#if defined(__aarch64__)
++#include <arm_neon.h>
++#endif
++
+ #include "common.h"
+ 
+ static SRC_ERROR linear_vari_process (SRC_STATE *state, SRC_DATA *data) ;
+@@ -53,7 +57,7 @@
+ static SRC_ERROR
+ linear_vari_process (SRC_STATE *state, SRC_DATA *data)
+ {	LINEAR_DATA *priv ;
+-	double		src_ratio, input_index, rem ;
++	double		src_ratio, inv_src_ratio, input_index, rem ;
+ 	int			ch ;
+ 
+ 	if (data->input_frames <= 0)
+@@ -80,6 +84,12 @@
+ 	if (is_bad_src_ratio (src_ratio))
+ 		return SRC_ERR_BAD_INTERNAL_STATE ;
+ 
++	/* src_ratio only changes (below) when the block-relative ratio target
++	** moves meaningfully; caching its reciprocal turns the division that
++	** used to run once per output frame into a multiply on the hot path,
++	** paying for the division again only on those (rare) ratio changes. */
++	inv_src_ratio = 1.0 / src_ratio ;
++
+ 	input_index = state->last_position ;
+ 
+ 	/* Calculate samples before first sample in input array. */
+@@ -89,7 +99,9 @@
+ 			break ;
+ 
+ 		if (priv->out_count > 0 && fabs (state->last_ratio - data->src_ratio) > SRC_MIN_RATIO_DIFF)
+-			src_ratio = state->last_ratio + priv->out_gen * (data->src_ratio - state->last_ratio) / priv->out_count ;
++		{	src_ratio = state->last_ratio + priv->out_gen * (data->src_ratio - state->last_ratio) / priv->out_count ;
++			inv_src_ratio = 1.0 / src_ratio ;
++			} ;
+ 
+ 		for (ch = 0 ; ch < state->channels ; ch++)
+ 		{	data->data_out [priv->out_gen] = (float) (priv->last_value [ch] + input_index *
+@@ -98,7 +110,7 @@
+ 			} ;
+ 
+ 		/* Figure out the next index. */
+-		input_index += 1.0 / src_ratio ;
++		input_index += inv_src_ratio ;
+ 		} ;
+ 
+ 	rem = fmod_one (input_index) ;
+@@ -109,7 +121,9 @@
+ 	while (priv->out_gen < priv->out_count && priv->in_used + state->channels * input_index < priv->in_count)
+ 	{
+ 		if (priv->out_count > 0 && fabs (state->last_ratio - data->src_ratio) > SRC_MIN_RATIO_DIFF)
+-			src_ratio = state->last_ratio + priv->out_gen * (data->src_ratio - state->last_ratio) / priv->out_count ;
++		{	src_ratio = state->last_ratio + priv->out_gen * (data->src_ratio - state->last_ratio) / priv->out_count ;
++			inv_src_ratio = 1.0 / src_ratio ;
++			} ;
+ 
+ #if SRC_DEBUG
+ 		if (priv->in_used < state->channels && input_index < 1.0)
+@@ -118,6 +132,22 @@
+ 			} ;
+ #endif
+ 
++#if defined(__aarch64__)
++		if (state->channels == 2)
++		{	/* Stereo fast path: the two channels are one contiguous pair
++			** of floats in the interleaved buffer (same memory locations
++			** the generic loop below reads), so interpolate both with a
++			** single NEON vector op instead of a 2-iteration scalar loop.
++			*/
++			float32x2_t va0 = vld1_f32 (data->data_in + priv->in_used - 2) ;
++			float32x2_t va1 = vld1_f32 (data->data_in + priv->in_used) ;
++			float32x2_t vdiff = vsub_f32 (va1, va0) ;
++			float32x2_t vout = vmla_n_f32 (va0, vdiff, (float) input_index) ;
++			vst1_f32 (data->data_out + priv->out_gen, vout) ;
++			priv->out_gen += 2 ;
++			}
++		else
++#endif
+ 		for (ch = 0 ; ch < state->channels ; ch++)
+ 		{	data->data_out [priv->out_gen] = (float) (data->data_in [priv->in_used - state->channels + ch] + input_index *
+ 						((double) data->data_in [priv->in_used + ch] - data->data_in [priv->in_used - state->channels + ch])) ;
+@@ -125,7 +155,7 @@
+ 			} ;
+ 
+ 		/* Figure out the next index. */
+-		input_index += 1.0 / src_ratio ;
++		input_index += inv_src_ratio ;
+ 		rem = fmod_one (input_index) ;
+ 
+ 		priv->in_used += state->channels * lrint (input_index - rem) ;
