@@ -232,12 +232,12 @@ class GamepadView @JvmOverloads constructor(
         // Triggers
         if (lt.rect.contains(x, y) && lt.pointerId == -1) {
             lt.pressed = true; lt.pointerId = pid
-            NativeInterface.sendAxis(lt.axis, NativeInterface.AXIS_MAX)
+            InputRecorder.sendAxis(lt.axis, NativeInterface.AXIS_MAX)
             return
         }
         if (rt.rect.contains(x, y) && rt.pointerId == -1) {
             rt.pressed = true; rt.pointerId = pid
-            NativeInterface.sendAxis(rt.axis, NativeInterface.AXIS_MAX)
+            InputRecorder.sendAxis(rt.axis, NativeInterface.AXIS_MAX)
             return
         }
         // Sticks
@@ -255,7 +255,7 @@ class GamepadView @JvmOverloads constructor(
         for (b in buttons) {
             if (dist(x, y, b.cx, b.cy) <= b.radius && b.pointerId == -1) {
                 b.pressed = true; b.pointerId = pid
-                NativeInterface.sendButtonDown(b.mask)
+                InputRecorder.sendButtonDown(b.mask)
                 return
             }
         }
@@ -270,30 +270,30 @@ class GamepadView @JvmOverloads constructor(
         // Triggers
         if (lt.pointerId == pid) {
             lt.pressed = false; lt.pointerId = -1
-            NativeInterface.sendAxis(lt.axis, 0)
+            InputRecorder.sendAxis(lt.axis, 0)
         }
         if (rt.pointerId == pid) {
             rt.pressed = false; rt.pointerId = -1
-            NativeInterface.sendAxis(rt.axis, 0)
+            InputRecorder.sendAxis(rt.axis, 0)
         }
         // Sticks
         if (leftStick.pointerId == pid) {
             leftStick.pointerId = -1
             leftStick.knobX = leftStick.cx; leftStick.knobY = leftStick.cy
-            NativeInterface.sendAxis(leftStick.axisX, 0)
-            NativeInterface.sendAxis(leftStick.axisY, 0)
+            InputRecorder.sendAxis(leftStick.axisX, 0)
+            InputRecorder.sendAxis(leftStick.axisY, 0)
         }
         if (rightStick.pointerId == pid) {
             rightStick.pointerId = -1
             rightStick.knobX = rightStick.cx; rightStick.knobY = rightStick.cy
-            NativeInterface.sendAxis(rightStick.axisX, 0)
-            NativeInterface.sendAxis(rightStick.axisY, 0)
+            InputRecorder.sendAxis(rightStick.axisX, 0)
+            InputRecorder.sendAxis(rightStick.axisY, 0)
         }
         // Buttons
         for (b in buttons) {
             if (b.pointerId == pid) {
                 b.pressed = false; b.pointerId = -1
-                NativeInterface.sendButtonUp(b.mask)
+                InputRecorder.sendButtonUp(b.mask)
             }
         }
     }
@@ -310,8 +310,8 @@ class GamepadView @JvmOverloads constructor(
         val norm = clamped / stick.outerR  // 0..1
         // xemu internal convention: positive Y = up. Android screen Y increases downward,
         // so ny > 0 means touch below center (stick pushed down). Negate to match xemu.
-        NativeInterface.sendAxis(stick.axisX, (nx * norm * NativeInterface.AXIS_MAX).toInt())
-        NativeInterface.sendAxis(stick.axisY, (-ny * norm * NativeInterface.AXIS_MAX).toInt())
+        InputRecorder.sendAxis(stick.axisX, (nx * norm * NativeInterface.AXIS_MAX).toInt())
+        InputRecorder.sendAxis(stick.axisY, (-ny * norm * NativeInterface.AXIS_MAX).toInt())
     }
 
     private fun dist(x1: Float, y1: Float, x2: Float, y2: Float): Float {

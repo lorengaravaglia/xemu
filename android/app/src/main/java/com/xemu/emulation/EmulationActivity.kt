@@ -1,8 +1,10 @@
 package com.xemu.emulation
 
+import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -31,7 +33,10 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import android.widget.EditText
+import android.util.Log
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.xemu.MainActivity
 import com.xemu.NativeInterface
@@ -69,6 +74,28 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private val suppressedGamepadKeycodes = mutableSetOf<Int>()// consumed by a fired combo this press
     private var quickSaveSlot = 1                              // 1–8, cycled via hotkey
     private var userPaused = false                             // user explicitly paused in-game
+
+    // Triggers InputRecorder playback from `adb shell am broadcast` for automated
+    // performance testing — see InputRecorder.kt.
+    private val playbackReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                InputRecorder.ACTION_PLAY -> {
+                    val name = intent.getStringExtra(InputRecorder.EXTRA_NAME)
+                    if (name.isNullOrBlank()) {
+                        Log.w("xemu-inputrec", "PLAYBACK_REJECTED reason=missing_name")
+                        return
+                    }
+                    if (!emulationStarted) {
+                        Log.w("xemu-inputrec", "PLAYBACK_REJECTED reason=not_ready")
+                        return
+                    }
+                    InputRecorder.startPlayback(filesDir, gameId, name)
+                }
+                InputRecorder.ACTION_STOP_PLAYBACK -> InputRecorder.cancelPlayback()
+            }
+        }
+    }
 
     // Performance overlay
     private lateinit var overlayContainer: LinearLayout
@@ -323,6 +350,18 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         lastFpsTime = 0L
         fpsHandler.post(fpsRunnable)
         rumbleHandler.post(rumbleRunnable)
+        // Exported (not RECEIVER_NOT_EXPORTED) so `adb shell am broadcast` (uid=shell)
+        // can reach it — shell is NOT exempt from the exported-receiver check on this
+        // Android version, confirmed via BroadcastQueue "Exported Denial" in logcat.
+        // Debug/automation-only feature; acceptable on a personal test device.
+        ContextCompat.registerReceiver(
+            this, playbackReceiver,
+            IntentFilter().apply {
+                addAction(InputRecorder.ACTION_PLAY)
+                addAction(InputRecorder.ACTION_STOP_PLAYBACK)
+            },
+            ContextCompat.RECEIVER_EXPORTED
+        )
         // Re-read overlay mode from main_prefs in case it changed in Settings
         overlayMode = OverlayMode.valueOf(
             mainPrefs.getString("overlay_mode", OverlayMode.AUTO.name) ?: OverlayMode.AUTO.name
@@ -337,6 +376,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         super.onPause()
         fpsHandler.removeCallbacks(fpsRunnable)
         rumbleHandler.removeCallbacks(rumbleRunnable)
+        unregisterReceiver(playbackReceiver)
         vibrator.cancel()
         NativeInterface.pauseEmulation()  // idempotent: safe even if already user-paused
         inputManager.unregisterInputDeviceListener(this)
@@ -409,7 +449,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                     }
                 } else {
                     // Not in any hotkey — send immediately
-                    NativeInterface.sendButtonDown(xboxBtn.mask)
+                    InputRecorder.sendButtonDown(xboxBtn.mask)
                 }
             }
 
@@ -424,10 +464,10 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                     keycode in pendingGamepadKeycodes -> {
                         pendingGamepadKeycodes.remove(keycode)
                         // Was pending but no combo fired — pass through as a tap
-                        NativeInterface.sendButtonDown(xboxBtn.mask)
-                        NativeInterface.sendButtonUp(xboxBtn.mask)
+                        InputRecorder.sendButtonDown(xboxBtn.mask)
+                        InputRecorder.sendButtonUp(xboxBtn.mask)
                     }
-                    else -> NativeInterface.sendButtonUp(xboxBtn.mask)
+                    else -> InputRecorder.sendButtonUp(xboxBtn.mask)
                 }
             }
         }
@@ -455,7 +495,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 raw = -raw
             }
             val scaled = (raw * 32767f).toInt().coerceIn(-32767, 32767)
-            NativeInterface.sendAxis(xboxAxis.index, scaled)
+            InputRecorder.sendAxis(xboxAxis.index, scaled)
         }
 
         // D-pad hat axes → button presses
@@ -474,13 +514,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     /** Convert a hat axis value change into D-pad button press/release events. */
     private fun updateHatAxis(prev: Float, curr: Float, negMask: Int, posMask: Int) {
         // Release negative direction if no longer held
-        if (prev < -0.5f && curr >= -0.5f) NativeInterface.sendButtonUp(negMask)
+        if (prev < -0.5f && curr >= -0.5f) InputRecorder.sendButtonUp(negMask)
         // Release positive direction if no longer held
-        if (prev > 0.5f  && curr <= 0.5f)  NativeInterface.sendButtonUp(posMask)
+        if (prev > 0.5f  && curr <= 0.5f)  InputRecorder.sendButtonUp(posMask)
         // Press negative direction
-        if (curr < -0.5f && prev >= -0.5f) NativeInterface.sendButtonDown(negMask)
+        if (curr < -0.5f && prev >= -0.5f) InputRecorder.sendButtonDown(negMask)
         // Press positive direction
-        if (curr > 0.5f  && prev <= 0.5f)  NativeInterface.sendButtonDown(posMask)
+        if (curr > 0.5f  && prev <= 0.5f)  InputRecorder.sendButtonDown(posMask)
     }
 
     // ── Bottom sheet menu ─────────────────────────────────────────────────────
@@ -524,6 +564,16 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         item("Save State")    { showSaveStateDialog() }
         item("Load State")    { showLoadStateDialog() }
         item("Map Controls")  { startActivity(Intent(this, MappingActivity::class.java)) }
+
+        container.addView(sheetDivider())
+
+        val recordLabel = when {
+            InputRecorder.isRecording -> "Stop Recording"
+            InputRecorder.isPlaying   -> "Recording (playback active)"
+            else                       -> "Start Recording Input"
+        }
+        item(recordLabel)       { toggleRecording() }
+        item("Play Recording")  { showPlayRecordingDialog() }
 
         container.addView(sheetDivider())
 
@@ -591,6 +641,52 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 } else {
                     Toast.makeText(this, "Slot ${which + 1} is empty", Toast.LENGTH_SHORT).show()
                 }
+            }
+            .show()
+    }
+
+    // ── Input recording / playback dialogs ────────────────────────────────────
+
+    private fun toggleRecording() {
+        if (InputRecorder.isPlaying) {
+            Toast.makeText(this, "Cannot record during playback", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (InputRecorder.isRecording) {
+            showStopRecordingDialog()
+        } else if (InputRecorder.startRecording(gameId)) {
+            Toast.makeText(this, "Recording started", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showStopRecordingDialog() {
+        val input = EditText(this).apply { hint = "Recording name, e.g. perf_test_1" }
+        AlertDialog.Builder(this)
+            .setTitle("Save Recording")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().ifBlank { "recording_${System.currentTimeMillis()}" }
+                val file = InputRecorder.stopRecording(filesDir, name)
+                Toast.makeText(
+                    this,
+                    if (file != null) "Saved: ${file.name}" else "Save failed",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton("Discard") { _, _ -> InputRecorder.cancelRecording() }
+            .show()
+    }
+
+    private fun showPlayRecordingDialog() {
+        val names = InputRecorder.listRecordings(filesDir, gameId)
+        if (names.isEmpty()) {
+            Toast.makeText(this, "No recordings for this game", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Play Recording")
+            .setItems(names.toTypedArray()) { _, which ->
+                InputRecorder.startPlayback(filesDir, gameId, names[which])
             }
             .show()
     }
