@@ -6,6 +6,14 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project("xemu")
 
+# CMake's default Release/RelWithDebInfo flags define -DNDEBUG, but QEMU's
+# osdep.h explicitly refuses to build with it (assert() must stay active --
+# some asserts historically have side effects, and NDEBUG makes assert() a
+# no-op per the C standard). -U after -D on the same compile line wins, so
+# this restores assert()-active behavior regardless of build type, matching
+# how upstream QEMU (and this project's own working Debug builds) always build.
+add_compile_options(-UNDEBUG)
+
 # Ensure ANDROID and XBOX are defined
 add_definitions(-DANDROID=1)
 add_definitions(-DXBOX=1)

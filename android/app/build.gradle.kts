@@ -37,6 +37,15 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Reuse the auto-generated debug keystore so `assembleRelease` can be
+            // installed locally for on-device profiling. Not for distribution --
+            // set up a real release signing config before publishing.
+            signingConfig = signingConfigs.getByName("debug")
+            // `run-as` (needed for simpleperf to read the app's data dir) refuses
+            // non-debuggable packages. Doesn't affect optimization/codegen, only
+            // allows debugger/profiler attachment -- same "not for distribution"
+            // caveat as the signing config above.
+            isDebuggable = true
         }
     }
     compileOptions {
