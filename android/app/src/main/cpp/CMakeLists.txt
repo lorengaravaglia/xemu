@@ -113,12 +113,16 @@ add_library(xemu SHARED
 )
 
 
-# CRITICAL: Disable all hardening for the core logic
+# CRITICAL: Disable all hardening for the core logic.
+# -march/-mtune must stay in sync with android_arm64.txt (see the comment there
+# for why -march=armv8.2-a matters: inline LSE atomics instead of outline-atomic
+# PLT calls).  Both build systems must use identical flags.
 target_compile_options(xemu PRIVATE
     -mbranch-protection=none
     -fno-sanitize=shadow-call-stack
     -fno-emulated-tls
-    -mtune=cortex-x4
+    -march=armv8.2-a
+    -mtune=cortex-x3
     -O2
 )
 

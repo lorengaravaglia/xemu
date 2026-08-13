@@ -35,6 +35,15 @@ cmake_android_native_api_level = api
 cmake_make_program = 'ninja'
 
 [built-in options]
-c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-mtune=cortex-x4']
-cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-mtune=cortex-x4']
+# -march=armv8.2-a: raises the ISA floor from the armv8-a default so the compiler
+#   can emit LSE single-instruction atomics (casal/ldaddal, ARMv8.1+) inline.
+#   Without it clang defaults to -moutline-atomics, turning every atomic into a
+#   PLT call into a compiler-rt helper that runtime-checks a global and branches.
+#   Target device (SD 8 Gen 2 "kalama": Cortex-X3/A715/A710/A510) is ARMv9.0-A,
+#   well above this floor; /proc/cpuinfo confirms 'atomics' (LSE) + 'uscat' (LSE2).
+#   NOTE: this is a hard floor — the APK will SIGILL on pre-ARMv8.2 devices.
+# -mtune=cortex-x3: kalama's prime core (x4 is Snapdragon 8 Gen 3). Scheduling
+#   hint only; does not affect which instructions are legal.
+c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.2-a', '-mtune=cortex-x3']
+cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.2-a', '-mtune=cortex-x3']
 b_staticpic = true
