@@ -163,6 +163,144 @@ int xemu_android_get_pgraph_sync_wait_ms(void)
     return g_pgraph_sync_wait_ms;
 }
 
+/* ---- Per-frame phase profiling ----------------------------------------
+ * Answers "is the render loop CPU-bound or GPU-bound?" by attributing wall
+ * time inside gl_render_frame() to three phases, and counting why iterations
+ * do no work.  All state is render-thread-only — gl_render_frame() is
+ * serialized by its own `rendering` reentrance guard — so no atomics needed.
+ *
+ * Emits one line per FRAMEPROF_WINDOW_MS to logcat tag "xemu-frameprof".
+ * Slice the lines between InputRecorder's PLAYBACK_START / PLAYBACK_COMPLETE
+ * markers to get a breakdown covering exactly the replayed window.
+ *
+ * Reading the output:
+ *   reuse high  -> NV2A produced no new frame, so the composite was skipped.
+ *                  The guest (TCG) is the limiter: CPU-bound upstream, and
+ *                  the GPU has headroom.
+ *   sync%  high -> blocked waiting on the PGRAPH thread (NV2A emulation +
+ *                  Vulkan submit + readback).  That thread is the limiter.
+ *   swap%  high -> blocked in eglSwapBuffers(): GPU saturation or vsync.
+ *                  Compare the composite rate against the display refresh
+ *                  rate to tell those two apart — at ~60/s it's vsync, well
+ *                  below with swap% still high it's the GPU.
+ *   idle%  high -> the render thread is waiting outside this function; the
+ *                  limiter is upstream of the render loop entirely.
+ */
+#if defined(__ANDROID__) || defined(ANDROID)
+#define ALOGP(...) \
+    ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-frameprof", __VA_ARGS__))
+#define FRAMEPROF_WINDOW_MS 1000
+
+static struct {
+    int64_t window_start_ns;
+    uint64_t sync_ns;   /* nv2a_get_framebuffer_surface() */
+    uint64_t hud_ns;    /* xemu_hud_update() + xemu_hud_render() */
+    uint64_t swap_ns;   /* eglSwapBuffers() */
+    uint64_t body_ns;   /* whole function body, every path */
+    int iters;          /* calls that passed the reentrance guard */
+    int composited;     /* reached eglSwapBuffers() */
+    int reused;         /* no new NV2A frame; cached texture reused */
+    int miss;           /* nv2a_get_framebuffer_surface() returned 0 */
+    int throttled;      /* skipped by the 100ms post-miss throttle */
+    int nosurface;      /* Android surface gone (app backgrounded) */
+} s_fp;
+
+/* Playback-window accumulator — see xemu_android_frameprof_mark() below for the
+ * methodology warning about comparing runs. */
+static struct {
+    bool active;
+    int64_t t0_ns;
+    int new_frames;   /* NV2A frames actually produced (the real guest fps) */
+    int composites;   /* eglSwapBuffers calls */
+    uint64_t sync_ns;
+    uint64_t swap_ns;
+    uint64_t body_ns;
+} s_fpw;
+
+static void frameprof_account(int64_t body_start_ns)
+{
+    uint64_t d = (uint64_t)(qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
+                            body_start_ns);
+    s_fp.body_ns += d;
+    s_fpw.body_ns += d;
+}
+
+static void frameprof_report(int64_t now_ns)
+{
+    if (s_fp.window_start_ns == 0) {
+        s_fp.window_start_ns = now_ns;
+        return;
+    }
+
+    int64_t elapsed_ns = now_ns - s_fp.window_start_ns;
+    if (elapsed_ns < (int64_t)FRAMEPROF_WINDOW_MS * 1000000) {
+        return;
+    }
+
+    double el = (double)elapsed_ns;
+    uint64_t accounted = s_fp.sync_ns + s_fp.hud_ns + s_fp.swap_ns;
+    uint64_t other_ns = s_fp.body_ns > accounted ? s_fp.body_ns - accounted : 0;
+    double idle_pct = s_fp.body_ns < (uint64_t)elapsed_ns
+                          ? 100.0 * (el - (double)s_fp.body_ns) / el
+                          : 0.0;
+
+    ALOGP("win=%.0fms iters=%d composited=%d (%.1f/s) | "
+          "sync=%.1f%% swap=%.1f%% hud=%.1f%% other=%.1f%% idle=%.1f%% | "
+          "reuse=%d miss=%d throttle=%d nosurf=%d",
+          el / 1e6, s_fp.iters, s_fp.composited, s_fp.composited * 1e9 / el,
+          100.0 * (double)s_fp.sync_ns / el,
+          100.0 * (double)s_fp.swap_ns / el,
+          100.0 * (double)s_fp.hud_ns / el,
+          100.0 * (double)other_ns / el,
+          idle_pct,
+          s_fp.reused, s_fp.miss, s_fp.throttled, s_fp.nosurface);
+
+    memset(&s_fp, 0, sizeof(s_fp));
+    s_fp.window_start_ns = now_ns;
+}
+
+/* Playback-window accumulator, bracketed by xemu_android_frameprof_mark() so a
+ * replay self-reports ONE summary line covering exactly the replayed window,
+ * rather than leaving the per-second lines to be reassembled by hand.
+ *
+ * METHODOLOGY WARNING — read before comparing two runs:
+ * InputRecorder replays input on wall-clock timing, NOT guest state.  A build
+ * that runs the guest faster therefore has each input land at a different point
+ * in the game: the runs diverge, and the divergence compounds across the window.
+ * Do NOT treat per-second samples from two runs as paired observations of the
+ * same scene — they aren't.  Treat each run's SUMMARY guest_fps as a SINGLE
+ * sample and compare across several repeated runs per build.
+ */
+void xemu_android_frameprof_mark(int starting)
+{
+    if (starting) {
+        memset(&s_fpw, 0, sizeof(s_fpw));
+        s_fpw.t0_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        s_fpw.active = true;
+        ALOGP("SUMMARY_BEGIN");
+        return;
+    }
+
+    if (!s_fpw.active) {
+        return;
+    }
+    s_fpw.active = false;
+
+    double el = (double)(qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s_fpw.t0_ns);
+    if (el <= 0.0) {
+        return;
+    }
+
+    ALOGP("SUMMARY window=%.2fs guest_frames=%d guest_fps=%.2f "
+          "composites=%d composite_fps=%.2f | sync=%.2f%% swap=%.2f%% busy=%.2f%%",
+          el / 1e9, s_fpw.new_frames, s_fpw.new_frames * 1e9 / el,
+          s_fpw.composites, s_fpw.composites * 1e9 / el,
+          100.0 * (double)s_fpw.sync_ns / el,
+          100.0 * (double)s_fpw.swap_ns / el,
+          100.0 * (double)s_fpw.body_ns / el);
+}
+#endif
+
 /* save_snapshot(), load_snapshot(), and bdrv_drain_all_begin() all assert
  * qemu_in_main_thread() — they must run on the QEMU main loop thread.
  * We dispatch all such work via a single bottom-half handler and block the
@@ -1183,7 +1321,13 @@ static void gl_render_frame(struct xemu_console *scon)
     }
 
 #if defined(__ANDROID__) || defined(ANDROID)
+    int64_t fp_body_start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    frameprof_report(fp_body_start);
+    s_fp.iters++;
+
     if (!xemu_android_surface_valid()) {
+        s_fp.nosurface++;
+        frameprof_account(fp_body_start);
         qatomic_set(&rendering, false);
         return;
     }
@@ -1219,6 +1363,8 @@ static void gl_render_frame(struct xemu_console *scon)
             /* Too soon since last miss — skip this call to avoid pfifo.lock
              * contention.  framebuffer_in_use was never set, so no release
              * needed; just clear the reentrance guard and return. */
+            s_fp.throttled++;
+            frameprof_account(fp_body_start);
             qatomic_set(&rendering, false);
             return;
         }
@@ -1234,18 +1380,24 @@ static void gl_render_frame(struct xemu_console *scon)
     int cur_frame_time = nv2a_get_frame_time();
     if (s_last_tex != 0 && cur_frame_time == s_last_synced_frame_time) {
         tex = s_last_tex;
+        s_fp.reused++;
     } else {
         {
-            int64_t sync_t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            int64_t sync_t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
             tex = nv2a_get_framebuffer_surface();
-            g_pgraph_sync_wait_ms = (int)(qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - sync_t0);
+            int64_t sync_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - sync_t0;
+            s_fp.sync_ns += (uint64_t)sync_ns;
+            s_fpw.sync_ns += (uint64_t)sync_ns;
+            g_pgraph_sync_wait_ms = (int)(sync_ns / 1000000);
         }
         acquired_surface = true;
         s_last_tex = tex;
         if (tex != 0) {
             s_last_synced_frame_time = cur_frame_time;
             g_rendered_frame_count++;
+            s_fpw.new_frames++;
         } else {
+            s_fp.miss++;
             s_last_miss_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         }
     }
@@ -1325,12 +1477,19 @@ static void gl_render_frame(struct xemu_console *scon)
      * lock and perform rendering, but release before swap to avoid
      * possible lengthy blocking (for vsync).
      */
+#if defined(__ANDROID__) || defined(ANDROID)
+    int64_t fp_hud_start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+#endif
     if (xemu_is_main_thread()) {
         xemu_main_loop_lock();
         xemu_hud_update();
         xemu_main_loop_unlock();
         xemu_hud_render();
     }
+#if defined(__ANDROID__) || defined(ANDROID)
+    s_fp.hud_ns += (uint64_t)(qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
+                              fp_hud_start);
+#endif
 #if defined(__ANDROID__) || defined(ANDROID)
     /* On Android, glFinish() can stall indefinitely when sampling from a
      * texture that was just rendered to on a different thread in the same
@@ -1355,7 +1514,16 @@ static void gl_render_frame(struct xemu_console *scon)
     if (err != GL_NO_ERROR) {
         ALOGE("gl_render_frame: GL error before swap: 0x%x (continuing)", err);
     }
-    eglSwapBuffers(egl_display, egl_surface);
+    {
+        int64_t fp_swap_start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        eglSwapBuffers(egl_display, egl_surface);
+        uint64_t swap_ns = (uint64_t)(qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
+                                      fp_swap_start);
+        s_fp.swap_ns += swap_ns;
+        s_fpw.swap_ns += swap_ns;
+        s_fp.composited++;
+        s_fpw.composites++;
+    }
     {
         int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         if (s_last_swap_ms != 0) {
@@ -1382,6 +1550,9 @@ skip_render:
     }
 #else
     nv2a_release_framebuffer_surface();
+#endif
+#if defined(__ANDROID__) || defined(ANDROID)
+    frameprof_account(fp_body_start);
 #endif
     qatomic_set(&rendering, false);
 

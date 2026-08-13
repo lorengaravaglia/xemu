@@ -100,6 +100,11 @@ void xemu_android_get_frame_time_history(int *buf, int capacity, int *out_count)
  * High values indicate the GPU is the bottleneck. */
 int xemu_android_get_pgraph_sync_wait_ms(void);
 
+/* Bracket a measurement window (called by InputRecorder around replay).
+ * starting != 0 resets the accumulators; starting == 0 emits one SUMMARY line
+ * to logcat tag "xemu-frameprof" covering exactly that window. */
+void xemu_android_frameprof_mark(int starting);
+
 /* Returns the running total of GL shader programs compiled this session.
  * Increments each time pgraph_gl_compile_shader() succeeds. */
 int xemu_android_get_compiled_shader_count(void);

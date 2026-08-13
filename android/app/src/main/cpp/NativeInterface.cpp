@@ -196,6 +196,12 @@ Java_com_xemu_NativeInterface_getPgraphSyncWaitMs(JNIEnv *env, jclass clazz) {
     return (jint)xemu_android_get_pgraph_sync_wait_ms();
 }
 
+JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_frameprofMark(JNIEnv *env, jclass clazz,
+                                            jboolean starting) {
+    xemu_android_frameprof_mark(starting ? 1 : 0);
+}
+
 JNIEXPORT jobjectArray JNICALL
 Java_com_xemu_NativeInterface_listStates(JNIEnv *env, jclass clazz) {
     char **names = nullptr;

@@ -131,12 +131,17 @@ object InputRecorder {
 
         val durationMs = events.maxOf { it.tMs }
         Log.i(TAG, "PLAYBACK_START name=$name events=${events.size} durationMs=$durationMs")
+        NativeInterface.frameprofMark(true)
 
         val startUptime = SystemClock.uptimeMillis()
         var idx = 0
         fun scheduleNext() {
             if (!playing || idx >= events.size) {
-                if (playing) { playing = false; Log.i(TAG, "PLAYBACK_COMPLETE name=$name") }
+                if (playing) {
+                    playing = false
+                    NativeInterface.frameprofMark(false)
+                    Log.i(TAG, "PLAYBACK_COMPLETE name=$name")
+                }
                 ht.quitSafely()
                 return
             }
@@ -157,6 +162,7 @@ object InputRecorder {
     fun cancelPlayback() {
         if (!playing) return
         playing = false
+        NativeInterface.frameprofMark(false)
         playbackHandler?.removeCallbacksAndMessages(null)
         playbackThread?.quitSafely()
         Log.i(TAG, "PLAYBACK_CANCELLED")

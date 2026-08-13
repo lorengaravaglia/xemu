@@ -140,4 +140,12 @@ object NativeInterface {
      * High values indicate GPU rendering is the bottleneck.
      */
     external fun getPgraphSyncWaitMs(): Int
+
+    /**
+     * Bracket a frame-profiling measurement window.
+     *
+     * [starting] = true resets the accumulators; false emits one SUMMARY line to
+     * logcat tag `xemu-frameprof` covering exactly that window.
+     */
+    external fun frameprofMark(starting: Boolean)
 }
