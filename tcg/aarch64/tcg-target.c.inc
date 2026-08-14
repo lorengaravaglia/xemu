@@ -649,6 +649,37 @@ typedef enum {
     BTI_C           = 0xd503245f,
     BTI_J           = 0xd503249f,
     BTI_JC          = 0xd50324df,
+
+    /*
+     * Scalar floating point, for the TCG_TYPE_F32/F64 opcodes.  Dn/Sn are the
+     * low bits of Vn, so these operate on the same register file as the
+     * AdvSIMD encodings above and use the same 32-63 TCG register numbering.
+     *
+     * All entries are the double-precision (type=01) form unless the name says
+     * otherwise.  Every encoding below was taken from the NDK assembler rather
+     * than transcribed from the manual: assemble the mnemonic with rd=0, rn=1,
+     * rm=2 and subtract the register fields.
+     */
+
+    /* Floating-point data-processing (1 source): Rd, Rn */
+    I3701_FMOV      = 0x1e604000,
+    I3701_FABS      = 0x1e60c000,
+    I3701_FNEG      = 0x1e614000,
+    I3701_FSQRT     = 0x1e61c000,
+    I3701_FCVT_SD   = 0x1e624000, /* FCVT Sd, Dn -- double to single */
+    I3701_FCVT_DS   = 0x1e22c000, /* FCVT Dd, Sn -- single to double */
+    /* Conversion between FP and integer: same Rd, Rn field layout */
+    I3701_SCVTF_W   = 0x1e620000, /* SCVTF Dd, Wn */
+    I3701_SCVTF_X   = 0x9e620000, /* SCVTF Dd, Xn */
+
+    /* Floating-point data-processing (2 source): Rd, Rn, Rm */
+    I3702_FMUL      = 0x1e600800,
+    I3702_FDIV      = 0x1e601800,
+    I3702_FADD      = 0x1e602800,
+    I3702_FSUB      = 0x1e603800,
+
+    /* Floating-point compare: Rn, Rm, result in NZCV */
+    I3703_FCMP      = 0x1e602000,
 } AArch64Insn;
 
 static inline uint32_t tcg_in32(TCGContext *s)
@@ -866,6 +897,32 @@ static void tcg_out_insn_3616(TCGContext *s, AArch64Insn insn, bool q,
 {
     tcg_out32(s, insn | q << 30 | (size << 22) | (rm & 0x1f) << 16
               | (rn & 0x1f) << 5 | (rd & 0x1f));
+}
+
+/*
+ * Scalar FP data-processing (1 source), and FP<->integer conversion: both
+ * take a destination and one source.  For SCVTF the source is a general
+ * register (0-31); for the rest it is an FP register (TCG 32-63).  Masking
+ * with 0x1f handles both.
+ */
+static void tcg_out_insn_3701(TCGContext *s, AArch64Insn insn,
+                              TCGReg rd, TCGReg rn)
+{
+    tcg_out32(s, insn | (rn & 0x1f) << 5 | (rd & 0x1f));
+}
+
+/* Scalar FP data-processing (2 source). */
+static void tcg_out_insn_3702(TCGContext *s, AArch64Insn insn,
+                              TCGReg rd, TCGReg rn, TCGReg rm)
+{
+    tcg_out32(s, insn | (rm & 0x1f) << 16 | (rn & 0x1f) << 5 | (rd & 0x1f));
+}
+
+/* Scalar FP compare; result lands in NZCV, not a register. */
+static void tcg_out_insn_3703(TCGContext *s, AArch64Insn insn,
+                              TCGReg rn, TCGReg rm)
+{
+    tcg_out32(s, insn | (rm & 0x1f) << 16 | (rn & 0x1f) << 5);
 }
 
 static void tcg_out_insn_3617(TCGContext *s, AArch64Insn insn, bool q,
@@ -1242,6 +1299,9 @@ static bool tcg_out_mov(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg)
         }
         /* FALLTHRU */
 
+    case TCG_TYPE_F32:
+    case TCG_TYPE_F64:
+        /* Dn/Sn alias the low bits of Vn; a 64-bit vector ORR moves both. */
     case TCG_TYPE_V64:
         tcg_debug_assert(ret >= 32 && arg >= 32);
         tcg_out_insn(s, 3616, ORR, 0, 0, ret, arg, arg);
@@ -1272,6 +1332,14 @@ static void tcg_out_ld(TCGContext *s, TCGType type, TCGReg ret,
         insn = (ret < 32 ? I3312_LDRX : I3312_LDRVD);
         lgsz = 3;
         break;
+    case TCG_TYPE_F32:
+        tcg_debug_assert(ret >= 32);
+        insn = I3312_LDRVS;
+        lgsz = 2;
+        break;
+    case TCG_TYPE_F64:
+        tcg_debug_assert(ret >= 32);
+        /* FALLTHRU */
     case TCG_TYPE_V64:
         insn = I3312_LDRVD;
         lgsz = 3;
@@ -1301,6 +1369,14 @@ static void tcg_out_st(TCGContext *s, TCGType type, TCGReg src,
         insn = (src < 32 ? I3312_STRX : I3312_STRVD);
         lgsz = 3;
         break;
+    case TCG_TYPE_F32:
+        tcg_debug_assert(src >= 32);
+        insn = I3312_STRVS;
+        lgsz = 2;
+        break;
+    case TCG_TYPE_F64:
+        tcg_debug_assert(src >= 32);
+        /* FALLTHRU */
     case TCG_TYPE_V64:
         insn = I3312_STRVD;
         lgsz = 3;
@@ -3397,8 +3473,15 @@ static void tcg_target_init(TCGContext *s)
 {
     tcg_target_available_regs[TCG_TYPE_I32] = 0xffffffffu;
     tcg_target_available_regs[TCG_TYPE_I64] = 0xffffffffu;
-    tcg_target_available_regs[TCG_TYPE_V64] = 0xffffffff00000000ull;
-    tcg_target_available_regs[TCG_TYPE_V128] = 0xffffffff00000000ull;
+    tcg_target_available_regs[TCG_TYPE_V64] = ALL_VECTOR_REGS;
+    tcg_target_available_regs[TCG_TYPE_V128] = ALL_VECTOR_REGS;
+    /*
+     * Scalar FP shares the SIMD&FP register file: Dn/Sn are the low 64/32 bits
+     * of Vn, so F32/F64 allocate out of v0-v31 exactly as tcg/i386 allocates
+     * F32/F64 out of the xmm registers.
+     */
+    tcg_target_available_regs[TCG_TYPE_F32] = ALL_VECTOR_REGS;
+    tcg_target_available_regs[TCG_TYPE_F64] = ALL_VECTOR_REGS;
 
     tcg_target_call_clobber_regs = -1ull;
     tcg_regset_reset_reg(tcg_target_call_clobber_regs, TCG_REG_X19);
