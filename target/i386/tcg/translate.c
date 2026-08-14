@@ -285,6 +285,14 @@ typedef struct DisasContext {
     int fpstt_delta;
     TCGv_fp fpregs[8];
     TCGv_fp ft0;
+    /*
+     * Scratch for the ld80f/st80f helper path (see ops_fpu.h).  Allocated
+     * lazily and reused for the whole block: tcg_temp_new_* produces TEMP_TB
+     * temps, which are not recycled within a translation block, so allocating
+     * one per conversion is a leak proportional to the number of conversions.
+     */
+    TCGv_i64 fp_bits64;
+    TCGv_i32 fp_bits32;
 } DisasContext;
 
 /*
@@ -4364,6 +4372,8 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->fpstt_delta = 0;
     dc->ft0 = NULL;
     dc->flcr_set = false;
+    dc->fp_bits64 = NULL;
+    dc->fp_bits32 = NULL;
 }
 
 static void i386_tr_tb_start(DisasContextBase *db, CPUState *cpu)

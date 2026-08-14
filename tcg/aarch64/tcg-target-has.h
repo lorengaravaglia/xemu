@@ -57,4 +57,13 @@
 #define TCG_TARGET_sextract_valid(type, ofs, len)  1
 #define TCG_TARGET_deposit_valid(type, ofs, len)   1
 
+/*
+ * Scalar floating point, for the x87 fast path.  This is all-or-nothing:
+ * tcg_op_supported() (tcg.c) returns it for every TCG_OPF_FP opcode, so it may
+ * only be set once every opcode the frontend can emit is handled.  The ones
+ * AArch64 has no instruction for -- sin/cos, ld80f/st80f, flcr -- are gated
+ * off in the i386 frontend instead and are never emitted here.
+ */
+#define TCG_TARGET_HAS_fpu              1
+
 #endif

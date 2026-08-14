@@ -39,16 +39,45 @@
  * FP register per block rather than once per operation, which is the point of
  * the native path.  See g_hard_fpu_no_ld80f in translate.c.
  */
-static void glue(gen_ld80f_fp, PREC_SUFFIX)(PREC_TYPE ret, TCGv_ptr src)
+#if defined(XBOX) && defined(__aarch64__)
+/*
+ * Scratch for the conversion, allocated once per translation block.
+ *
+ * tcg_temp_new_i64()/i32() produce TEMP_TB temps, which are live for the whole
+ * block and are never returned to the free list, so allocating one per
+ * conversion exhausts TCG_MAX_TEMPS: a single FP-heavy block was observed
+ * making 155 st80f calls.  The value is written and consumed immediately, so
+ * one scratch per block is enough.  (TEMP_EBB temps would be recycled, but
+ * tcg_temp_ebb_new_* is TCG-internal and no target frontend uses it.)
+ */
+static TCGv_i64 glue(fp_bits64, PREC_SUFFIX)(DisasContext *s)
+{
+    if (s->fp_bits64 == NULL) {
+        s->fp_bits64 = tcg_temp_new_i64();
+    }
+    return s->fp_bits64;
+}
+
+static TCGv_i32 glue(fp_bits32, PREC_SUFFIX)(DisasContext *s)
+{
+    if (s->fp_bits32 == NULL) {
+        s->fp_bits32 = tcg_temp_new_i32();
+    }
+    return s->fp_bits32;
+}
+#endif
+
+static void glue(gen_ld80f_fp, PREC_SUFFIX)(DisasContext *s, PREC_TYPE ret,
+                                            TCGv_ptr src)
 {
 #if defined(XBOX) && defined(__aarch64__)
     if (g_hard_fpu_no_ld80f) {
 #if PREC == 64
-        TCGv_i64 bits = tcg_temp_new_i64();
+        TCGv_i64 bits = glue(fp_bits64, PREC_SUFFIX)(s);
         gen_helper_fx80_to_f64_bits(bits, src);
         tcg_gen_mov64i_f64(ret, bits);
 #else
-        TCGv_i32 bits = tcg_temp_new_i32();
+        TCGv_i32 bits = glue(fp_bits32, PREC_SUFFIX)(s);
         gen_helper_fx80_to_f32_bits(bits, src);
         tcg_gen_mov32i_f32(ret, bits);
 #endif
@@ -58,16 +87,17 @@ static void glue(gen_ld80f_fp, PREC_SUFFIX)(PREC_TYPE ret, TCGv_ptr src)
     glue(tcg_gen_ld80f, PREC_SUFFIX)(ret, src);
 }
 
-static void glue(gen_st80f_fp, PREC_SUFFIX)(PREC_TYPE arg, TCGv_ptr dst)
+static void glue(gen_st80f_fp, PREC_SUFFIX)(DisasContext *s, PREC_TYPE arg,
+                                            TCGv_ptr dst)
 {
 #if defined(XBOX) && defined(__aarch64__)
     if (g_hard_fpu_no_ld80f) {
 #if PREC == 64
-        TCGv_i64 bits = tcg_temp_new_i64();
+        TCGv_i64 bits = glue(fp_bits64, PREC_SUFFIX)(s);
         tcg_gen_mov64f_i64(bits, arg);
         gen_helper_f64_bits_to_fx80(dst, bits);
 #else
-        TCGv_i32 bits = tcg_temp_new_i32();
+        TCGv_i32 bits = glue(fp_bits32, PREC_SUFFIX)(s);
         tcg_gen_mov32f_i32(bits, arg);
         gen_helper_f32_bits_to_fx80(dst, bits);
 #endif
@@ -86,7 +116,7 @@ static PREC_TYPE get_ft0(DisasContext *s)
     if (*v == NULL) {
         *v = tcg_temp_new_fp();
         TCGv_ptr p = gen_ft0_ptr();
-        tcg_gen_ld80f_fp(*v, p);
+        tcg_gen_ld80f_fp(s, *v, p);
     }
 
     return *v;
@@ -102,7 +132,7 @@ static PREC_TYPE get_stn(DisasContext *s, int opreg)
     if (*t == NULL) {
         *t = tcg_temp_new_fp();
         TCGv_ptr p = gen_stn_ptr(opreg);
-        tcg_gen_ld80f_fp(*t, p);
+        tcg_gen_ld80f_fp(s, *t, p);
     }
 
     return *t;
@@ -119,14 +149,14 @@ static void glue(flush_fp_regs, PREC_SUFFIX)(DisasContext *s)
         PREC_TYPE *t = (PREC_TYPE *)&s->fpregs[(s->fpstt_delta + i) & 7];
         if (*t) {
             TCGv_ptr ptr = gen_stn_ptr(i);
-            tcg_gen_st80f_fp(*t, ptr);
+            tcg_gen_st80f_fp(s, *t, ptr);
             *t = NULL;
         }
    }
 
     if (s->ft0) {
         TCGv_ptr ptr = gen_ft0_ptr();
-        tcg_gen_st80f_fp((PREC_TYPE)s->ft0, ptr);
+        tcg_gen_st80f_fp(s, (PREC_TYPE)s->ft0, ptr);
         s->ft0 = NULL;
     }
 }
