@@ -661,25 +661,46 @@ typedef enum {
      * rm=2 and subtract the register fields.
      */
 
+    /*
+     * Single- and double-precision forms differ only in the type field
+     * (bits 22-23): the S form is the D form minus 0x400000.
+     */
+
     /* Floating-point data-processing (1 source): Rd, Rn */
-    I3701_FMOV      = 0x1e604000,
-    I3701_FABS      = 0x1e60c000,
-    I3701_FNEG      = 0x1e614000,
-    I3701_FSQRT     = 0x1e61c000,
+    I3701_FMOVD     = 0x1e604000,
+    I3701_FMOVS     = 0x1e204000,
+    I3701_FABSD     = 0x1e60c000,
+    I3701_FABSS     = 0x1e20c000,
+    I3701_FNEGD     = 0x1e614000,
+    I3701_FNEGS     = 0x1e214000,
+    I3701_FSQRTD    = 0x1e61c000,
+    I3701_FSQRTS    = 0x1e21c000,
     I3701_FCVT_SD   = 0x1e624000, /* FCVT Sd, Dn -- double to single */
     I3701_FCVT_DS   = 0x1e22c000, /* FCVT Dd, Sn -- single to double */
     /* Conversion between FP and integer: same Rd, Rn field layout */
-    I3701_SCVTF_W   = 0x1e620000, /* SCVTF Dd, Wn */
-    I3701_SCVTF_X   = 0x9e620000, /* SCVTF Dd, Xn */
+    I3701_SCVTFD_W  = 0x1e620000, /* SCVTF Dd, Wn */
+    I3701_SCVTFD_X  = 0x9e620000, /* SCVTF Dd, Xn */
+    I3701_SCVTFS_W  = 0x1e220000, /* SCVTF Sd, Wn */
+    I3701_SCVTFS_X  = 0x9e220000, /* SCVTF Sd, Xn */
+    /* FMOV between FP and general registers: bit-for-bit reinterpret */
+    I3701_FMOV_DX   = 0x9e670000, /* FMOV Dd, Xn */
+    I3701_FMOV_XD   = 0x9e660000, /* FMOV Xd, Dn */
+    I3701_FMOV_SW   = 0x1e270000, /* FMOV Sd, Wn */
+    I3701_FMOV_WS   = 0x1e260000, /* FMOV Wd, Sn */
 
     /* Floating-point data-processing (2 source): Rd, Rn, Rm */
-    I3702_FMUL      = 0x1e600800,
-    I3702_FDIV      = 0x1e601800,
-    I3702_FADD      = 0x1e602800,
-    I3702_FSUB      = 0x1e603800,
+    I3702_FMULD     = 0x1e600800,
+    I3702_FMULS     = 0x1e200800,
+    I3702_FDIVD     = 0x1e601800,
+    I3702_FDIVS     = 0x1e201800,
+    I3702_FADDD     = 0x1e602800,
+    I3702_FADDS     = 0x1e202800,
+    I3702_FSUBD     = 0x1e603800,
+    I3702_FSUBS     = 0x1e203800,
 
     /* Floating-point compare: Rn, Rm, result in NZCV */
-    I3703_FCMP      = 0x1e602000,
+    I3703_FCMPD     = 0x1e602000,
+    I3703_FCMPS     = 0x1e202000,
 } AArch64Insn;
 
 static inline uint32_t tcg_in32(TCGContext *s)
@@ -2969,11 +2990,85 @@ static const TCGOutOpStore outop_st = {
     .out_r = tcg_out_st,
 };
 
+/*
+ * Scalar floating point.  Integer opcodes are all table-driven via all_outop[],
+ * so tcg_out_op() is only reached for the TCG_OPF_FP opcodes (tcg.c dispatches
+ * TCG_OPF_VECTOR to tcg_out_vec_op and everything else here).
+ */
 static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
                               const TCGArg args[TCG_MAX_OP_ARGS],
                               const int const_args[TCG_MAX_OP_ARGS])
 {
-    g_assert_not_reached();
+    TCGArg a0 = args[0], a1 = args[1], a2 = args[2];
+
+    switch (opc) {
+    case INDEX_op_add_f32:
+        tcg_out_insn(s, 3702, FADDS, a0, a1, a2);
+        break;
+    case INDEX_op_add_f64:
+        tcg_out_insn(s, 3702, FADDD, a0, a1, a2);
+        break;
+    case INDEX_op_sub_f32:
+        tcg_out_insn(s, 3702, FSUBS, a0, a1, a2);
+        break;
+    case INDEX_op_sub_f64:
+        tcg_out_insn(s, 3702, FSUBD, a0, a1, a2);
+        break;
+    case INDEX_op_mul_f32:
+        tcg_out_insn(s, 3702, FMULS, a0, a1, a2);
+        break;
+    case INDEX_op_mul_f64:
+        tcg_out_insn(s, 3702, FMULD, a0, a1, a2);
+        break;
+    case INDEX_op_div_f32:
+        tcg_out_insn(s, 3702, FDIVS, a0, a1, a2);
+        break;
+    case INDEX_op_div_f64:
+        tcg_out_insn(s, 3702, FDIVD, a0, a1, a2);
+        break;
+
+    case INDEX_op_abs_f32:
+        tcg_out_insn(s, 3701, FABSS, a0, a1);
+        break;
+    case INDEX_op_abs_f64:
+        tcg_out_insn(s, 3701, FABSD, a0, a1);
+        break;
+    case INDEX_op_chs_f32:
+        tcg_out_insn(s, 3701, FNEGS, a0, a1);
+        break;
+    case INDEX_op_chs_f64:
+        tcg_out_insn(s, 3701, FNEGD, a0, a1);
+        break;
+    case INDEX_op_sqrt_f32:
+        tcg_out_insn(s, 3701, FSQRTS, a0, a1);
+        break;
+    case INDEX_op_sqrt_f64:
+        tcg_out_insn(s, 3701, FSQRTD, a0, a1);
+        break;
+    case INDEX_op_mov_f32:
+        tcg_out_insn(s, 3701, FMOVS, a0, a1);
+        break;
+    case INDEX_op_mov_f64:
+        tcg_out_insn(s, 3701, FMOVD, a0, a1);
+        break;
+
+    /* Bit-for-bit reinterpret between general and FP registers. */
+    case INDEX_op_mov32i_f32:
+        tcg_out_insn(s, 3701, FMOV_SW, a0, a1);
+        break;
+    case INDEX_op_mov64i_f64:
+        tcg_out_insn(s, 3701, FMOV_DX, a0, a1);
+        break;
+    case INDEX_op_mov32f_i32:
+        tcg_out_insn(s, 3701, FMOV_WS, a0, a1);
+        break;
+    case INDEX_op_mov64f_i64:
+        tcg_out_insn(s, 3701, FMOV_XD, a0, a1);
+        break;
+
+    default:
+        g_assert_not_reached();
+    }
 }
 
 static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
@@ -3463,6 +3558,37 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O1_I3(w, w, w, w);
     case INDEX_op_aa64_sli_vec:
         return C_O1_I2(w, 0, w);
+
+    /*
+     * Scalar floating point.  F32/F64 allocate from the vector registers, so
+     * they reuse the 'w' constraint.  Both precisions must be handled: the
+     * frontend picks _f32 or _f64 per fp_pc_wrapper() based on the guest's
+     * FPU precision control, so either can appear at runtime.
+     */
+    case INDEX_op_add_f32:
+    case INDEX_op_add_f64:
+    case INDEX_op_sub_f32:
+    case INDEX_op_sub_f64:
+    case INDEX_op_mul_f32:
+    case INDEX_op_mul_f64:
+    case INDEX_op_div_f32:
+    case INDEX_op_div_f64:
+        return C_O1_I2(w, w, w);
+    case INDEX_op_abs_f32:
+    case INDEX_op_abs_f64:
+    case INDEX_op_chs_f32:
+    case INDEX_op_chs_f64:
+    case INDEX_op_sqrt_f32:
+    case INDEX_op_sqrt_f64:
+    case INDEX_op_mov_f32:
+    case INDEX_op_mov_f64:
+        return C_O1_I1(w, w);
+    case INDEX_op_mov32i_f32:
+    case INDEX_op_mov64i_f64:
+        return C_O1_I1(w, r);
+    case INDEX_op_mov32f_i32:
+    case INDEX_op_mov64f_i64:
+        return C_O1_I1(r, w);
 
     default:
         return C_NotImplemented;
