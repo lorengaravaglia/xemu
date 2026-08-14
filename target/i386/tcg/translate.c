@@ -38,6 +38,20 @@
 static int g_use_hard_fpu;
 static int g_hard_fpu_helper_only; /* AArch64: use __hard helpers, skip native TCG float ops */
 
+/*
+ * Per-operation opt-out from the native TCG float path, for operations the
+ * host has no instruction for.  x86 implements fsin/fcos in hardware; AArch64
+ * has nothing equivalent, so those two keep using the softfloat helpers even
+ * when the rest of x87 is running natively.
+ *
+ * This is separate from g_hard_fpu_helper_only because that flag is
+ * all-or-nothing: TCG_TARGET_HAS_fpu (tcg.c) gates every TCG_OPF_FP opcode
+ * together, so a backend that implements most of them still cannot advertise
+ * partial support.  Gating in the frontend instead means the unimplementable
+ * opcodes are simply never emitted.
+ */
+static int g_hard_fpu_no_trig;
+
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
 #include "ui/xemu-settings.h"
 #define MAP_GEN_HELPER_SOFT_HARD(name) \
@@ -1738,6 +1752,16 @@ static void gen_flush_fp(DisasContext *s)
             return; \
         }} while(0)
 
+/*
+ * As above, but also falls back when the host lacks an instruction for the
+ * transcendentals.  See g_hard_fpu_no_trig.
+ */
+#define GEN_HELPER_FALLBACK_TRIG_v_v(func) do { \
+        if (!g_use_hard_fpu || g_hard_fpu_helper_only || g_hard_fpu_no_trig) { \
+            gen_helper_ ## func(tcg_env); \
+            return; \
+        }} while(0)
+
 #define GEN_HELPER_FALLBACK_v_i(func, arg) do { \
         if (!g_use_hard_fpu || g_hard_fpu_helper_only) { \
             gen_helper_ ## func(tcg_env, tcg_constant_i32(arg)); \
@@ -1927,14 +1951,14 @@ static void gen_clear_fpus_c2(DisasContext *s)
 
 static void gen_fsin(DisasContext *s)
 {
-    GEN_HELPER_FALLBACK_v_v(fsin);
+    GEN_HELPER_FALLBACK_TRIG_v_v(fsin);
     fp_pc_wrapper(gen_fsin)(s);
     gen_clear_fpus_c2(s); /* FIXME: Does not check range correctly */
 }
 
 static void gen_fcos(DisasContext *s)
 {
-    GEN_HELPER_FALLBACK_v_v(fcos);
+    GEN_HELPER_FALLBACK_TRIG_v_v(fcos);
     fp_pc_wrapper(gen_fcos)(s);
     gen_clear_fpus_c2(s); /* FIXME: Does not check range correctly */
 }
@@ -4232,6 +4256,8 @@ void tcg_x86_init(void)
     g_use_hard_fpu = g_config.perf.hard_fpu;
 #if defined(__aarch64__)
     g_hard_fpu_helper_only = 1;
+    /* No fsin/fcos instruction on AArch64; those keep the softfloat helpers. */
+    g_hard_fpu_no_trig = 1;
 #endif
 #endif
 }
