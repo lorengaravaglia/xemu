@@ -55,7 +55,8 @@ def parse_encodings():
     enc = {}
     with open(SRC) as f:
         for line in f:
-            m = re.match(r'\s+(I370[123]_[A-Z0-9_]+)\s*=\s*(0x[0-9a-f]+),', line)
+            m = re.match(r'\s+(I(?:370[123]|3506|3510)_[A-Z0-9_]+)\s*='
+                         r'\s*(0x[0-9a-f]+),', line)
             if m:
                 enc[m.group(1)] = int(m.group(2), 16)
     if not enc:
@@ -113,7 +114,42 @@ def build_cases(enc):
         (e3("I3703_FCMPD", V31, V31), "fcmp d31, d31"),
         (e3("I3703_FCMPS", V0, V1), "fcmp s0, s1"),
     ]
+    cases += com_sequence(enc)
     return cases
+
+
+# Raw AArch64 condition codes, mirroring the AA64_COND_* defines in the
+# backend.  CSET Xd, cond is CSINC Xd, XZR, XZR, invert(cond); inverting is a
+# XOR of the low bit for every condition except AL/NV.
+COND_EQ, COND_VS, COND_LT = 0x0, 0x6, 0xb
+XZR = 31
+
+
+def com_sequence(enc):
+    """
+    Reproduce the instruction sequence tcg_out_op() emits for com_f32/f64 and
+    check each piece disassembles as intended.  This is the only multi-
+    instruction FP sequence in the backend and the easiest to get wrong: it
+    has to synthesise the x86 EFLAGS layout (CF@0, PF@2, ZF@6) out of the
+    AArch64 NZCV flags.
+    """
+    def cset(rd, cond):
+        return (enc["I3506_CSINC"] | 1 << 31 | XZR << 16 | XZR << 5
+                | rd | (cond ^ 1) << 12)
+
+    def orr_lsl(rd, rn, rm, shift):
+        return (enc["I3510_ORR"] | 1 << 31 | rm << 16 | shift << 10
+                | rn << 5 | rd)
+
+    A0, TMP0, TMP1 = 0, 16, 17   # a0 = x0, TCG_REG_TMP0/1 = x16/x17
+    return [
+        (cset(A0, COND_LT), "cset x0, lt"),
+        (cset(TMP0, COND_VS), "cset x16, vs"),
+        (cset(TMP1, COND_EQ), "cset x17, eq"),
+        (orr_lsl(A0, A0, TMP0, 2), "orr x0, x0, x16, lsl #2"),
+        (orr_lsl(TMP1, TMP1, TMP0, 0), "orr x17, x17, x16"),
+        (orr_lsl(A0, A0, TMP1, 6), "orr x0, x0, x17, lsl #6"),
+    ]
 
 
 def disassemble(cc, objdump, words):

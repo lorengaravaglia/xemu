@@ -946,6 +946,34 @@ static void tcg_out_insn_3703(TCGContext *s, AArch64Insn insn,
     tcg_out32(s, insn | (rm & 0x1f) << 16 | (rn & 0x1f) << 5);
 }
 
+/*
+ * Raw AArch64 condition codes.  The FP compare below needs VS (unordered),
+ * which has no TCGCond equivalent, so it cannot go through the
+ * tcg_cond_to_aarch64[] mapping used by tcg_out_insn_3506().
+ */
+#define AA64_COND_EQ  0x0
+#define AA64_COND_VS  0x6
+#define AA64_COND_LT  0xb
+
+/*
+ * CSET Xd, cond -- the architectural alias of CSINC Xd, XZR, XZR,
+ * invert(cond).  Inverting a condition is a XOR of its low bit for everything
+ * except AL/NV, which are never passed here.
+ */
+static void tcg_out_cset(TCGContext *s, TCGReg rd, unsigned cond)
+{
+    tcg_out32(s, I3506_CSINC | 1u << 31 | TCG_REG_XZR << 16
+              | TCG_REG_XZR << 5 | rd | (cond ^ 1) << 12);
+}
+
+/* ORR Xd, Xn, Xm, LSL #shift */
+static void tcg_out_orr_lsl(TCGContext *s, TCGReg rd, TCGReg rn,
+                            TCGReg rm, unsigned shift)
+{
+    tcg_out32(s, I3510_ORR | 1u << 31 | rm << 16 | shift << 10
+              | rn << 5 | rd);
+}
+
 static void tcg_out_insn_3617(TCGContext *s, AArch64Insn insn, bool q,
                               unsigned size, TCGReg rd, TCGReg rn)
 {
@@ -3066,6 +3094,65 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_insn(s, 3701, FMOV_XD, a0, a1);
         break;
 
+    /* Precision conversions. */
+    case INDEX_op_cvt32f_f64:
+        tcg_out_insn(s, 3701, FCVT_DS, a0, a1);
+        break;
+    case INDEX_op_cvt64f_f32:
+        tcg_out_insn(s, 3701, FCVT_SD, a0, a1);
+        break;
+
+    /* Signed integer to floating point. */
+    case INDEX_op_cvt32i_f32:
+        tcg_out_insn(s, 3701, SCVTFS_W, a0, a1);
+        break;
+    case INDEX_op_cvt32i_f64:
+        tcg_out_insn(s, 3701, SCVTFD_W, a0, a1);
+        break;
+    case INDEX_op_cvt64i_f32:
+        tcg_out_insn(s, 3701, SCVTFS_X, a0, a1);
+        break;
+    case INDEX_op_cvt64i_f64:
+        tcg_out_insn(s, 3701, SCVTFD_X, a0, a1);
+        break;
+
+    case INDEX_op_com_f32:
+    case INDEX_op_com_f64:
+        /*
+         * Must produce a value in x86 EFLAGS layout -- CF at bit 0, PF at
+         * bit 2, ZF at bit 6 -- with COMISS/COMISD semantics, because
+         * gen_fcom() (target/i386/ops_fpu.h) masks the result with 0x45 and
+         * shifts it left by 8 into the x87 status word's C0/C2/C3.  i386 gets
+         * this for free: COMISD followed by PUSHF/POP.
+         *
+         *   relation     ZF PF CF   masked
+         *   a1 > a2       0  0  0    0x00
+         *   a1 < a2       0  0  1    0x01
+         *   a1 = a2       1  0  0    0x40
+         *   unordered     1  1  1    0x45
+         *
+         * AArch64 FCMP sets NZCV instead, from which:
+         *   CF = less or unordered   -> condition LT
+         *   PF = unordered           -> condition VS
+         *   ZF = equal or unordered  -> EQ || VS, which is not expressible as
+         *                               any single AArch64 condition
+         *
+         * TMP0/TMP1 are in s->reserved_regs, so they cannot alias a0.
+         */
+        if (opc == INDEX_op_com_f64) {
+            tcg_out_insn(s, 3703, FCMPD, a1, a2);
+        } else {
+            tcg_out_insn(s, 3703, FCMPS, a1, a2);
+        }
+        tcg_out_cset(s, a0, AA64_COND_LT);              /* CF -> bit 0 */
+        tcg_out_cset(s, TCG_REG_TMP0, AA64_COND_VS);    /* unordered */
+        tcg_out_cset(s, TCG_REG_TMP1, AA64_COND_EQ);    /* equal */
+        tcg_out_orr_lsl(s, a0, a0, TCG_REG_TMP0, 2);    /* PF -> bit 2 */
+        /* ZF = equal | unordered */
+        tcg_out_orr_lsl(s, TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP0, 0);
+        tcg_out_orr_lsl(s, a0, a0, TCG_REG_TMP1, 6);    /* ZF -> bit 6 */
+        break;
+
     default:
         g_assert_not_reached();
     }
@@ -3589,6 +3676,17 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_mov32f_i32:
     case INDEX_op_mov64f_i64:
         return C_O1_I1(r, w);
+    case INDEX_op_cvt32f_f64:
+    case INDEX_op_cvt64f_f32:
+        return C_O1_I1(w, w);
+    case INDEX_op_cvt32i_f32:
+    case INDEX_op_cvt32i_f64:
+    case INDEX_op_cvt64i_f32:
+    case INDEX_op_cvt64i_f64:
+        return C_O1_I1(w, r);
+    case INDEX_op_com_f32:
+    case INDEX_op_com_f64:
+        return C_O1_I2(r, w, w);
 
     default:
         return C_NotImplemented;
