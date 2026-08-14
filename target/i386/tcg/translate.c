@@ -62,6 +62,28 @@ static int g_hard_fpu_no_trig;
  */
 static int g_hard_fpu_no_ld80f;
 
+/*
+ * And for flcr, which pushes the guest's rounding mode into the host FP
+ * control register.  The value gen_flcr() builds is an x86 MXCSR word (x87 RC
+ * shifted to MXCSR bits 13-14, ORed with the 0x1f80 default), so i386 just
+ * emits LDMXCSR.  AArch64's equivalent is FPCR, whose RMode field is at bits
+ * 22-23 and encodes the two directed roundings the other way round: x86 01 is
+ * toward -inf and 10 toward +inf, ARM 01 is toward +inf and 10 toward -inf.
+ *
+ * Skipping it leaves guest rounding-mode changes unhonoured, which is exactly
+ * what happens today: fpu_helper.c documents rounding-mode sync as unhandled,
+ * and the __hard helpers do all their arithmetic in whatever mode the host
+ * thread happens to be in.  So this is not a regression.
+ *
+ * Doing it properly is a read-modify-write of FPCR (MRS, BFI the remapped
+ * RMode into bits 22-23, MSR) -- but note that FPCR is per-thread state shared
+ * with every other user of FP in the vCPU thread, so a TB that changes it also
+ * changes the rounding mode seen by QEMU's own C code until something sets it
+ * back.  x86 has the same hazard with MXCSR.  Worth fixing deliberately with a
+ * test, not as a side effect of enabling the native path.
+ */
+static int g_hard_fpu_no_flcr;
+
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
 #include "ui/xemu-settings.h"
 #define MAP_GEN_HELPER_SOFT_HARD(name) \
@@ -1677,6 +1699,13 @@ static void gen_flcr(DisasContext *s)
     if (s->flcr_set) {
         return;
     }
+
+#if defined(XBOX) && defined(__aarch64__)
+    if (g_hard_fpu_no_flcr) {
+        s->flcr_set = true;
+        return;
+    }
+#endif
 
     TCGv_i32 v = tcg_temp_new_i32();
     tcg_gen_ld16u_i32(v, tcg_env, offsetof(CPUX86State, fpuc));
@@ -4270,6 +4299,8 @@ void tcg_x86_init(void)
     g_hard_fpu_no_trig = 1;
     /* No 80-bit FP format either; ld80f/st80f go through helpers. */
     g_hard_fpu_no_ld80f = 1;
+    /* Guest rounding mode is not propagated to FPCR; see above. */
+    g_hard_fpu_no_flcr = 1;
 #endif
 #endif
 }
