@@ -52,6 +52,16 @@ static int g_hard_fpu_helper_only; /* AArch64: use __hard helpers, skip native T
  */
 static int g_hard_fpu_no_trig;
 
+/*
+ * Same idea for ld80f/st80f, which move guest x87 registers between their
+ * 80-bit in-memory form and an FP register.  x86 gets these from hardware
+ * (FLD/FSTP m80fp).  AArch64 has no 80-bit format, and a TCG backend cannot
+ * emit an ordinary call from tcg_out_op() because the register allocator has
+ * no way to learn about the clobbers -- so the frontend calls a conversion
+ * helper instead.  See gen_ld80f_fp()/gen_st80f_fp() in ops_fpu.h.
+ */
+static int g_hard_fpu_no_ld80f;
+
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
 #include "ui/xemu-settings.h"
 #define MAP_GEN_HELPER_SOFT_HARD(name) \
@@ -4258,6 +4268,8 @@ void tcg_x86_init(void)
     g_hard_fpu_helper_only = 1;
     /* No fsin/fcos instruction on AArch64; those keep the softfloat helpers. */
     g_hard_fpu_no_trig = 1;
+    /* No 80-bit FP format either; ld80f/st80f go through helpers. */
+    g_hard_fpu_no_ld80f = 1;
 #endif
 #endif
 }

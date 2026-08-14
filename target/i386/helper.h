@@ -120,6 +120,18 @@ DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
 	DEF_HELPER_3(name, ret, t1, t2, t3)
 #endif
 
+#if defined(XBOX) && defined(__aarch64__)
+/*
+ * 80-bit <-> IEEE bit-pattern conversion, for hosts whose TCG backend has no
+ * ld80f/st80f.  NO_RWG: these touch only the memory at the given pointer,
+ * which is not a TCG global (fpstt is, but is not accessed here).
+ */
+DEF_HELPER_FLAGS_1(fx80_to_f64_bits, TCG_CALL_NO_RWG, i64, ptr)
+DEF_HELPER_FLAGS_2(f64_bits_to_fx80, TCG_CALL_NO_RWG, void, ptr, i64)
+DEF_HELPER_FLAGS_1(fx80_to_f32_bits, TCG_CALL_NO_RWG, i32, ptr)
+DEF_HELPER_FLAGS_2(f32_bits_to_fx80, TCG_CALL_NO_RWG, void, ptr, i32)
+#endif
+
 HS_DEF_HELPER_2(flds_FT0, void, env, i32)
 HS_DEF_HELPER_2(fldl_FT0, void, env, i64)
 HS_DEF_HELPER_2(fildl_FT0, void, env, s32)

@@ -235,6 +235,70 @@ static inline floatx80 d_to_fx80(double d)
     return r;
 }
 
+/*
+ * 80-bit <-> IEEE bit-pattern conversion for hosts whose TCG backend cannot
+ * implement the ld80f/st80f opcodes.
+ *
+ * x86 gets those opcodes free from hardware (FLD m80fp / FSTP m80fp).  AArch64
+ * has no 80-bit format at all, and a TCG backend cannot emit an ordinary call
+ * from tcg_out_op() because the register allocator would not know about the
+ * clobbers.  So on such hosts the frontend calls these helpers instead and
+ * moves the resulting bit pattern into an FP register with mov64i_f64 /
+ * mov32i_f32.  See g_hard_fpu_no_ld80f in translate.c.
+ *
+ * The pointer refers to a 10-byte x87 value in memory: 64-bit mantissa at
+ * offset 0, then the 16-bit sign/exponent word.  That matches the layout of
+ * floatx80 {uint64_t low; uint16_t high;}, but the struct is padded, so the
+ * fields are copied individually rather than as one struct.
+ */
+static inline floatx80 fx80_load(const void *ptr)
+{
+    floatx80 a;
+    memcpy(&a.low, ptr, sizeof(a.low));
+    memcpy(&a.high, (const uint8_t *)ptr + 8, sizeof(a.high));
+    return a;
+}
+
+static inline void fx80_store(void *ptr, floatx80 a)
+{
+    memcpy(ptr, &a.low, sizeof(a.low));
+    memcpy((uint8_t *)ptr + 8, &a.high, sizeof(a.high));
+}
+
+uint64_t helper_fx80_to_f64_bits(void *ptr)
+{
+    double d = fx80_to_d(fx80_load(ptr));
+    uint64_t bits;
+
+    memcpy(&bits, &d, sizeof(bits));
+    return bits;
+}
+
+void helper_f64_bits_to_fx80(void *ptr, uint64_t bits)
+{
+    double d;
+
+    memcpy(&d, &bits, sizeof(d));
+    fx80_store(ptr, d_to_fx80(d));
+}
+
+uint32_t helper_fx80_to_f32_bits(void *ptr)
+{
+    float f = (float)fx80_to_d(fx80_load(ptr));
+    uint32_t bits;
+
+    memcpy(&bits, &f, sizeof(bits));
+    return bits;
+}
+
+void helper_f32_bits_to_fx80(void *ptr, uint32_t bits)
+{
+    float f;
+
+    memcpy(&f, &bits, sizeof(f));
+    fx80_store(ptr, d_to_fx80((double)f));
+}
+
 static inline floatx80
 floatx80_add__hard(floatx80 a, floatx80 b, float_status *status)
 { return d_to_fx80(fx80_to_d(a) + fx80_to_d(b)); }

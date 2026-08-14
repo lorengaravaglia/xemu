@@ -22,11 +22,60 @@
 #define PREC_SUFFIX glue(_, fPREC)
 #define PREC_TYPE glue(TCGv_, fPREC)
 #define tcg_temp_new_fp glue(tcg_temp_new_, fPREC)
-#define tcg_gen_st80f_fp glue(tcg_gen_st80f, PREC_SUFFIX)
-#define tcg_gen_ld80f_fp glue(tcg_gen_ld80f, PREC_SUFFIX)
+#define tcg_gen_st80f_fp glue(gen_st80f_fp, PREC_SUFFIX)
+#define tcg_gen_ld80f_fp glue(gen_ld80f_fp, PREC_SUFFIX)
 #define get_ft0 glue(get_ft0, PREC_SUFFIX)
 #define get_stn glue(get_stn, PREC_SUFFIX)
 #define get_st0 glue(get_st0, PREC_SUFFIX)
+
+/*
+ * ld80f/st80f dispatch.
+ *
+ * Hosts whose TCG backend implements the opcodes emit them directly.  Hosts
+ * that cannot -- AArch64 has no 80-bit format, and a backend may not emit an
+ * ordinary call from tcg_out_op() because the register allocator would not
+ * know about the clobbers -- instead call a conversion helper and move the
+ * resulting bit pattern into an FP register.  Conversions then happen once per
+ * FP register per block rather than once per operation, which is the point of
+ * the native path.  See g_hard_fpu_no_ld80f in translate.c.
+ */
+static void glue(gen_ld80f_fp, PREC_SUFFIX)(PREC_TYPE ret, TCGv_ptr src)
+{
+#if defined(XBOX) && defined(__aarch64__)
+    if (g_hard_fpu_no_ld80f) {
+#if PREC == 64
+        TCGv_i64 bits = tcg_temp_new_i64();
+        gen_helper_fx80_to_f64_bits(bits, src);
+        tcg_gen_mov64i_f64(ret, bits);
+#else
+        TCGv_i32 bits = tcg_temp_new_i32();
+        gen_helper_fx80_to_f32_bits(bits, src);
+        tcg_gen_mov32i_f32(ret, bits);
+#endif
+        return;
+    }
+#endif
+    glue(tcg_gen_ld80f, PREC_SUFFIX)(ret, src);
+}
+
+static void glue(gen_st80f_fp, PREC_SUFFIX)(PREC_TYPE arg, TCGv_ptr dst)
+{
+#if defined(XBOX) && defined(__aarch64__)
+    if (g_hard_fpu_no_ld80f) {
+#if PREC == 64
+        TCGv_i64 bits = tcg_temp_new_i64();
+        tcg_gen_mov64f_i64(bits, arg);
+        gen_helper_f64_bits_to_fx80(dst, bits);
+#else
+        TCGv_i32 bits = tcg_temp_new_i32();
+        tcg_gen_mov32f_i32(bits, arg);
+        gen_helper_f32_bits_to_fx80(dst, bits);
+#endif
+        return;
+    }
+#endif
+    glue(tcg_gen_st80f, PREC_SUFFIX)(arg, dst);
+}
 
 static PREC_TYPE get_ft0(DisasContext *s)
 {
