@@ -72,6 +72,16 @@ static void glue(gen_ld80f_fp, PREC_SUFFIX)(DisasContext *s, PREC_TYPE ret,
 {
 #if defined(XBOX) && defined(__aarch64__)
     if (g_hard_fpu_no_ld80f) {
+        /*
+         * Suppress the FP spill that tcg_gen_callN() would otherwise emit
+         * before this helper.  These helpers ARE the register load/store
+         * mechanism; flushing the guest FP registers around them spills the
+         * very slot being filled, so get_stn() finds it NULL again on the next
+         * access and re-materialises it -- an unbounded reload/flush cycle
+         * that allocates a fresh temp every time round.
+         */
+        bool saved = s->in_fp_flush;
+        s->in_fp_flush = true;
 #if PREC == 64
         TCGv_i64 bits = glue(fp_bits64, PREC_SUFFIX)(s);
         gen_helper_fx80_to_f64_bits(bits, src);
@@ -81,6 +91,7 @@ static void glue(gen_ld80f_fp, PREC_SUFFIX)(DisasContext *s, PREC_TYPE ret,
         gen_helper_fx80_to_f32_bits(bits, src);
         tcg_gen_mov32i_f32(ret, bits);
 #endif
+        s->in_fp_flush = saved;
         return;
     }
 #endif
@@ -92,6 +103,9 @@ static void glue(gen_st80f_fp, PREC_SUFFIX)(DisasContext *s, PREC_TYPE arg,
 {
 #if defined(XBOX) && defined(__aarch64__)
     if (g_hard_fpu_no_ld80f) {
+        /* See gen_ld80f_fp() above. */
+        bool saved = s->in_fp_flush;
+        s->in_fp_flush = true;
 #if PREC == 64
         TCGv_i64 bits = glue(fp_bits64, PREC_SUFFIX)(s);
         tcg_gen_mov64f_i64(bits, arg);
@@ -101,6 +115,7 @@ static void glue(gen_st80f_fp, PREC_SUFFIX)(DisasContext *s, PREC_TYPE arg,
         tcg_gen_mov32f_i32(bits, arg);
         gen_helper_f32_bits_to_fx80(dst, bits);
 #endif
+        s->in_fp_flush = saved;
         return;
     }
 #endif

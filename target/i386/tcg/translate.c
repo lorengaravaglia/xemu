@@ -4329,6 +4329,11 @@ void tcg_x86_init(void)
      * Translation now succeeds, but a cached TCGv in DisasContext::fpregs[]
      * goes stale and tcg_optimize() faults on it.
      */
+    /*
+     * Native path implemented but NOT enabled.  See project notes: option C
+     * (ld80f/st80f as helper calls) is structurally incompatible with
+     * gen_bb_epilogue() flushing the FP registers before every helper call.
+     */
     g_hard_fpu_helper_only = 1;
     /* No fsin/fcos instruction on AArch64; those keep the softfloat helpers. */
     g_hard_fpu_no_trig = 1;

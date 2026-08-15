@@ -2240,20 +2240,21 @@ TCGv_i64 tcg_temp_ebb_new_i64(void)
 TCGv_f32 tcg_temp_new_f32(void)
 {
     /*
-     * TEMP_TB, matching tcg_temp_new_i32() and the tcg_temp_new_* naming
-     * convention.  This used to pass "false" from when the parameter was a
-     * bool temp_local; after it became a TCGTempKind, false silently meant
-     * TEMP_EBB, so these were recycled at basic-block boundaries.  That breaks
-     * target/i386/ops_fpu.h, which caches the temps in DisasContext::fpregs[]
-     * for the whole translation block.
+     * TEMP_EBB is deliberate, despite the tcg_temp_new_* naming.  These temps
+     * are recycled through the free list at block boundaries, which is exactly
+     * where gen_flush_fp() clears DisasContext::fpregs[].  The two are
+     * coherent: flush spills and drops the cache, the temps go back on the
+     * free list, and the next get_stn() reuses them.  Making these TEMP_TB
+     * breaks that -- every reload allocates a fresh temp and an FP-heavy block
+     * exhausts TCG_MAX_TEMPS.
      */
-    TCGTemp *t = tcg_temp_new_internal(TCG_TYPE_F32, TEMP_TB);
+    TCGTemp *t = tcg_temp_new_internal(TCG_TYPE_F32, TEMP_EBB);
     return temp_tcgv_f32(t);
 }
 
 TCGv_f64 tcg_temp_new_f64(void)
 {
-    TCGTemp *t = tcg_temp_new_internal(TCG_TYPE_F64, TEMP_TB);
+    TCGTemp *t = tcg_temp_new_internal(TCG_TYPE_F64, TEMP_EBB);
     return temp_tcgv_f64(t);
 }
 
