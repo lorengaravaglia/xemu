@@ -682,6 +682,16 @@ typedef enum {
     I3701_SCVTFD_X  = 0x9e620000, /* SCVTF Dd, Xn */
     I3701_SCVTFS_W  = 0x1e220000, /* SCVTF Sd, Wn */
     I3701_SCVTFS_X  = 0x9e220000, /* SCVTF Sd, Xn */
+    /*
+     * Floating point to signed integer.  FCVTNS (round to nearest, ties to
+     * even) rather than FCVTZS: tcg/i386 emits CVTSD2SI, which rounds by the
+     * current MXCSR mode, and since the guest rounding mode is not propagated
+     * (see g_hard_fpu_no_flcr) that is the default, nearest-even.
+     */
+    I3701_FCVTNSD_W = 0x1e600000, /* FCVTNS Wd, Dn */
+    I3701_FCVTNSD_X = 0x9e600000, /* FCVTNS Xd, Dn */
+    I3701_FCVTNSS_W = 0x1e200000, /* FCVTNS Wd, Sn */
+    I3701_FCVTNSS_X = 0x9e200000, /* FCVTNS Xd, Sn */
     /* FMOV between FP and general registers: bit-for-bit reinterpret */
     I3701_FMOV_DX   = 0x9e670000, /* FMOV Dd, Xn */
     I3701_FMOV_XD   = 0x9e660000, /* FMOV Xd, Dn */
@@ -3237,6 +3247,20 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_insn(s, 3701, SCVTFD_X, a0, a1);
         break;
 
+    /* Floating point to signed integer. */
+    case INDEX_op_cvt32f_i32:
+        tcg_out_insn(s, 3701, FCVTNSS_W, a0, a1);
+        break;
+    case INDEX_op_cvt32f_i64:
+        tcg_out_insn(s, 3701, FCVTNSS_X, a0, a1);
+        break;
+    case INDEX_op_cvt64f_i32:
+        tcg_out_insn(s, 3701, FCVTNSD_W, a0, a1);
+        break;
+    case INDEX_op_cvt64f_i64:
+        tcg_out_insn(s, 3701, FCVTNSD_X, a0, a1);
+        break;
+
     case INDEX_op_ld80f_f32:
         tcg_out_ld80f(s, a0, a1, false);
         break;
@@ -3809,6 +3833,10 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O1_I1(w, r);
     case INDEX_op_mov32f_i32:
     case INDEX_op_mov64f_i64:
+    case INDEX_op_cvt32f_i32:
+    case INDEX_op_cvt32f_i64:
+    case INDEX_op_cvt64f_i32:
+    case INDEX_op_cvt64f_i64:
         return C_O1_I1(r, w);
     case INDEX_op_cvt32f_f64:
     case INDEX_op_cvt64f_f32:
