@@ -293,6 +293,8 @@ typedef struct DisasContext {
      */
     TCGv_i64 fp_bits64;
     TCGv_i32 fp_bits32;
+    /* Guards against gen_flush_fp() re-entering itself; see there. */
+    bool in_fp_flush;
 } DisasContext;
 
 /*
@@ -1785,9 +1787,29 @@ static void gen_mov64i_f64(TCGv_f64 ret, TCGv_i64 arg)
 
 static void gen_flush_fp(DisasContext *s)
 {
+    /*
+     * Re-entrancy guard.  tcg_gen_callN() calls gen_bb_epilogue() -- i.e. this
+     * function -- before every helper call, to spill the guest FP registers.
+     * On hosts where ld80f/st80f are themselves helper calls (see
+     * g_hard_fpu_no_ld80f), the stores this function emits re-enter it, and
+     * each level repeats the gen_stn_ptr() address computation.  It does
+     * terminate, because flush_fp_regs() clears each register as it goes, but
+     * a single FLDZ was measured making 206 gen_stn_ptr() calls and allocating
+     * 475 temps, which blows through TCG_MAX_TEMPS and aborts translation.
+     *
+     * The nested flush has nothing to do anyway: the outer call is already
+     * spilling every register.
+     */
+    if (s->in_fp_flush) {
+        return;
+    }
+    s->in_fp_flush = true;
+
     fp_pc_wrapper(flush_fp_regs)(s);
     s->fpstt_delta = 0;
     s->flcr_set = false;
+
+    s->in_fp_flush = false;
 }
 
 /*
@@ -4302,6 +4324,11 @@ void tcg_x86_init(void)
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
     g_use_hard_fpu = g_config.perf.hard_fpu;
 #if defined(__aarch64__)
+    /*
+     * Native path implemented but not yet enabled: generated code faults
+     * (SIGSEGV in the vCPU thread).  The translation-time blocker is fixed;
+     * what remains is a miscompile.
+     */
     g_hard_fpu_helper_only = 1;
     /* No fsin/fcos instruction on AArch64; those keep the softfloat helpers. */
     g_hard_fpu_no_trig = 1;
@@ -4374,6 +4401,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->flcr_set = false;
     dc->fp_bits64 = NULL;
     dc->fp_bits32 = NULL;
+    dc->in_fp_flush = false;
 }
 
 static void i386_tr_tb_start(DisasContextBase *db, CPUState *cpu)
