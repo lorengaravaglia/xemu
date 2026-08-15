@@ -2239,13 +2239,21 @@ TCGv_i64 tcg_temp_ebb_new_i64(void)
 
 TCGv_f32 tcg_temp_new_f32(void)
 {
-    TCGTemp *t = tcg_temp_new_internal(TCG_TYPE_F32, false);
+    /*
+     * TEMP_TB, matching tcg_temp_new_i32() and the tcg_temp_new_* naming
+     * convention.  This used to pass "false" from when the parameter was a
+     * bool temp_local; after it became a TCGTempKind, false silently meant
+     * TEMP_EBB, so these were recycled at basic-block boundaries.  That breaks
+     * target/i386/ops_fpu.h, which caches the temps in DisasContext::fpregs[]
+     * for the whole translation block.
+     */
+    TCGTemp *t = tcg_temp_new_internal(TCG_TYPE_F32, TEMP_TB);
     return temp_tcgv_f32(t);
 }
 
 TCGv_f64 tcg_temp_new_f64(void)
 {
-    TCGTemp *t = tcg_temp_new_internal(TCG_TYPE_F64, false);
+    TCGTemp *t = tcg_temp_new_internal(TCG_TYPE_F64, TEMP_TB);
     return temp_tcgv_f64(t);
 }
 

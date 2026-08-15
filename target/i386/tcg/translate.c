@@ -4325,9 +4325,9 @@ void tcg_x86_init(void)
     g_use_hard_fpu = g_config.perf.hard_fpu;
 #if defined(__aarch64__)
     /*
-     * Native path implemented but not yet enabled: generated code faults
-     * (SIGSEGV in the vCPU thread).  The translation-time blocker is fixed;
-     * what remains is a miscompile.
+     * Native path implemented but not yet enabled; see project notes.
+     * Translation now succeeds, but a cached TCGv in DisasContext::fpregs[]
+     * goes stale and tcg_optimize() faults on it.
      */
     g_hard_fpu_helper_only = 1;
     /* No fsin/fcos instruction on AArch64; those keep the softfloat helpers. */
