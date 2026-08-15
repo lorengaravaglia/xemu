@@ -4330,10 +4330,11 @@ void tcg_x86_init(void)
      * goes stale and tcg_optimize() faults on it.
      */
     /*
-     * Native path NOT yet enabled.  Option A removed the temp exhaustion
-     * entirely, but translation now faults in liveness_pass_1.
+     * Native TCG float path.  The AArch64 backend implements every FP opcode
+     * the frontend emits; the three it cannot (fsin/fcos, and flcr) are gated
+     * off individually below and keep using the softfloat helpers.
      */
-    g_hard_fpu_helper_only = 1;
+    g_hard_fpu_helper_only = 0;
     /* No fsin/fcos instruction on AArch64; those keep the softfloat helpers. */
     g_hard_fpu_no_trig = 1;
     /* ld80f/st80f are synthesised inline by the AArch64 backend. */
