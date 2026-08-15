@@ -218,6 +218,15 @@ typedef struct TextureBinding {
     VmaAllocation allocation;
     VkSampler sampler;
     bool possibly_dirty;
+    /*
+     * VRAM range accumulated since the last content hash, so only the pages
+     * the guest actually wrote need re-hashing.  Inclusive; empty when
+     * dirty_start > dirty_end.  Set to the full range to force a full rehash.
+     */
+    hwaddr dirty_start, dirty_end;
+    /* Hash per page of the texture, indexed from its page-aligned base. */
+    uint64_t *page_hashes;
+    unsigned int n_page_hashes;
     uint64_t hash;
     unsigned int draw_time;
     uint32_t submit_time;

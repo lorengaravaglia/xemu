@@ -409,10 +409,11 @@ static void mark_textures_possibly_dirty_visitor(Lru *lru, LruNode *node, void *
     struct pgraph_texture_possibly_dirty_struct *test = opaque;
 
     TextureBinding *tnode = container_of(node, TextureBinding, node);
-    if (tnode->possibly_dirty) {
-        return;
-    }
-
+    /*
+     * No early-out on tnode->possibly_dirty: the dirtied range still has to be
+     * accumulated, or a second write to a different part of the texture would
+     * be missed and the texture would stop updating.
+     */
     uintptr_t k_tex_addr = tnode->key.texture_vram_offset;
     uintptr_t k_tex_end = k_tex_addr + tnode->key.texture_length - 1;
     bool overlapping = !(test->addr > k_tex_end || k_tex_addr > test->end);
@@ -423,7 +424,16 @@ static void mark_textures_possibly_dirty_visitor(Lru *lru, LruNode *node, void *
         overlapping |= !(test->addr > k_pal_end || k_pal_addr > test->end);
     }
 
-    tnode->possibly_dirty |= overlapping;
+    if (overlapping) {
+        tnode->possibly_dirty = true;
+        if (tnode->dirty_start > tnode->dirty_end) {
+            tnode->dirty_start = test->addr;
+            tnode->dirty_end = test->end;
+        } else {
+            tnode->dirty_start = MIN(tnode->dirty_start, test->addr);
+            tnode->dirty_end = MAX(tnode->dirty_end, test->end);
+        }
+    }
 }
 
 void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
@@ -443,13 +453,39 @@ void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
                      &test);
 }
 
-static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size)
+/*
+ * Test and clear the NV2A texture dirty bits, reporting the range of pages that
+ * were actually dirty rather than just whether any were.
+ *
+ * The caller propagates that range to every cached texture overlapping it.
+ * Propagating the whole texture range instead -- which is what this used to do
+ * -- destroys the information and forces every overlapping texture to re-hash
+ * in full, which measured at ~1.6 GB/s of hashing that almost always concluded
+ * the contents were unchanged.
+ */
+static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size,
+                                hwaddr *dirty_start, hwaddr *dirty_end)
 {
     hwaddr end = TARGET_PAGE_ALIGN(addr + size);
-    addr &= TARGET_PAGE_MASK;
+    hwaddr page = addr & TARGET_PAGE_MASK;
+    bool any = false;
+
     assert(end < memory_region_size(d->vram));
-    return memory_region_test_and_clear_dirty(d->vram, addr, end - addr,
-                                              DIRTY_MEMORY_NV2A_TEX);
+
+    *dirty_start = ~(hwaddr)0;
+    *dirty_end = 0;
+
+    for (; page < end; page += TARGET_PAGE_SIZE) {
+        if (memory_region_test_and_clear_dirty(d->vram, page, TARGET_PAGE_SIZE,
+                                               DIRTY_MEMORY_NV2A_TEX)) {
+            if (!any) {
+                *dirty_start = page;
+            }
+            *dirty_end = page + TARGET_PAGE_SIZE - 1;
+            any = true;
+        }
+    }
+    return any;
 }
 
 // Check if any of the pages spanned by the a texture are dirty.
@@ -460,17 +496,70 @@ static bool check_texture_possibly_dirty(NV2AState *d,
                                          unsigned int palette_length)
 {
     bool possibly_dirty = false;
-    if (check_texture_dirty(d, texture_vram_offset, length)) {
+    hwaddr ds, de;
+
+    if (check_texture_dirty(d, texture_vram_offset, length, &ds, &de)) {
         possibly_dirty = true;
-        pgraph_vk_mark_textures_possibly_dirty(d, texture_vram_offset, length);
+        pgraph_vk_mark_textures_possibly_dirty(d, ds, de - ds + 1);
     }
-    if (palette_length && check_texture_dirty(d, palette_vram_offset,
-                                                     palette_length)) {
+    if (palette_length &&
+        check_texture_dirty(d, palette_vram_offset, palette_length, &ds, &de)) {
         possibly_dirty = true;
-        pgraph_vk_mark_textures_possibly_dirty(d, palette_vram_offset,
-                                            palette_length);
+        pgraph_vk_mark_textures_possibly_dirty(d, ds, de - ds + 1);
     }
     return possibly_dirty;
+}
+
+/*
+ * Hash the texture contents, re-hashing only the pages covered by the range
+ * accumulated in the binding since the last hash.  Falls back to hashing
+ * everything when that range cannot be trusted: a fresh or recycled cache
+ * node, or a change in page count.
+ */
+static uint64_t texture_content_hash(TextureBinding *binding, hwaddr base,
+                                     const void *data, unsigned int length,
+                                     bool rehash_all)
+{
+    unsigned int n_pages = DIV_ROUND_UP(length, TARGET_PAGE_SIZE);
+    unsigned int first = 0, last = n_pages - 1;
+
+    if (binding->n_page_hashes != n_pages || binding->page_hashes == NULL) {
+        g_free(binding->page_hashes);
+        binding->page_hashes = g_new0(uint64_t, n_pages);
+        binding->n_page_hashes = n_pages;
+        rehash_all = true;
+    }
+
+    if (!rehash_all) {
+        hwaddr page_base = base & TARGET_PAGE_MASK;
+
+        if (binding->dirty_start > binding->dirty_end) {
+            return binding->hash;   /* nothing dirty; contents unchanged */
+        }
+        if (binding->dirty_start > page_base) {
+            first = (binding->dirty_start - page_base) / TARGET_PAGE_SIZE;
+        }
+        if (binding->dirty_end < page_base + (hwaddr)n_pages * TARGET_PAGE_SIZE) {
+            last = (binding->dirty_end - page_base) / TARGET_PAGE_SIZE;
+        }
+        if (first >= n_pages) {
+            return binding->hash;
+        }
+        last = MIN(last, n_pages - 1);
+    }
+
+    for (unsigned int i = first; i <= last; i++) {
+        unsigned int off = i * TARGET_PAGE_SIZE;
+        unsigned int len = MIN(TARGET_PAGE_SIZE, length - off);
+        binding->page_hashes[i] = fast_hash((const uint8_t *)data + off, len);
+    }
+
+    /*
+     * Combine by hashing the page-hash array: it is a thousandth the size of
+     * the texture, and unlike XOR it does not cancel between equal pages.
+     */
+    return fast_hash((const uint8_t *)binding->page_hashes,
+                     n_pages * sizeof(uint64_t));
 }
 
 // FIXME: Make sure we update sampler when data matches. Should we add filtering
@@ -1173,8 +1262,11 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     uint64_t content_hash = 0;
     if (!surface_to_texture && possibly_dirty) {
-        content_hash = fast_hash(texture_data, texture_length);
+        content_hash = texture_content_hash(snode, texture_vram_offset,
+                                            texture_data, texture_length,
+                                            !binding_found);
         if (is_indexed) {
+            /* the palette is small; hash it whole */
             content_hash ^= fast_hash(palette_data, texture_palette_data_size);
         }
     }
@@ -1201,6 +1293,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     memcpy(&snode->key, &key, sizeof(key));
     snode->current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     snode->possibly_dirty = false;
+    snode->dirty_start = ~(hwaddr)0;
+    snode->dirty_end = 0;
     snode->hash = content_hash;
 
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
@@ -1452,10 +1546,19 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->allocation = VK_NULL_HANDLE;
     snode->image_view = VK_NULL_HANDLE;
     snode->sampler = VK_NULL_HANDLE;
+    snode->page_hashes = NULL;
+    snode->n_page_hashes = 0;
+    snode->dirty_start = ~(hwaddr)0;
+    snode->dirty_end = 0;
 }
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)
 {
+    /* The per-page hashes describe the evicted texture only. */
+    g_free(snode->page_hashes);
+    snode->page_hashes = NULL;
+    snode->n_page_hashes = 0;
+
     vkDestroySampler(r->device, snode->sampler, NULL);
     snode->sampler = VK_NULL_HANDLE;
 
