@@ -4325,11 +4325,6 @@ void tcg_x86_init(void)
     g_use_hard_fpu = g_config.perf.hard_fpu;
 #if defined(__aarch64__)
     /*
-     * Native path implemented but not yet enabled; see project notes.
-     * Translation now succeeds, but a cached TCGv in DisasContext::fpregs[]
-     * goes stale and tcg_optimize() faults on it.
-     */
-    /*
      * Native TCG float path.  The AArch64 backend implements every FP opcode
      * the frontend emits; the three it cannot (fsin/fcos, and flcr) are gated
      * off individually below and keep using the softfloat helpers.
