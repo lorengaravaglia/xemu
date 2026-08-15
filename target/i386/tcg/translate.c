@@ -4330,15 +4330,14 @@ void tcg_x86_init(void)
      * goes stale and tcg_optimize() faults on it.
      */
     /*
-     * Native path implemented but NOT enabled.  See project notes: option C
-     * (ld80f/st80f as helper calls) is structurally incompatible with
-     * gen_bb_epilogue() flushing the FP registers before every helper call.
+     * Native path NOT yet enabled.  Option A removed the temp exhaustion
+     * entirely, but translation now faults in liveness_pass_1.
      */
     g_hard_fpu_helper_only = 1;
     /* No fsin/fcos instruction on AArch64; those keep the softfloat helpers. */
     g_hard_fpu_no_trig = 1;
-    /* No 80-bit FP format either; ld80f/st80f go through helpers. */
-    g_hard_fpu_no_ld80f = 1;
+    /* ld80f/st80f are synthesised inline by the AArch64 backend. */
+    g_hard_fpu_no_ld80f = 0;
     /* Guest rounding mode is not propagated to FPCR; see above. */
     g_hard_fpu_no_flcr = 1;
 #endif

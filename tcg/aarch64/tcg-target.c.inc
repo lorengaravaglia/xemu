@@ -952,6 +952,7 @@ static void tcg_out_insn_3703(TCGContext *s, AArch64Insn insn,
  * tcg_cond_to_aarch64[] mapping used by tcg_out_insn_3506().
  */
 #define AA64_COND_EQ  0x0
+#define AA64_COND_NE  0x1
 #define AA64_COND_VS  0x6
 #define AA64_COND_LT  0xb
 
@@ -3019,6 +3020,126 @@ static const TCGOutOpStore outop_st = {
 };
 
 /*
+ * ld80f/st80f: convert between the guest's 80-bit x87 format in memory and a
+ * host double, inline.
+ *
+ * x86 gets these from hardware (FLD/FSTP m80fp).  AArch64 has no 80-bit type,
+ * and the conversion must not be a call: tcg_gen_callN() spills the guest FP
+ * registers before every helper, which turns each conversion into a
+ * reload/flush cycle that exhausts TCG_MAX_TEMPS (see project notes).  So it is
+ * synthesised branchlessly here, using only the reserved TMP registers.
+ *
+ * Mirrors fx80_to_d()/d_to_fx80() in target/i386/tcg/fpu_helper.c.  The special
+ * cases fall out of clamping the re-biased exponent: exp80 == 0 gives a
+ * negative exp64 (-> zero) and exp80 == 0x7fff gives exp64 > 0x7ff (-> Inf).
+ * NaN payloads are not preserved, matching the accuracy the __hard path
+ * already documents as approximate.
+ */
+#define FX80_BIAS_DELTA 15360   /* 16383 - 1023 */
+
+static void tcg_out_ld80f(TCGContext *s, TCGReg dst, TCGReg base, bool is_f64)
+{
+    TCGReg mant = TCG_REG_TMP0, exp = TCG_REG_TMP1, sgn = TCG_REG_TMP2;
+
+    /* mant = *(uint64_t *)base;  exp = *(uint16_t *)(base + 8); */
+    tcg_out_ldst(s, I3312_LDRX, mant, base, 0, 3);
+    tcg_out_ldst(s, I3312_LDRH, exp, base, 8, 1);
+
+    /* sgn = (exp & 0x8000) << 48 */
+    tcg_out_ubfm(s, TCG_TYPE_I64, sgn, exp, 64 - 48, 63 - 48);
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, sgn, sgn,
+                     0x8000000000000000ull);
+
+    /* exp &= 0x7fff; exp -= 15360 */
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, exp, exp, 0x7fff);
+    tcg_out_insn(s, 3401, SUBI, TCG_TYPE_I64, exp, exp, 3 << 12);
+    tcg_out_insn(s, 3401, SUBI, TCG_TYPE_I64, exp, exp,
+                 FX80_BIAS_DELTA - (3 << 12));
+
+    /* mant = (mant >> 11) & ((1 << 52) - 1) -- drops the explicit integer bit */
+    tcg_out_ubfm(s, TCG_TYPE_I64, mant, mant, 11, 63);
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, mant, mant,
+                     0x000fffffffffffffull);
+
+    /* normal result = sgn | exp << 52 | mant */
+    tcg_out_orr_lsl(s, mant, mant, exp, 52);
+    tcg_out_orr_lsl(s, mant, mant, sgn, 0);
+
+    /* exp <= 0 -> signed zero */
+    tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_LT, exp, 1, true);
+    tcg_out_insn(s, 3506, CSEL, TCG_TYPE_I64, mant, sgn, mant, TCG_COND_LT);
+
+    /* exp >= 0x7ff -> signed infinity */
+    tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64, sgn, sgn,
+                     0x7ff0000000000000ull);
+    tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_GE, exp, 0x7ff, true);
+    tcg_out_insn(s, 3506, CSEL, TCG_TYPE_I64, mant, sgn, mant, TCG_COND_GE);
+
+    tcg_out_insn(s, 3701, FMOV_DX, dst, mant);
+    if (!is_f64) {
+        tcg_out_insn(s, 3701, FCVT_SD, dst, dst);
+    }
+}
+
+/*
+ * The reverse: host double -> 80-bit in memory.  Also branchless, and also
+ * within the reserved temps; the low word is stored early so its register can
+ * be reused for the high word.  Mirrors d_to_fx80().
+ */
+static void tcg_out_st80f(TCGContext *s, TCGReg src, TCGReg base, bool is_f64)
+{
+    TCGReg lo = TCG_REG_TMP0, exp = TCG_REG_TMP1, t = TCG_REG_TMP2;
+
+    if (!is_f64) {
+        /* widen single to double first; TCG_VEC_TMP0 is reserved */
+        tcg_out_insn(s, 3701, FCVT_DS, TCG_VEC_TMP0, src);
+        src = TCG_VEC_TMP0;
+    }
+
+    tcg_out_insn(s, 3701, FMOV_XD, lo, src);
+
+    /* exp = (bits >> 52) & 0x7ff */
+    tcg_out_ubfm(s, TCG_TYPE_I64, exp, lo, 52, 63);
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, exp, exp, 0x7ff);
+
+    /* lo = (bits & mant_mask) << 11 */
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, lo, lo,
+                     0x000fffffffffffffull);
+    tcg_out_ubfm(s, TCG_TYPE_I64, lo, lo, (64 - 11) & 63, 63 - 11);
+
+    /*
+     * Set the explicit integer bit unless the value is denormal (exp == 0).
+     * d_to_fx80() writes 1<<63 for both Inf/NaN and normals, so the only case
+     * without it is exp == 0.
+     */
+    tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_NE, exp, 0, true);
+    tcg_out_cset(s, t, AA64_COND_NE);
+    tcg_out_orr_lsl(s, lo, lo, t, 63);
+    tcg_out_ldst(s, I3312_STRX, lo, base, 0, 3);
+
+    /* high word: sign, then the re-biased exponent with its two clamps */
+    tcg_out_insn(s, 3701, FMOV_XD, lo, src);
+    tcg_out_ubfm(s, TCG_TYPE_I64, lo, lo, 48, 63);
+    tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, lo, lo, 0x8000);
+
+    tcg_out_insn(s, 3401, ADDI, TCG_TYPE_I64, t, exp, 3 << 12);
+    tcg_out_insn(s, 3401, ADDI, TCG_TYPE_I64, t, t,
+                 FX80_BIAS_DELTA - (3 << 12));
+
+    /* exp == 0 -> exponent field 0 */
+    tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_EQ, exp, 0, true);
+    tcg_out_insn(s, 3506, CSEL, TCG_TYPE_I64, t, TCG_REG_XZR, t, TCG_COND_EQ);
+
+    /* exp == 0x7ff -> exponent field all ones */
+    tcg_out_cmp(s, TCG_TYPE_I64, TCG_COND_EQ, exp, 0x7ff, true);
+    tcg_out_movi(s, TCG_TYPE_I64, exp, 0x7fff);   /* does not clobber flags */
+    tcg_out_insn(s, 3506, CSEL, TCG_TYPE_I64, t, exp, t, TCG_COND_EQ);
+
+    tcg_out_orr_lsl(s, lo, lo, t, 0);
+    tcg_out_ldst(s, I3312_STRH, lo, base, 8, 1);
+}
+
+/*
  * Scalar floating point.  Integer opcodes are all table-driven via all_outop[],
  * so tcg_out_op() is only reached for the TCG_OPF_FP opcodes (tcg.c dispatches
  * TCG_OPF_VECTOR to tcg_out_vec_op and everything else here).
@@ -3114,6 +3235,19 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         break;
     case INDEX_op_cvt64i_f64:
         tcg_out_insn(s, 3701, SCVTFD_X, a0, a1);
+        break;
+
+    case INDEX_op_ld80f_f32:
+        tcg_out_ld80f(s, a0, a1, false);
+        break;
+    case INDEX_op_ld80f_f64:
+        tcg_out_ld80f(s, a0, a1, true);
+        break;
+    case INDEX_op_st80f_f32:
+        tcg_out_st80f(s, a0, a1, false);
+        break;
+    case INDEX_op_st80f_f64:
+        tcg_out_st80f(s, a0, a1, true);
         break;
 
     case INDEX_op_com_f32:
@@ -3687,6 +3821,12 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_com_f32:
     case INDEX_op_com_f64:
         return C_O1_I2(r, w, w);
+    case INDEX_op_ld80f_f32:
+    case INDEX_op_ld80f_f64:
+        return C_O1_I1(w, r);
+    case INDEX_op_st80f_f32:
+    case INDEX_op_st80f_f64:
+        return C_O0_I2(w, r);
 
     default:
         return C_NotImplemented;
