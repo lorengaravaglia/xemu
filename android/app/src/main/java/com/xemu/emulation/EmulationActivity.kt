@@ -41,6 +41,21 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.xemu.MainActivity
 import com.xemu.NativeInterface
 
+/**
+ * How long to wait for a second key before treating a combo-participating
+ * button as a plain press.  Long enough to press both keys of a combo without
+ * leaking the single-key action into the game, short enough not to feel laggy.
+ */
+private const val COMBO_WINDOW_MS = 120L
+
+/**
+ * How long a synthesized tap is held down.  The guest polls the XID gamepad
+ * every 4 ms (bInterval = 4) but game logic samples it once per frame -- ~38 ms
+ * at 26 fps and ~77 ms during a dip -- so a shorter press can fall between two
+ * samples and be missed entirely.
+ */
+private const val TAP_HOLD_MS = 100L
+
 class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
     private lateinit var surfaceView: SurfaceView
@@ -72,6 +87,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private val heldGamepadKeycodes = mutableSetOf<Int>()      // all physically held gamepad keys
     private val pendingGamepadKeycodes = mutableSetOf<Int>()   // held back from emulator (in a combo)
     private val suppressedGamepadKeycodes = mutableSetOf<Int>()// consumed by a fired combo this press
+    private val comboHandler = Handler(Looper.getMainLooper())
+    private val comboPendingDowns = mutableMapOf<Int, Runnable>() // deferred presses, by keycode
+    private val lateSentKeycodes = mutableSetOf<Int>()         // pressed after the combo window
     private var quickSaveSlot = 1                              // 1–8, cycled via hotkey
     private var userPaused = false                             // user explicitly paused in-game
 
@@ -446,8 +464,15 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                         executeHotkeyFunction(fn)
                         // Suppress all combo keycodes (including pending ones)
                         val combo = mapping.hotkeyMappings[fn] ?: emptySet()
+                        combo.forEach { cancelDeferredPress(it) }
                         suppressedGamepadKeycodes.addAll(combo)
                         pendingGamepadKeycodes.removeAll(combo)
+                    } else if (keycode !in comboPendingDowns &&
+                               keycode !in lateSentKeycodes) {
+                        // No combo yet.  Send the press once the combo window
+                        // closes, so holding the button still holds it in-game
+                        // instead of being swallowed until release.
+                        scheduleDeferredPress(keycode, xboxBtn.mask)
                     }
                 } else {
                     // Not in any hotkey — send immediately
@@ -457,23 +482,65 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
             KeyEvent.ACTION_UP -> {
                 heldGamepadKeycodes.remove(keycode)
+                comboPendingDowns.remove(keycode)?.let { comboHandler.removeCallbacks(it) }
 
                 when {
                     keycode in suppressedGamepadKeycodes -> {
                         suppressedGamepadKeycodes.remove(keycode)
-                        // Clean up suppressed set once all combo keys are physically released
+                        // Consumed by a combo.  If the press had already been
+                        // sent before the combo completed, release it.
+                        if (lateSentKeycodes.remove(keycode)) {
+                            InputRecorder.sendButtonUp(xboxBtn.mask)
+                        }
                     }
+                    lateSentKeycodes.remove(keycode) -> InputRecorder.sendButtonUp(xboxBtn.mask)
                     keycode in pendingGamepadKeycodes -> {
                         pendingGamepadKeycodes.remove(keycode)
-                        // Was pending but no combo fired — pass through as a tap
+                        // Released before the combo window closed.  The guest
+                        // only ever sees the *current* button state when it
+                        // polls the USB controller, so a down/up pair sent
+                        // back-to-back is almost never sampled -- hold the
+                        // press for TAP_HOLD_MS so at least one poll sees it.
                         InputRecorder.sendButtonDown(xboxBtn.mask)
-                        InputRecorder.sendButtonUp(xboxBtn.mask)
+                        comboHandler.postDelayed(
+                            { InputRecorder.sendButtonUp(xboxBtn.mask) }, TAP_HOLD_MS)
                     }
                     else -> InputRecorder.sendButtonUp(xboxBtn.mask)
                 }
             }
         }
         return true
+    }
+
+    /**
+     * Send [mask] as a press once the combo window closes, unless the key was
+     * released or consumed by a hotkey first.  Keys that take part in a combo
+     * cannot be sent on ACTION_DOWN (that would fire the game action every
+     * time you start a combo), but they must not wait for ACTION_UP either --
+     * that yields a zero-length press the guest never samples.
+     */
+    private fun scheduleDeferredPress(keycode: Int, mask: Int) {
+        val press = object : Runnable {
+            override fun run() {
+                comboPendingDowns.remove(keycode)
+                if (keycode in heldGamepadKeycodes &&
+                    keycode !in suppressedGamepadKeycodes) {
+                    pendingGamepadKeycodes.remove(keycode)
+                    lateSentKeycodes.add(keycode)
+                    InputRecorder.sendButtonDown(mask)
+                }
+            }
+        }
+        comboPendingDowns[keycode] = press
+        comboHandler.postDelayed(press, COMBO_WINDOW_MS)
+    }
+
+    /** Cancel a deferred press, releasing it first if it already went out. */
+    private fun cancelDeferredPress(keycode: Int) {
+        comboPendingDowns.remove(keycode)?.let { comboHandler.removeCallbacks(it) }
+        if (lateSentKeycodes.remove(keycode)) {
+            mapping.getXboxButton(keycode)?.let { InputRecorder.sendButtonUp(it.mask) }
+        }
     }
 
     // ── Physical gamepad analog axes ──────────────────────────────────────────
