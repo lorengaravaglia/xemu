@@ -163,6 +163,19 @@ int xemu_android_get_pgraph_sync_wait_ms(void)
     return g_pgraph_sync_wait_ms;
 }
 
+/*
+ * Layout guard.  ui/xemu.c is compiled by CMake, while the APU that reads
+ * g_config is compiled by Meson -- both must see the same struct config.
+ * A stale generated/xemu-config.h once shadowed the Meson-generated one and
+ * omitted audio.use_dsp_jit, so every field after it sat at a different
+ * offset: writing audio.hrtf here actually wrote use_dsp_jit in the APU's
+ * view, silently disabling the DSP JIT while HRTF stayed on.  Referencing
+ * the field makes that divergence a compile error instead of a silent
+ * miscompile.
+ */
+_Static_assert(sizeof(((struct config *)0)->audio.use_dsp_jit) == sizeof(bool),
+               "stale xemu-config.h: struct config layout differs from Meson's");
+
 /* ---- Per-frame phase profiling ----------------------------------------
  * Answers "is the render loop CPU-bound or GPU-bound?" by attributing wall
  * time inside gl_render_frame() to three phases, and counting why iterations
