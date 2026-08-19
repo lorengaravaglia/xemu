@@ -148,4 +148,17 @@ object NativeInterface {
      * logcat tag `xemu-frameprof` covering exactly that window.
      */
     external fun frameprofMark(starting: Boolean)
+
+    /**
+     * Enable HRTF 3D positional audio.  Applies on the next audio frame, so it
+     * can be toggled while a game is running.
+     */
+    external fun setHrtf(enabled: Boolean)
+
+    /**
+     * Number of voice-processing worker threads (0 = process synchronously on
+     * the APU thread).  Read once when the APU starts, so this must be set
+     * before [startEmulation]; changing it later has no effect.
+     */
+    external fun setVoiceWorkers(n: Int)
 }

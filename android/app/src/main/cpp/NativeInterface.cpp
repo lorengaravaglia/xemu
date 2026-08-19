@@ -197,6 +197,18 @@ Java_com_xemu_NativeInterface_getPgraphSyncWaitMs(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_setHrtf(JNIEnv *env, jclass clazz,
+                                      jboolean enabled) {
+    xemu_android_set_hrtf((bool)enabled);
+}
+
+JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_setVoiceWorkers(JNIEnv *env, jclass clazz,
+                                              jint n) {
+    xemu_android_set_voice_workers((int)n);
+}
+
+JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_frameprofMark(JNIEnv *env, jclass clazz,
                                             jboolean starting) {
     xemu_android_frameprof_mark(starting ? 1 : 0);

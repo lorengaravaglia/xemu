@@ -1,5 +1,7 @@
 package com.xemu.settings
 
+import com.xemu.NativeInterface
+
 import android.app.Application
 import android.content.Context
 import android.net.Uri
@@ -103,6 +105,27 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun setFilterNearest(value: Boolean) {
         _filterNearest.value = value
         prefs.edit().putBoolean("filter_nearest", value).apply()
+    }
+
+    // ── Audio ─────────────────────────────────────────────────────────────────
+
+    private val _hrtf = MutableStateFlow(prefs.getBoolean("audio_hrtf", false))
+    val hrtf: StateFlow<Boolean> = _hrtf
+
+    /** Applies immediately: the APU re-reads this every audio frame. */
+    fun setHrtf(value: Boolean) {
+        _hrtf.value = value
+        prefs.edit().putBoolean("audio_hrtf", value).apply()
+        NativeInterface.setHrtf(value)
+    }
+
+    private val _voiceWorkers = MutableStateFlow(prefs.getInt("audio_voice_workers", 2))
+    val voiceWorkers: StateFlow<Int> = _voiceWorkers
+
+    /** Read once when the APU starts, so this only takes effect on next launch. */
+    fun setVoiceWorkers(value: Int) {
+        _voiceWorkers.value = value
+        prefs.edit().putInt("audio_voice_workers", value).apply()
     }
 
     // ── Custom Vulkan driver (adrenotools) ────────────────────────────────────

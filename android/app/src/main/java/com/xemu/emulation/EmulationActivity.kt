@@ -324,6 +324,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 if (!emulationStarted) {
                     startEmulation(holder)
                     applyGraphicsSettings()
+                    applyAudioSettings()
                     emulationStarted = true
                 } else {
                     // Surface recreated after going to background or rotating — hand the
@@ -369,6 +370,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         mapping.reloadHotkeys()
         applyOverlaySettings()
         applyGraphicsSettings()
+        applyAudioSettings()
         updateOverlayVisibility()
     }
 
@@ -559,6 +561,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
         item(overlayLabel)    { cycleOverlayMode() }
 
+        val hrtfOn = mainPrefs.getBoolean("audio_hrtf", false)
+        item(if (hrtfOn) "HRTF: On" else "HRTF: Off") { toggleHrtf() }
+
         container.addView(sheetDivider())
 
         item("Save State")    { showSaveStateDialog() }
@@ -716,6 +721,19 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         updateOverlayVisibility()
     }
 
+    /**
+     * Toggle HRTF 3D positional audio.  The APU re-reads this every audio
+     * frame, so it applies immediately and can be A/B'd while a game is
+     * running.  Shares the "audio_hrtf" pref with the Audio settings screen.
+     */
+    private fun toggleHrtf() {
+        val enabled = !mainPrefs.getBoolean("audio_hrtf", false)
+        mainPrefs.edit().putBoolean("audio_hrtf", enabled).apply()
+        NativeInterface.setHrtf(enabled)
+        Toast.makeText(this, if (enabled) "HRTF on" else "HRTF off",
+                       Toast.LENGTH_SHORT).show()
+    }
+
     private fun confirmExit() {
         AlertDialog.Builder(this)
             .setTitle("Exit Emulation")
@@ -751,6 +769,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 path
             } catch (e: Exception) { "" }
         } else ""
+
+        /* Read once by voice_work_init(); must precede startEmulation(). */
+        NativeInterface.setVoiceWorkers(mainPrefs.getInt("audio_voice_workers", 2))
 
         NativeInterface.startEmulation(
             holder.surface,
@@ -941,6 +962,15 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         NativeInterface.setAspectRatio(mainPrefs.getInt("aspect_ratio", 3))
         NativeInterface.setFilterNearest(mainPrefs.getBoolean("filter_nearest", false))
         NativeInterface.setSurfaceScale(mainPrefs.getInt("surface_scale", 1))
+    }
+
+    /**
+     * Read audio settings from main_prefs and push to native.  Only HRTF is
+     * applied here; the voice worker count is read once when the APU starts and
+     * so must be set before startEmulation().
+     */
+    private fun applyAudioSettings() {
+        NativeInterface.setHrtf(mainPrefs.getBoolean("audio_hrtf", false))
     }
 
     /** Read overlay settings from main_prefs and apply position + visibility. */

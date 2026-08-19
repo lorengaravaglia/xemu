@@ -164,6 +164,41 @@ int xemu_android_get_pgraph_sync_wait_ms(void)
 }
 
 /*
+ * HRTF can be toggled at any time: vp.c reads g_config.audio.hrtf per voice per
+ * frame, so the change takes effect on the next audio frame.  The race with the
+ * APU thread is benign -- at worst one frame uses the previous value.
+ */
+
+int g_android_hrtf = -1;
+
+void xemu_android_set_hrtf(bool enabled)
+{
+    /*
+     * Latch the request as well as applying it.  Kotlin calls this from
+     * surfaceCreated()/onResume(), both of which can run before the emulation
+     * thread reaches xemu_settings_load() -- which would otherwise overwrite
+     * the field with the config-file default.  The latch is re-applied after
+     * the load; the direct write below is what makes a live in-game toggle
+     * take effect once the APU is already running.
+     */
+    g_android_hrtf = enabled;
+    g_config.audio.hrtf = enabled;
+}
+
+/*
+ * Voice worker count, applied once at startup.  voice_work_init() spawns the
+ * worker threads from this and never re-reads it, so it cannot be changed while
+ * running without tearing down and respawning the pool.  Negative means "leave
+ * the config default alone".
+ */
+int g_android_voice_workers = -1;
+
+void xemu_android_set_voice_workers(int n)
+{
+    g_android_voice_workers = n;
+}
+
+/*
  * Layout guard.  ui/xemu.c is compiled by CMake, while the APU that reads
  * g_config is compiled by Meson -- both must see the same struct config.
  * A stale generated/xemu-config.h once shadowed the Meson-generated one and
@@ -2196,6 +2231,16 @@ int xemu_core_main(int argc, char **argv)
     }
 
 #if defined(__ANDROID__) || defined(ANDROID)
+    if (g_android_voice_workers >= 0) {
+        ALOGI("Audio: voice workers = %d", g_android_voice_workers);
+        g_config.audio.vp.num_workers = g_android_voice_workers;
+    }
+
+    if (g_android_hrtf >= 0) {
+        ALOGI("Audio: HRTF = %s", g_android_hrtf ? "on" : "off");
+        g_config.audio.hrtf = g_android_hrtf;
+    }
+
     ALOGI("Checking Android args (pointer: %p)", (void*)g_android_args);
     if (g_android_args) {
         ALOGI("Applying Android file overrides...");

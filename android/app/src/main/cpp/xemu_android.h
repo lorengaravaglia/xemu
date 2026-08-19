@@ -105,6 +105,12 @@ int xemu_android_get_pgraph_sync_wait_ms(void);
  * to logcat tag "xemu-frameprof" covering exactly that window. */
 void xemu_android_frameprof_mark(int starting);
 
+/* HRTF 3D positional audio; takes effect on the next audio frame. */
+void xemu_android_set_hrtf(bool enabled);
+
+/* Voice-processing worker threads; read once at startup, negative = default. */
+void xemu_android_set_voice_workers(int n);
+
 /* Returns the running total of GL shader programs compiled this session.
  * Increments each time pgraph_gl_compile_shader() succeeds. */
 int xemu_android_get_compiled_shader_count(void);
