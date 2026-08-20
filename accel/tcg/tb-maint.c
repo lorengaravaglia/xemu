@@ -904,9 +904,29 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
     CPUState *cpu;
 
     if (tb_cflags(tb) & CF_PCREL) {
-        /* A TB may be at any virtual address */
+        /*
+         * A TB may be cached under any hash slot, so we cannot compute which
+         * entry holds it.  Upstream flushes the entire jump cache here, which
+         * throws away every unrelated TB as well.  On this workload
+         * do_tb_phys_invalidate() fires ~550 times a second, so that wipes
+         * all TB_JMP_CACHE_SIZE entries ~20 times per frame and pushes the
+         * refill misses through the much slower QHT lookup.
+         *
+         * Scanning is the same O(TB_JMP_CACHE_SIZE) walk the flush already
+         * performs -- reads instead of writes -- and clears only the entries
+         * that actually reference this TB, so the rest of the cache survives.
+         */
         CPU_FOREACH(cpu) {
-            tcg_flush_jmp_cache(cpu);
+            CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+            if (unlikely(jc == NULL)) {
+                continue;
+            }
+            for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
+                if (qatomic_read(&jc->array[i].tb) == tb) {
+                    qatomic_set(&jc->array[i].tb, NULL);
+                }
+            }
         }
     } else {
         uint32_t h = tb_jmp_cache_hash_func(tb->pc);
