@@ -837,7 +837,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             } catch (e: Exception) { "" }
         } else ""
 
-        /* Read once by voice_work_init(); must precede startEmulation(). */
+        /* Both are read while the machine is built; must precede startEmulation(). */
+        NativeInterface.setSkipBootAnim(mainPrefs.getBoolean("skip_boot_anim", false))
         NativeInterface.setVoiceWorkers(mainPrefs.getInt("audio_voice_workers", 2))
 
         NativeInterface.startEmulation(

@@ -107,6 +107,17 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putBoolean("filter_nearest", value).apply()
     }
 
+    // ── Boot ──────────────────────────────────────────────────────────────────
+
+    private val _skipBootAnim = MutableStateFlow(prefs.getBoolean("skip_boot_anim", false))
+    val skipBootAnim: StateFlow<Boolean> = _skipBootAnim
+
+    /** Read when the machine is created, so this takes effect on next launch. */
+    fun setSkipBootAnim(value: Boolean) {
+        _skipBootAnim.value = value
+        prefs.edit().putBoolean("skip_boot_anim", value).apply()
+    }
+
     // ── Audio ─────────────────────────────────────────────────────────────────
 
     private val _hrtf = MutableStateFlow(prefs.getBoolean("audio_hrtf", false))

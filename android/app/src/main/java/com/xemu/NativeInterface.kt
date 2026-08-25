@@ -156,6 +156,13 @@ object NativeInterface {
     external fun setHrtf(enabled: Boolean)
 
     /**
+     * Skip the Xbox startup animation.  Read when the machine is created, so
+     * this must be set before [startEmulation]; changing it later has no
+     * effect until the next launch.
+     */
+    external fun setSkipBootAnim(enabled: Boolean)
+
+    /**
      * Number of voice-processing worker threads (0 = process synchronously on
      * the APU thread).  Read once when the APU starts, so this must be set
      * before [startEmulation]; changing it later has no effect.

@@ -34,6 +34,7 @@ fun SystemSettingsScreen(
     val hdd  by settingsViewModel.hddUri.collectAsState()
     val dirs by libraryViewModel.dirs.collectAsState()
     val steamGridDbKey by settingsViewModel.steamGridDbKey.collectAsState()
+    val skipBootAnim by settingsViewModel.skipBootAnim.collectAsState()
 
     val pickMcpx = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
@@ -69,6 +70,25 @@ fun SystemSettingsScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(vertical = 16.dp),
         ) {
+            item {
+                Text("Boot", style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(bottom = 4.dp))
+            }
+            item {
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        SettingsSwitchRow(
+                            label = "Skip startup animation",
+                            subtitle = "Boot straight past the Xbox logo animation. " +
+                                       "Takes effect on next launch.",
+                            checked = skipBootAnim,
+                        ) { settingsViewModel.setSkipBootAnim(it) }
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(8.dp)) }
+
             item {
                 Text("System Files", style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.primary,

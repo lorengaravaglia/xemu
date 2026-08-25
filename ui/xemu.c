@@ -191,6 +191,22 @@ void xemu_android_set_hrtf(bool enabled)
  * running without tearing down and respawning the pool.  Negative means "leave
  * the config default alone".
  */
+/*
+ * Skip the Xbox startup animation.  xemu already supports this upstream: the
+ * setting becomes ",short-animation=on" on the machine string (system/vl.c),
+ * which makes the SMC report SMC_REG_SCRATCH_SHORT_ANIMATION and the BIOS skip
+ * the animation.  Android had no way to set it because the config file is
+ * deleted on every launch, so latch it like the other startup settings and
+ * apply it after xemu_settings_load() -- it must be set before qemu_init()
+ * builds the machine string.  Negative means "leave the config default".
+ */
+int g_android_skip_boot_anim = -1;
+
+void xemu_android_set_skip_boot_anim(bool enabled)
+{
+    g_android_skip_boot_anim = enabled;
+}
+
 int g_android_voice_workers = -1;
 
 void xemu_android_set_voice_workers(int n)
@@ -2231,6 +2247,12 @@ int xemu_core_main(int argc, char **argv)
     }
 
 #if defined(__ANDROID__) || defined(ANDROID)
+    if (g_android_skip_boot_anim >= 0) {
+        ALOGI("Boot: skip startup animation = %s",
+              g_android_skip_boot_anim ? "yes" : "no");
+        g_config.general.skip_boot_anim = g_android_skip_boot_anim;
+    }
+
     if (g_android_voice_workers >= 0) {
         ALOGI("Audio: voice workers = %d", g_android_voice_workers);
         g_config.audio.vp.num_workers = g_android_voice_workers;

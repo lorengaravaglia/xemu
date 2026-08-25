@@ -108,6 +108,9 @@ void xemu_android_frameprof_mark(int starting);
 /* HRTF 3D positional audio; takes effect on the next audio frame. */
 void xemu_android_set_hrtf(bool enabled);
 
+/* Skip the Xbox startup animation; must be set before qemu_init(). */
+void xemu_android_set_skip_boot_anim(bool enabled);
+
 /* Voice-processing worker threads; read once at startup, negative = default. */
 void xemu_android_set_voice_workers(int n);
 
