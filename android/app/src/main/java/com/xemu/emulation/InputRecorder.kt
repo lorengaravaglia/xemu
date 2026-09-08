@@ -23,6 +23,8 @@ object InputRecorder {
     const val ACTION_PLAY          = "com.xemu.action.PLAY_RECORDING"
     const val ACTION_STOP_PLAYBACK = "com.xemu.action.STOP_PLAYBACK"
     const val ACTION_BENCHMARK     = "com.xemu.action.BENCHMARK"
+    const val ACTION_LOAD_STATE    = "com.xemu.action.LOAD_STATE"
+    const val EXTRA_SLOT           = "slot"
     const val EXTRA_FRAMES         = "frames"
     const val EXTRA_NAME           = "recording_name"
 

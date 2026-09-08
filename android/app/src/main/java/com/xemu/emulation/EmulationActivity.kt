@@ -113,8 +113,28 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 InputRecorder.ACTION_STOP_PLAYBACK -> InputRecorder.cancelPlayback()
                 InputRecorder.ACTION_BENCHMARK -> {
                     if (emulationStarted) {
-                        NativeInterface.startBenchmark(
-                            intent.getIntExtra(InputRecorder.EXTRA_FRAMES, 600))
+                        /* Optional "slot" extra loads that save state first and
+                         * lets it settle, so one command gives a measurement
+                         * from a known, identical starting state. */
+                        val slot = intent.getIntExtra(InputRecorder.EXTRA_SLOT, 0)
+                        val frames =
+                            intent.getIntExtra(InputRecorder.EXTRA_FRAMES, 600)
+                        if (slot in 1..8) {
+                            Thread {
+                                if (loadStateSlot(slot)) {
+                                    Thread.sleep(1500)   /* let the guest settle */
+                                    NativeInterface.startBenchmark(frames)
+                                }
+                            }.start()
+                        } else {
+                            NativeInterface.startBenchmark(frames)
+                        }
+                    }
+                }
+                InputRecorder.ACTION_LOAD_STATE -> {
+                    if (emulationStarted) {
+                        val slot = intent.getIntExtra(InputRecorder.EXTRA_SLOT, 1)
+                        Thread { loadStateSlot(slot) }.start()
                     }
                 }
             }
@@ -385,6 +405,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 addAction(InputRecorder.ACTION_PLAY)
                 addAction(InputRecorder.ACTION_STOP_PLAYBACK)
                 addAction(InputRecorder.ACTION_BENCHMARK)
+                addAction(InputRecorder.ACTION_LOAD_STATE)
             },
             ContextCompat.RECEIVER_EXPORTED
         )
@@ -902,6 +923,19 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             ControllerMapping.HotkeyFunction.CYCLE_OVERLAY -> cycleOverlayMode()
             ControllerMapping.HotkeyFunction.TOGGLE_FPS    -> toggleFpsOverlay()
         }
+    }
+
+    /* Load a save slot by number.  Logs the outcome under xemu-android so a
+     * scripted measurement can confirm the state was actually restored. */
+    private fun loadStateSlot(slot: Int): Boolean {
+        val name = "${gameId}_slot_$slot"
+        if (name !in NativeInterface.listStates()) {
+            android.util.Log.w("xemu-android", "loadstate: slot $slot is empty")
+            return false
+        }
+        NativeInterface.loadState(name)
+        android.util.Log.i("xemu-android", "loadstate: loaded slot $slot")
+        return true
     }
 
     private fun executeQuickSave() {
