@@ -1429,6 +1429,13 @@ static double   s_bench_start_cpu_ms;
 
 void xemu_android_benchmark_start(int frames)
 {
+    /* Pick up any A/B switches that were flipped since the last run, so
+     * configurations can be alternated without relaunching. */
+    {
+        extern void jc_refresh_property(void);
+        jc_refresh_property();
+    }
+
     if (frames <= 0) {
         frames = 600;
     }

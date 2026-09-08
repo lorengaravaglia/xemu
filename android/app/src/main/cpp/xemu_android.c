@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "xemu_android.h"
+#include <sys/system_properties.h>
 #ifdef HAVE_ADRENOTOOLS
 #include <adrenotools/driver.h>
 #include <dlfcn.h>
@@ -276,6 +277,46 @@ static long get_file_size(const char *filename) {
  * builds a bitmask of cores at >= 80% of peak frequency, and calls
  * sched_setaffinity via raw syscall (Bionic does not expose cpu_set_t).
  * Silently falls back to all-cores if anything fails. */
+
+/*
+ * Jump-cache invalidation strategy, switchable for A/B measurement.
+ *
+ * true  (default, and what this port ships): clear only the entries that
+ *       reference the invalidated TB.
+ * false: upstream QEMU's behaviour, flush the whole jump cache.
+ *
+ * Set with `adb shell setprop debug.xemu.jc_targeted 0|1` before launch.
+ * The change was originally measured only through frame rate, which we now
+ * know could not resolve it; this exists so it can be measured properly.
+ */
+bool g_jc_targeted = true;
+
+static void jc_read_property(void);
+
+/* Re-read before each benchmark so configurations can be alternated inside a
+ * single process.  Running them as separate blocks lets the device heat up
+ * under the second one: a full-flush block drifted 38.75 -> 39.70 ms/frame
+ * across four runs purely from thermals, which is the same size as the effect
+ * being measured.  Interleaving cancels that. */
+void jc_refresh_property(void);
+void jc_refresh_property(void)
+{
+    jc_read_property();
+}
+
+static void jc_read_property(void)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+
+    if (__system_property_get("debug.xemu.jc_targeted", v) > 0 &&
+        (v[0] == '0' || v[0] == 'n' || v[0] == 'f')) {
+        g_jc_targeted = false;
+    }
+    LOGI("jump-cache invalidation: %s",
+         g_jc_targeted ? "targeted (clear matching entries)"
+                       : "full flush (upstream behaviour)");
+}
+
 void pin_to_big_cores(void) {
     int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
     if (ncpus <= 0 || ncpus > 64) return;
@@ -334,6 +375,7 @@ static void *xemu_android_thread(void *opaque) {
     }
 
     pin_to_big_cores();
+    jc_read_property();
 
     if (g_android_args->mcpxPath) {
         LOGI("Bootrom size: %ld", get_file_size(g_android_args->mcpxPath));

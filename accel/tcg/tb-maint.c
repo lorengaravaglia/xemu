@@ -904,6 +904,18 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
     CPUState *cpu;
 
     if (tb_cflags(tb) & CF_PCREL) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* A/B switch: debug.xemu.jc_targeted=0 restores upstream's full
+         * flush, so the two strategies can be compared at runtime. */
+        extern bool g_jc_targeted;
+
+        if (!g_jc_targeted) {
+            CPU_FOREACH(cpu) {
+                tcg_flush_jmp_cache(cpu);
+            }
+            return;
+        }
+#endif
         /*
          * A TB may be cached under any hash slot, so we cannot compute which
          * entry holds it.  Upstream flushes the entire jump cache here, which
