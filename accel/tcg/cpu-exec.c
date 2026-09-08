@@ -18,6 +18,10 @@
  */
 
 #include "qemu/osdep.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #include "qemu/qemu-print.h"
 #include "qapi/error.h"
 #include "qapi/type-helpers.h"
@@ -155,6 +159,23 @@ struct tb_desc {
     CPUArchState *env;
     tb_page_addr_t page_addr0;
 };
+
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * Translation blocks executed, for the deterministic benchmark.
+ *
+ * Wall time alone cannot tell "the host got faster" from "the guest did less
+ * work".  Comparing this count between runs answers that: if two runs execute
+ * the same number of TBs, they did the same work and the wall times are
+ * comparable.  vCPU-thread only, so no atomics.
+ */
+unsigned long long xemu_tb_exec_count;
+/* Guest instructions executed (sum of tb->icount over executed TBs).  Slightly
+ * optimistic when a TB exits early, but stable enough to compare runs. */
+unsigned long long xemu_guest_insn_count;
+/* Thread id of the vCPU thread, so the benchmark can read its CPU time. */
+int xemu_vcpu_tid;
+#endif
 
 static bool tb_lookup_cmp(const void *p, const void *d)
 {
@@ -1020,6 +1041,10 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 tb_add_jump(last_tb, tb_exit, tb);
             }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+            xemu_tb_exec_count++;
+            xemu_guest_insn_count += tb->icount;
+#endif
             cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
 
             /* Try to align the host and virtual clocks
@@ -1044,6 +1069,12 @@ int cpu_exec(CPUState *cpu)
 {
     int ret;
     SyncClocks sc = { 0 };
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (unlikely(!xemu_vcpu_tid)) {
+        xemu_vcpu_tid = (int)syscall(__NR_gettid);
+    }
+#endif
 
     /* replay_interrupt may need current_cpu */
     current_cpu = cpu;

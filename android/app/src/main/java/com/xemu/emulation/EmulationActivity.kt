@@ -111,6 +111,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                     InputRecorder.startPlayback(filesDir, gameId, name)
                 }
                 InputRecorder.ACTION_STOP_PLAYBACK -> InputRecorder.cancelPlayback()
+                InputRecorder.ACTION_BENCHMARK -> {
+                    if (emulationStarted) {
+                        NativeInterface.startBenchmark(
+                            intent.getIntExtra(InputRecorder.EXTRA_FRAMES, 600))
+                    }
+                }
             }
         }
     }
@@ -378,6 +384,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             IntentFilter().apply {
                 addAction(InputRecorder.ACTION_PLAY)
                 addAction(InputRecorder.ACTION_STOP_PLAYBACK)
+                addAction(InputRecorder.ACTION_BENCHMARK)
             },
             ContextCompat.RECEIVER_EXPORTED
         )

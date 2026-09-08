@@ -1365,6 +1365,151 @@ static void report_stats(void)
  * Renders the main interface. Usually called from the main thread,
  * but may sometimes be called from another thread.
  */
+
+#if defined(__ANDROID__) || defined(ANDROID)
+/* ---- Deterministic benchmark -------------------------------------------
+ *
+ * The combat2 replay drives input on wall-clock time, so a faster build
+ * reaches a different game state and measures a different workload.  Its
+ * intrinsic noise is about +-1 fps, which is enough to resolve the x87 work
+ * (+2.2 fps) and nothing attempted since.
+ *
+ * This instead fixes the guest work and measures the host: advance exactly N
+ * guest frames with no input at all, and report the wall time taken.  Lower is
+ * better, and there is no vsync quantisation in the number because it is a
+ * duration rather than a rate.
+ *
+ * The TB count is the validity check.  Wall time alone cannot distinguish "the
+ * host got faster" from "the guest did less work"; if two runs execute the
+ * same number of translation blocks they did the same work, and only then are
+ * their wall times comparable.
+ */
+extern unsigned long long xemu_tb_exec_count;
+extern unsigned long long xemu_guest_insn_count;
+extern int xemu_vcpu_tid;
+
+/* CPU time consumed by the vCPU thread, in milliseconds. */
+static double bench_vcpu_cpu_ms(void)
+{
+    char path[64];
+    FILE *f;
+    unsigned long utime = 0, stime = 0;
+
+    if (!xemu_vcpu_tid) {
+        return 0.0;
+    }
+    snprintf(path, sizeof(path), "/proc/self/task/%d/stat", xemu_vcpu_tid);
+    f = fopen(path, "r");
+    if (!f) {
+        return 0.0;
+    }
+    /* Fields 14 and 15 are utime/stime in clock ticks; skip the comm field,
+     * which can contain spaces, by scanning past the closing parenthesis. */
+    int c;
+    while ((c = fgetc(f)) != EOF && c != ')') { }
+    if (fscanf(f, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu",
+               &utime, &stime) != 2) {
+        fclose(f);
+        return 0.0;
+    }
+    fclose(f);
+    return (utime + stime) * 1000.0 / (double)sysconf(_SC_CLK_TCK);
+}
+
+static int      s_bench_frames_left;
+static int      s_bench_frames_total;
+static int64_t  s_bench_start_ns;
+static uint64_t s_bench_saved_vblank_ns;
+static unsigned long long s_bench_start_tb;
+static unsigned long long s_bench_start_insn;
+static double   s_bench_start_cpu_ms;
+
+void xemu_android_benchmark_start(int frames)
+{
+    if (frames <= 0) {
+        frames = 600;
+    }
+    s_bench_frames_total = frames;
+    s_bench_frames_left = frames;
+
+    /*
+     * Remove the frame limiter for the duration.
+     *
+     * The guest busy-waits for vblank rather than halting -- measured 96-98%
+     * vCPU utilisation at a locked 30 fps in two scenes whose work per frame
+     * differs by 2.8x -- so with the limiter in place both wall time and CPU
+     * utilisation saturate and neither can measure how fast the host is.
+     * Raising the vblank rate lets the guest run flat out, so wall time for a
+     * fixed number of frames becomes pure host throughput.  Game logic tied to
+     * vblank will run fast during a benchmark; that is fine, because the point
+     * is to compare builds on the same workload, not to play.
+     */
+    s_bench_saved_vblank_ns = vblank_interval_ns;
+    vblank_interval_ns = 1000000LL;         /* 1 ms -> never the limiter */
+    s_bench_start_tb = xemu_tb_exec_count;
+    s_bench_start_insn = xemu_guest_insn_count;
+    s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
+    s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    ALOGI("bench: started, %d guest frames — hands off the controls", frames);
+}
+
+/* Called once per guest frame. */
+static void bench_tick(void)
+{
+    if (s_bench_frames_left <= 0) {
+        return;
+    }
+    if (--s_bench_frames_left > 0) {
+        return;
+    }
+
+    vblank_interval_ns = s_bench_saved_vblank_ns;   /* restore the limiter */
+
+    int64_t ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s_bench_start_ns;
+    unsigned long long tbs = xemu_tb_exec_count - s_bench_start_tb;
+    unsigned long long insns = xemu_guest_insn_count - s_bench_start_insn;
+    double cpu_ms = bench_vcpu_cpu_ms() - s_bench_start_cpu_ms;
+    double ms = ns / 1e6;
+
+    /*
+     * Wall time saturates whenever the guest hits its frame target and waits
+     * on vsync -- a benchmark run standing still measured exactly 33.32
+     * ms/frame, i.e. the limiter rather than the host.  Guest instructions per
+     * second of vCPU CPU time does not saturate: it is how fast this host
+     * emulates, independent of pacing, scene and vsync quantisation.  Compare
+     * MIPS between builds; use util% to see whether the guest was actually
+     * CPU-bound during the run.
+     */
+    /*
+     * Report vCPU time per frame, not frame rate.
+     *
+     * The guest paces itself: Halo targets 30 fps off the Xbox system timer,
+     * so it renders a frame and waits for the next 33.3 ms boundary however
+     * fast the host is.  Measured with the vblank limiter removed and no
+     * thread saturated (vCPU ~75%, PGRAPH ~54%), the guest still produced
+     * exactly ~30 fps.  Frame rate therefore measures the guest's own pacing,
+     * not the host, and only moves when a frame misses the 33.3 ms budget
+     * entirely -- which is why it is quantised at 33/50 ms.
+     *
+     * vCPU ms per frame is the useful number: it is the work the host has to
+     * do inside that budget, it responds linearly to emulator speed, and it
+     * keeps responding when frame rate is pinned.  Lower is better.
+     *
+     * reentry_* count only loop re-entries -- chained TBs jump straight to one
+     * another and never pass back through cpu_exec_loop -- so they are useless
+     * as an absolute instruction rate but good for confirming two runs did the
+     * same work.
+     */
+    ALOGI("bench: RESULT %d frames | vcpu %.2f ms/frame (budget 33.33) | "
+          "headroom %.0f%% | wall %.1f ms (%.2f fps, guest-paced) | "
+          "util %.0f%% | reentry_insns %llu | reentry_tb %llu",
+          s_bench_frames_total, cpu_ms / s_bench_frames_total,
+          100.0 * (1.0 - (cpu_ms / s_bench_frames_total) / 33.33),
+          ms, s_bench_frames_total * 1000.0 / ms,
+          cpu_ms * 100.0 / ms, insns, tbs);
+}
+#endif
+
 static void gl_render_frame(struct xemu_console *scon)
 {
     static int frames = 0;
@@ -1460,6 +1605,7 @@ static void gl_render_frame(struct xemu_console *scon)
             s_last_synced_frame_time = cur_frame_time;
             g_rendered_frame_count++;
             s_fpw.new_frames++;
+            bench_tick();
         } else {
             s_fp.miss++;
             s_last_miss_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);

@@ -22,6 +22,8 @@ object InputRecorder {
 
     const val ACTION_PLAY          = "com.xemu.action.PLAY_RECORDING"
     const val ACTION_STOP_PLAYBACK = "com.xemu.action.STOP_PLAYBACK"
+    const val ACTION_BENCHMARK     = "com.xemu.action.BENCHMARK"
+    const val EXTRA_FRAMES         = "frames"
     const val EXTRA_NAME           = "recording_name"
 
     private sealed class Event(val tMs: Long) {

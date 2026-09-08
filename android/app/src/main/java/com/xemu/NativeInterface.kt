@@ -156,6 +156,14 @@ object NativeInterface {
     external fun setHrtf(enabled: Boolean)
 
     /**
+     * Run the deterministic benchmark: advance exactly [frames] guest frames
+     * with no input, then log the wall time and the number of translation
+     * blocks executed.  Wall time is the performance metric; the TB count
+     * verifies that two runs actually did the same guest work.
+     */
+    external fun startBenchmark(frames: Int)
+
+    /**
      * Skip the Xbox startup animation.  Read when the machine is created, so
      * this must be set before [startEmulation]; changing it later has no
      * effect until the next launch.

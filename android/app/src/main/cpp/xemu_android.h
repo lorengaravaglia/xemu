@@ -108,6 +108,11 @@ void xemu_android_frameprof_mark(int starting);
 /* HRTF 3D positional audio; takes effect on the next audio frame. */
 void xemu_android_set_hrtf(bool enabled);
 
+/* Deterministic benchmark: advance exactly [frames] guest frames with no input
+ * and report the wall time and translation blocks executed.  Compare wall time
+ * between runs, using the TB count to confirm the runs did the same work. */
+void xemu_android_benchmark_start(int frames);
+
 /* Skip the Xbox startup animation; must be set before qemu_init(). */
 void xemu_android_set_skip_boot_anim(bool enabled);
 

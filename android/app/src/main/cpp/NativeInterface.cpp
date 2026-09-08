@@ -203,6 +203,12 @@ Java_com_xemu_NativeInterface_setHrtf(JNIEnv *env, jclass clazz,
 }
 
 JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_startBenchmark(JNIEnv *env, jclass clazz,
+                                             jint frames) {
+    xemu_android_benchmark_start((int)frames);
+}
+
+JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_setSkipBootAnim(JNIEnv *env, jclass clazz,
                                               jboolean enabled) {
     xemu_android_set_skip_boot_anim((bool)enabled);
