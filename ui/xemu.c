@@ -28,6 +28,9 @@
 /* Ported SDL 1.2 code to 2.0 by Dave Airlie. */
 
 #include "qemu/osdep.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/system_properties.h>
+#endif
 #include "qemu/module.h"
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
@@ -1444,8 +1447,28 @@ void xemu_android_benchmark_start(int frames)
      * vblank will run fast during a benchmark; that is fine, because the point
      * is to compare builds on the same workload, not to play.
      */
-    s_bench_saved_vblank_ns = vblank_interval_ns;
-    vblank_interval_ns = 1000000LL;         /* 1 ms -> never the limiter */
+    /*
+     * Unthrottling is OFF by default because it invalidates build-to-build
+     * comparisons: vblank IRQs arrive on wall-clock time, so a faster guest
+     * takes fewer of them per frame, does less interrupt work, and measures
+     * faster still.  That feedback loop inflated a fastmem A/B on the pause
+     * screen to -34% while the workload counter showed the two runs had done
+     * 13% different amounts of work.
+     *
+     * Leave it off and benchmark a scene that is over budget (combat), where
+     * the guest never catches up and so never sits in its wait loop -- there
+     * vCPU ms/frame is real work.  debug.xemu.bench_unthrottle=1 restores the
+     * old behaviour for measuring a scene that would otherwise idle.
+     */
+    {
+        char prop[PROP_VALUE_MAX] = { 0 };
+        s_bench_saved_vblank_ns = vblank_interval_ns;
+        if (__system_property_get("debug.xemu.bench_unthrottle", prop) > 0 &&
+            (prop[0] == '1' || prop[0] == 'y' || prop[0] == 't')) {
+            vblank_interval_ns = 1000000LL;
+            ALOGI("bench: vblank unthrottled (workload will vary with host speed)");
+        }
+    }
     s_bench_start_tb = xemu_tb_exec_count;
     s_bench_start_insn = xemu_guest_insn_count;
     s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
