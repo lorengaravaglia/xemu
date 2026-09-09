@@ -1072,7 +1072,11 @@ int cpu_exec(CPUState *cpu)
 
 #if defined(__ANDROID__) || defined(ANDROID)
     if (unlikely(!xemu_vcpu_tid)) {
+        extern void vcpu_affinity_refresh(void);
+
         xemu_vcpu_tid = (int)syscall(__NR_gettid);
+        /* Apply core affinity for normal play, not only during benchmarks. */
+        vcpu_affinity_refresh();
     }
 #endif
 

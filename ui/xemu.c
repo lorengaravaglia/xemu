@@ -1433,7 +1433,9 @@ void xemu_android_benchmark_start(int frames)
      * configurations can be alternated without relaunching. */
     {
         extern void jc_refresh_property(void);
+        extern void vcpu_affinity_refresh(void);
         jc_refresh_property();
+        vcpu_affinity_refresh();
     }
 
     if (frames <= 0) {

@@ -317,6 +317,80 @@ static void jc_read_property(void)
                        : "full flush (upstream behaviour)");
 }
 
+
+/*
+ * vCPU core affinity, re-applied before each benchmark so pinned and unpinned
+ * can be alternated inside one process.
+ *
+ * Pinning is the default; debug.xemu.pin_vcpu=0 disables it.
+ *
+ * pin_to_big_cores() admits everything within 80% of the maximum, so on this
+ * SoC that is the 2803 MHz A715/A710s as well as the 3187 MHz X3 -- a ~12%
+ * clock swing depending on where the scheduler puts the thread that sets the
+ * frame rate.  Measured with an interleaved A/B (5 pairs, save slot 5):
+ * pinning wins every pair, mean 0.81 ms/frame (~2.1%), and it cuts run-to-run
+ * spread about fivefold (0.5% pinned vs 2.4% free) by stopping the migration.
+ */
+extern int xemu_vcpu_tid;       /* accel/tcg/cpu-exec.c */
+
+void vcpu_affinity_refresh(void);
+void vcpu_affinity_refresh(void)
+{
+    char prop[PROP_VALUE_MAX] = { 0 };
+    int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
+    long freqs[64] = { 0 }, max_freq = 0;
+    unsigned long mask = 0;
+    bool pin;
+
+    if (!xemu_vcpu_tid || ncpus <= 0 || ncpus > 64) {
+        return;
+    }
+
+    pin = !(__system_property_get("debug.xemu.pin_vcpu", prop) > 0 &&
+            (prop[0] == '0' || prop[0] == 'n' || prop[0] == 'f'));
+
+    for (int i = 0; i < ncpus; i++) {
+        char path[128];
+        FILE *f;
+
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        f = fopen(path, "r");
+        if (!f) {
+            continue;
+        }
+        if (fscanf(f, "%ld", &freqs[i]) == 1 && freqs[i] > max_freq) {
+            max_freq = freqs[i];
+        }
+        fclose(f);
+    }
+    if (!max_freq) {
+        return;
+    }
+
+    if (pin) {
+        for (int i = 0; i < ncpus; i++) {
+            if (freqs[i] == max_freq) {
+                mask = 1UL << i;
+                break;
+            }
+        }
+    } else {
+        long threshold = max_freq * 80 / 100;
+        for (int i = 0; i < ncpus; i++) {
+            if (freqs[i] >= threshold) {
+                mask |= 1UL << i;
+            }
+        }
+    }
+
+    if (mask && syscall(__NR_sched_setaffinity, xemu_vcpu_tid,
+                        sizeof(mask), &mask) == 0) {
+        LOGI("vcpu affinity: %s (mask 0x%lx)",
+             pin ? "pinned to fastest core" : "free across big cluster", mask);
+    }
+}
+
 void pin_to_big_cores(void) {
     int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
     if (ncpus <= 0 || ncpus > 64) return;
