@@ -1434,8 +1434,10 @@ void xemu_android_benchmark_start(int frames)
     {
         extern void jc_refresh_property(void);
         extern void vcpu_affinity_refresh(void);
+        extern void x86_refresh_fpu_mode(void);
         jc_refresh_property();
         vcpu_affinity_refresh();
+        x86_refresh_fpu_mode();
     }
 
     if (frames <= 0) {

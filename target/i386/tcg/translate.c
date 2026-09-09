@@ -38,6 +38,44 @@
 static int g_use_hard_fpu;
 static int g_hard_fpu_helper_only; /* AArch64: use __hard helpers, skip native TCG float ops */
 
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/system_properties.h>
+#include "exec/tb-flush.h"
+
+/*
+ * A/B switch for the native x87 path.
+ *
+ * debug.xemu.x87_native=0 forces the softfloat/__hard helpers (what the port
+ * did before the native AArch64 float work); 1, the default, uses native FP.
+ * Re-read before each benchmark and followed by a TB flush so already
+ * translated code is rebuilt with the other strategy -- that lets the two be
+ * alternated inside one process, which is the only way to keep thermal drift
+ * (measured at 8% across a session) from biasing the comparison.
+ *
+ * Safe to flip at runtime: both paths keep guest FP state in env->fpregs in
+ * the same format, and the flush means no half-translated block survives.
+ */
+void x86_refresh_fpu_mode(void);
+void x86_refresh_fpu_mode(void)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+    int want_helper_only = 0;
+
+    if (__system_property_get("debug.xemu.x87_native", v) > 0 &&
+        (v[0] == '0' || v[0] == 'n' || v[0] == 'f')) {
+        want_helper_only = 1;
+    }
+
+    if (want_helper_only != g_hard_fpu_helper_only) {
+        g_hard_fpu_helper_only = want_helper_only;
+        if (first_cpu) {
+            queue_tb_flush(first_cpu);
+        }
+    }
+}
+#endif
+
+
 /*
  * Per-operation opt-out from the native TCG float path, for operations the
  * host has no instruction for.  x86 implements fsin/fcos in hardware; AArch64
