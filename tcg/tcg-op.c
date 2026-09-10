@@ -3245,6 +3245,94 @@ void tcg_gen_goto_tb(unsigned idx)
     tcg_gen_op1i(INDEX_op_goto_tb, 0, idx);
 }
 
+
+#if defined(__ANDROID__) || defined(ANDROID)
+void tcg_gen_lookup_and_goto_ptr_ic(const TCGICKeySpec *spec, void *slot,
+                                    void *genp)
+{
+    TCGv_ptr slotp, gp, ptr;
+    TCGv_i32 pc_now, flags_now, cs_base_now, a, b;
+    TCGLabel *slow, *done;
+
+    if (tcg_ctx->gen_tb->cflags & CF_NO_GOTO_PTR) {
+        tcg_gen_exit_tb(NULL, 0);
+        return;
+    }
+
+    plugin_gen_disable_mem_helpers();
+
+    /* TB-scoped, not EBB: these cross the branch and the merge label. */
+    ptr       = tcg_temp_new_ptr();
+    pc_now    = tcg_temp_new_i32();
+    flags_now = tcg_temp_new_i32();
+    cs_base_now = tcg_temp_new_i32();
+    a         = tcg_temp_new_i32();
+    b         = tcg_temp_new_i32();
+    slow      = gen_new_label();
+    done      = gen_new_label();
+
+    slotp = tcg_constant_ptr(slot);
+    gp    = tcg_constant_ptr(genp);
+
+    /* Rebuild the lookup key the helper would compute. */
+    tcg_gen_ld_i32(pc_now, tcg_env, spec->pc_ofs);
+    tcg_gen_ld_i32(flags_now, tcg_env, spec->flags_ofs);
+    tcg_gen_ld_i32(b, tcg_env, spec->flags2_ofs);
+    tcg_gen_andi_i32(b, b, spec->flags2_mask);
+    tcg_gen_or_i32(flags_now, flags_now, b);
+    tcg_gen_ld_i32(cs_base_now, tcg_env, spec->cs_base_ofs);
+
+    /* stale generation? */
+    tcg_gen_ld_i32(a, slotp, 0);
+    tcg_gen_ld_i32(b, gp, 0);
+    tcg_gen_brcond_i32(TCG_COND_NE, a, b, slow);
+
+    /* different pc? */
+    tcg_gen_ld_i32(a, slotp, 4);
+    tcg_gen_brcond_i32(TCG_COND_NE, a, pc_now, slow);
+
+    /* different flags?  Without this the cache can hand back a TB translated
+     * for a different CPU mode -- which is what made the first version of this
+     * change guest execution instead of merely speeding it up. */
+    tcg_gen_ld_i32(a, slotp, 8);
+    tcg_gen_brcond_i32(TCG_COND_NE, a, flags_now, slow);
+
+    /* The helper sets can_do_io before returning; the fast path must too.
+     * Without it the flag stays clear, so an MMIO access in the target TB
+     * takes cpu_io_recompile() and longjmps -- which showed up as ~6% more
+     * loop re-entries than the baseline, i.e. the cache was changing
+     * behaviour rather than only speeding things up. */
+    tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env, spec->can_do_io_ofs);
+
+    tcg_gen_ld_ptr(ptr, slotp, 16);
+    tcg_gen_br(done);
+
+    gen_set_label(slow);
+    gen_helper_lookup_tb_ptr(ptr, tcg_env);
+
+    /*
+     * Do not cache a "no TB" answer.  The helper returns the epilogue when
+     * lookup fails, and caching that makes every later hit jump to the
+     * epilogue and exit to the loop -- where the baseline would have called
+     * the helper again and found the TB that has since been translated.  That
+     * showed up as ~5% more loop re-entries than the baseline.
+     */
+    tcg_gen_brcondi_ptr(TCG_COND_EQ, ptr,
+                        (intptr_t)tcg_code_gen_epilogue, done);
+
+    tcg_gen_ld_i32(b, gp, 0);
+    tcg_gen_st_i32(b, slotp, 0);
+    tcg_gen_st_i32(pc_now, slotp, 4);
+    tcg_gen_st_i32(flags_now, slotp, 8);
+    tcg_gen_st_i32(cs_base_now, slotp, 12);
+    tcg_gen_st_ptr(ptr, slotp, 16);
+
+    gen_set_label(done);
+    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+    tcg_temp_free_ptr(ptr);
+}
+#endif
+
 void tcg_gen_lookup_and_goto_ptr(void)
 {
     TCGv_ptr ptr;

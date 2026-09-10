@@ -778,6 +778,17 @@ void tb_flush__exclusive_or_serial(void)
 {
     CPUState *cpu;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* The whole code buffer is about to be freed, so every inline-cache slot
+     * holds a dangling host pointer.  Bumping the generation strands them all.
+     * Missing this crashed the emulator on save-state load, which does a full
+     * flush -- per-TB invalidation alone is not enough. */
+    {
+        extern uint32_t xemu_ic_generation;
+        xemu_ic_generation++;
+    }
+#endif
+
     trace_tb_flush();
     assert(tcg_enabled());
     /* Note that cpu_in_serial_context checks cpu_in_exclusive_context. */
@@ -902,6 +913,16 @@ static inline void tb_jmp_unlink(TranslationBlock *dest)
 static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
 {
     CPUState *cpu;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Strand every inline-cache slot: they hold host pointers into TBs, and
+     * this one is about to go away.  Cheap -- one counter, and the slots are
+     * refilled lazily on the next miss. */
+    {
+        extern uint32_t xemu_ic_generation;
+        xemu_ic_generation++;
+    }
+#endif
 
     if (tb_cflags(tb) & CF_PCREL) {
 #if defined(__ANDROID__) || defined(ANDROID)

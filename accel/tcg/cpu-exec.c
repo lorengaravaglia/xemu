@@ -999,6 +999,15 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             if (s.cflags == -1) {
                 s.cflags = curr_cflags(cpu);
             } else {
+#if defined(__ANDROID__) || defined(ANDROID)
+                /* A one-shot cflags request (icount, precise SMC, or
+                 * cpu_io_recompile) means the next TB is keyed differently
+                 * from what any inline-cache slot recorded.  Strand them. */
+                {
+                    extern uint32_t xemu_ic_generation;
+                    xemu_ic_generation++;
+                }
+#endif
                 cpu->cflags_next_tb = -1;
             }
 

@@ -79,6 +79,30 @@ void tcg_gen_goto_tb(unsigned idx);
  */
 void tcg_gen_lookup_and_goto_ptr(void);
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/* As above, but check a one-entry inline cache first.  @env_pc_ofs is the
+ * offset of the guest PC within the CPU env, @slot points at the site's
+ * {generation, pc, host ptr} record and @genp at the global generation
+ * counter.  Emitting goto_ptr has to happen here rather than in the frontend,
+ * since the op emitters are internal to tcg-op.c. */
+/* @spec describes how to rebuild the lookup key inline:
+ *   pc_ofs                    offset of the guest PC in env
+ *   flags_ofs / flags2_ofs    the two words the target's flags are built from
+ *   flags2_mask               mask applied to the second word
+ * The slot is {generation, pc, flags, cs_base, host ptr}. */
+typedef struct TCGICKeySpec {
+    int pc_ofs;
+    int flags_ofs;
+    int flags2_ofs;
+    uint32_t flags2_mask;
+    int cs_base_ofs;        /* offset of the code-segment base in env */
+    int can_do_io_ofs;      /* offset of cpu->neg.can_do_io, relative to env */
+} TCGICKeySpec;
+
+void tcg_gen_lookup_and_goto_ptr_ic(const TCGICKeySpec *spec, void *slot,
+                                    void *genp);
+#endif
+
 void tcg_gen_plugin_cb(unsigned from);
 void tcg_gen_plugin_mem_cb(TCGv_i64 addr, unsigned meminfo);
 

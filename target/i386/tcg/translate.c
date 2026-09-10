@@ -36,7 +36,13 @@
 #include "exec/log.h"
 
 static int g_use_hard_fpu;
-static int g_hard_fpu_helper_only; /* AArch64: use __hard helpers, skip native TCG float ops */
+static int g_hard_fpu_helper_only;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+/* Inline cache for indirect branches; defined in full further down. */
+uint32_t xemu_ic_generation = 1;
+int g_x86_inline_ic = 1;                /* debug.xemu.ic=0 disables */
+#endif /* AArch64: use __hard helpers, skip native TCG float ops */
 
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <sys/system_properties.h>
@@ -70,6 +76,20 @@ void x86_refresh_fpu_mode(void)
         g_hard_fpu_helper_only = want_helper_only;
         if (first_cpu) {
             queue_tb_flush(first_cpu);
+        }
+    }
+
+    {
+        char icv[PROP_VALUE_MAX] = { 0 };
+        int want_ic = !(__system_property_get("debug.xemu.ic", icv) > 0 &&
+                        (icv[0] == '0' || icv[0] == 'n' || icv[0] == 'f'));
+
+        if (want_ic != g_x86_inline_ic) {
+            g_x86_inline_ic = want_ic;
+            xemu_ic_generation++;       /* strand every slot */
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
         }
     }
 }
@@ -2894,6 +2914,72 @@ static void gen_bnd_jmp(DisasContext *s)
  * single step traps, resetting the RF flag, and handling the interrupt
  * shadow.
  */
+#if defined(__ANDROID__) || defined(ANDROID)
+/* ---- PROTOTYPE: inline cache for indirect branches ----------------------
+ *
+ * Measured motivation: HELPER(lookup_tb_ptr) is called ~375,000 times per
+ * guest frame and 96.5% of those are answered by the per-CPU jump cache, at a
+ * cost of ~10% of the vCPU thread.  Almost all of that could be a compare
+ * instead of a call.
+ *
+ * Each emission site gets a slot holding {generation, eip, host pointer}.
+ * Generated code loads env->eip, checks the slot, and jumps straight to the
+ * cached pointer on a hit; a miss calls the helper as before and refills it.
+ *
+ * Comparing eip alone is enough here: with CF_PCREL env->eip is current at the
+ * branch, and a slot belongs to one site inside one TB, whose cs_base and
+ * flags are fixed -- they are part of that TB's lookup key.
+ *
+ * Correctness caveat, and why this is a prototype: a cached host pointer must
+ * not outlive the TB it points at, so any TB invalidation bumps the generation
+ * and strands every slot at once.  It does NOT re-check the target's
+ * flags/cflags, so a site reached with different hflags (or after
+ * cpu_io_recompile changed cflags) could take a stale entry.  Enough to
+ * measure; do not ship without closing that hole.
+ */
+#define IC_SLOTS 8192
+
+typedef struct ICSlot {
+    uint32_t generation;
+    uint32_t eip;
+    uint32_t flags;
+    uint32_t cs_base;
+    const void *ptr;
+} ICSlot;
+
+ICSlot xemu_ic_slots[IC_SLOTS];
+static unsigned xemu_ic_next_slot;
+
+static void gen_lookup_and_goto_ptr_ic(void)
+{
+    /* Mirrors x86_get_tb_cpu_state(): flags = hflags | (eflags & MASK). */
+    static const TCGICKeySpec spec = {
+        .pc_ofs     = offsetof(CPUX86State, eip),
+        .flags_ofs  = offsetof(CPUX86State, hflags),
+        .flags2_ofs = offsetof(CPUX86State, eflags),
+        .flags2_mask = IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK,
+        .cs_base_ofs = offsetof(CPUX86State, segs[R_CS].base),
+        .can_do_io_ofs = (int)(offsetof(ArchCPU, parent_obj.neg.can_do_io) -
+                               offsetof(ArchCPU, env)),
+    };
+    ICSlot *slot;
+
+    if (!g_x86_inline_ic) {
+        tcg_gen_lookup_and_goto_ptr();
+        return;
+    }
+
+    slot = &xemu_ic_slots[xemu_ic_next_slot++ & (IC_SLOTS - 1)];
+    QEMU_BUILD_BUG_ON(offsetof(ICSlot, generation) != 0);
+    QEMU_BUILD_BUG_ON(offsetof(ICSlot, eip) != 4);
+    QEMU_BUILD_BUG_ON(offsetof(ICSlot, flags) != 8);
+    QEMU_BUILD_BUG_ON(offsetof(ICSlot, cs_base) != 12);
+    QEMU_BUILD_BUG_ON(offsetof(ICSlot, ptr) != 16);
+
+    tcg_gen_lookup_and_goto_ptr_ic(&spec, slot, &xemu_ic_generation);
+}
+#endif
+
 static void
 gen_eob(DisasContext *s, int mode)
 {
@@ -2921,7 +3007,11 @@ gen_eob(DisasContext *s, int mode)
     } else if (mode == DISAS_JUMP &&
                /* give irqs a chance to happen */
                !inhibit_reset) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        gen_lookup_and_goto_ptr_ic();
+#else
         tcg_gen_lookup_and_goto_ptr();
+#endif
     } else {
         tcg_gen_exit_tb(NULL, 0);
     }

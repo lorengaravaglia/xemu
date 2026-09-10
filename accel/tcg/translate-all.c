@@ -673,6 +673,15 @@ void tcg_flush_jmp_cache(CPUState *cpu)
 {
     CPUJumpCache *jc = cpu->tb_jmp_cache;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Belt and braces: anything that wipes the jump cache should also strand
+     * the inline-cache slots, which hold the same kind of stale reference. */
+    {
+        extern uint32_t xemu_ic_generation;
+        xemu_ic_generation++;
+    }
+#endif
+
     /* During early initialization, the cache may not yet be allocated. */
     if (unlikely(jc == NULL)) {
         return;
