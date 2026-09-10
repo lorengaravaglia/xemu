@@ -29,6 +29,10 @@
 
 #include "qemu/osdep.h"
 #if defined(__ANDROID__) || defined(ANDROID)
+#include <linux/perf_event.h>
+#include <sys/syscall.h>
+#endif
+#if defined(__ANDROID__) || defined(ANDROID)
 #include <sys/system_properties.h>
 #endif
 #include "qemu/module.h"
@@ -1370,6 +1374,95 @@ static void report_stats(void)
  */
 
 #if defined(__ANDROID__) || defined(ANDROID)
+
+extern int xemu_vcpu_tid;      /* accel/tcg/cpu-exec.c */
+
+/* ---- Cycle counter -----------------------------------------------------
+ *
+ * The frame cost of a fixed workload drifts up ~7% over a session while
+ * /sys reports the clock pinned at its maximum the whole time.  Either the
+ * core is really running slower than advertised (power capping that sysfs
+ * does not expose) or the emulator is doing more work as the session goes on.
+ *
+ * Counting cycles separates those: effective clock = cycles / CPU time.  If
+ * cycles per frame stay flat while milliseconds per frame rise, the hardware
+ * is slowing down and no emulator change will help; if cycles per frame rise,
+ * the extra work is ours to find.
+ */
+static int bench_cycles_fd = -1;
+
+static void bench_open_cycles(void)
+{
+    struct perf_event_attr pe;
+
+    if (bench_cycles_fd >= 0 || !xemu_vcpu_tid) {
+        return;
+    }
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_HARDWARE;
+    pe.size = sizeof(pe);
+    pe.config = PERF_COUNT_HW_CPU_CYCLES;
+    pe.inherit = 0;
+    pe.exclude_hv = 1;
+
+    /* Self-monitoring one of our own threads, which perf_event_paranoid=1
+     * permits; cross-process would need the shell helper. */
+    bench_cycles_fd = (int)syscall(__NR_perf_event_open, &pe,
+                                   xemu_vcpu_tid, -1, -1, 0);
+    if (bench_cycles_fd < 0) {
+        ALOGI("bench: cycle counter unavailable (%s)", strerror(errno));
+    }
+}
+
+static uint64_t bench_read_cycles(void)
+{
+    uint64_t v = 0;
+
+    if (bench_cycles_fd >= 0 && read(bench_cycles_fd, &v, sizeof(v)) != sizeof(v)) {
+        v = 0;
+    }
+    return v;
+}
+
+/* Hottest CPU die sensor, in degrees C.  The battery sensor lags by ~25 C and
+ * reads the pack rather than the die, so it is useless for this. */
+static double bench_cpu_temp_c(void)
+{
+    double hottest = 0.0;
+
+    for (int i = 30; i < 50; i++) {
+        char path[96];
+        char type[64] = { 0 };
+        FILE *f;
+
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/type", i);
+        f = fopen(path, "r");
+        if (!f) {
+            continue;
+        }
+        if (!fgets(type, sizeof(type), f)) {
+            fclose(f);
+            continue;
+        }
+        fclose(f);
+        if (strncmp(type, "cpu", 3) != 0) {
+            continue;
+        }
+
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", i);
+        f = fopen(path, "r");
+        if (f) {
+            long milli = 0;
+            if (fscanf(f, "%ld", &milli) == 1 && milli / 1000.0 > hottest) {
+                hottest = milli / 1000.0;
+            }
+            fclose(f);
+        }
+    }
+    return hottest;
+}
+
 /* ---- Deterministic benchmark -------------------------------------------
  *
  * The combat2 replay drives input on wall-clock time, so a faster build
@@ -1389,7 +1482,6 @@ static void report_stats(void)
  */
 extern unsigned long long xemu_tb_exec_count;
 extern unsigned long long xemu_guest_insn_count;
-extern int xemu_vcpu_tid;
 
 /* CPU time consumed by the vCPU thread, in milliseconds. */
 static double bench_vcpu_cpu_ms(void)
@@ -1425,6 +1517,7 @@ static int64_t  s_bench_start_ns;
 static uint64_t s_bench_saved_vblank_ns;
 static unsigned long long s_bench_start_tb;
 static unsigned long long s_bench_start_insn;
+static uint64_t s_bench_start_cycles;
 static double   s_bench_start_cpu_ms;
 
 void xemu_android_benchmark_start(int frames)
@@ -1483,6 +1576,8 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_tb = xemu_tb_exec_count;
     s_bench_start_insn = xemu_guest_insn_count;
     s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
+    bench_open_cycles();
+    s_bench_start_cycles = bench_read_cycles();
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     ALOGI("bench: started, %d guest frames — hands off the controls", frames);
 }
@@ -1541,6 +1636,17 @@ static void bench_tick(void)
           100.0 * (1.0 - (cpu_ms / s_bench_frames_total) / 33.33),
           ms, s_bench_frames_total * 1000.0 / ms,
           cpu_ms * 100.0 / ms, insns, tbs);
+
+    {
+        uint64_t cyc = bench_read_cycles() - s_bench_start_cycles;
+
+        ALOGI("bench: cycles %llu (%llu per frame) | effective %.2f GHz | "
+              "cpu %.1f C",
+              (unsigned long long)cyc,
+              (unsigned long long)(cyc / s_bench_frames_total),
+              cpu_ms > 0 ? cyc / (cpu_ms * 1e6) : 0.0,
+              bench_cpu_temp_c());
+    }
 }
 #endif
 
