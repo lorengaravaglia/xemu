@@ -1518,6 +1518,25 @@ static uint64_t s_bench_saved_vblank_ns;
 static unsigned long long s_bench_start_tb;
 static unsigned long long s_bench_start_insn;
 static uint64_t s_bench_start_cycles;
+
+/* Per-frame cost, bucketed against the engine's 33.3 ms budget.
+ *
+ * The average has hidden the shape of this twice.  What matters is how far
+ * over budget each frame is: frames just over flip to 30 fps with a small win,
+ * frames far over need something structural.  Cycles rather than milliseconds
+ * so the buckets do not move with clock. */
+#define BENCH_BUDGET_CYCLES 98000000ULL     /* 33.3 ms at ~2.94 GHz */
+static uint64_t s_bench_prev_cycles;
+static int s_bench_frame_buckets[6];
+static uint64_t s_bench_worst_cycles;
+
+/* Split the expensive frames from the cheap ones and compare how much guest
+ * code each ran.  If the expensive frames execute proportionally more, they
+ * are doing more work; if they execute the same and simply take longer, they
+ * are stalling on something (PGRAPH sync, memory, retranslation). */
+static uint64_t s_bench_prev_insn;
+static uint64_t s_cheap_cycles, s_cheap_insn; static int s_cheap_n;
+static uint64_t s_exp_cycles, s_exp_insn;     static int s_exp_n;
 static double   s_bench_start_cpu_ms;
 
 void xemu_android_benchmark_start(int frames)
@@ -1578,6 +1597,12 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
     bench_open_cycles();
     s_bench_start_cycles = bench_read_cycles();
+    s_bench_prev_cycles = s_bench_start_cycles;
+    memset(s_bench_frame_buckets, 0, sizeof(s_bench_frame_buckets));
+    s_bench_worst_cycles = 0;
+    s_bench_prev_insn = xemu_guest_insn_count;
+    s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
+    s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     ALOGI("bench: started, %d guest frames — hands off the controls", frames);
 }
@@ -1587,6 +1612,33 @@ static void bench_tick(void)
 {
     if (s_bench_frames_left <= 0) {
         return;
+    }
+
+    {
+        uint64_t now = bench_read_cycles();
+        uint64_t frame = now - s_bench_prev_cycles;
+        double ratio = (double)frame / BENCH_BUDGET_CYCLES;
+        int b;
+
+        s_bench_prev_cycles = now;
+        if (frame > s_bench_worst_cycles) {
+            s_bench_worst_cycles = frame;
+        }
+        b = ratio <= 0.8 ? 0 : ratio <= 1.0 ? 1 : ratio <= 1.2 ? 2 :
+            ratio <= 1.5 ? 3 : ratio <= 2.0 ? 4 : 5;
+        s_bench_frame_buckets[b]++;
+
+        {
+            uint64_t insn_now = xemu_guest_insn_count;
+            uint64_t insn = insn_now - s_bench_prev_insn;
+
+            s_bench_prev_insn = insn_now;
+            if (ratio <= 1.0) {
+                s_cheap_cycles += frame; s_cheap_insn += insn; s_cheap_n++;
+            } else if (ratio > 1.2) {
+                s_exp_cycles += frame; s_exp_insn += insn; s_exp_n++;
+            }
+        }
     }
     if (--s_bench_frames_left > 0) {
         return;
@@ -1646,6 +1698,26 @@ static void bench_tick(void)
               (unsigned long long)(cyc / s_bench_frames_total),
               cpu_ms > 0 ? cyc / (cpu_ms * 1e6) : 0.0,
               bench_cpu_temp_c());
+
+        ALOGI("bench: per-frame vs 33.3ms budget | <80%%=%d 80-100%%=%d "
+              "100-120%%=%d 120-150%%=%d 150-200%%=%d >200%%=%d | worst %.0f%%",
+              s_bench_frame_buckets[0], s_bench_frame_buckets[1],
+              s_bench_frame_buckets[2], s_bench_frame_buckets[3],
+              s_bench_frame_buckets[4], s_bench_frame_buckets[5],
+              100.0 * s_bench_worst_cycles / BENCH_BUDGET_CYCLES);
+
+        if (s_cheap_n && s_exp_n) {
+            double cheap_mc = s_cheap_cycles / (double)s_cheap_n / 1e6;
+            double exp_mc   = s_exp_cycles   / (double)s_exp_n   / 1e6;
+            double cheap_ki = s_cheap_insn / (double)s_cheap_n / 1e3;
+            double exp_ki   = s_exp_insn   / (double)s_exp_n   / 1e3;
+
+            ALOGI("bench: cheap frames (n=%d) %.0f Mcyc, %.0f k reentry-insn | "
+                  "expensive (n=%d) %.0f Mcyc, %.0f k reentry-insn | "
+                  "cycles x%.2f, work x%.2f",
+                  s_cheap_n, cheap_mc, cheap_ki, s_exp_n, exp_mc, exp_ki,
+                  exp_mc / cheap_mc, cheap_ki > 0 ? exp_ki / cheap_ki : 0.0);
+        }
     }
 }
 #endif
