@@ -286,6 +286,30 @@ static void tlb_mmu_flush_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast)
     memset(desc->vtable, -1, sizeof(desc->vtable));
 }
 
+/*
+ * TLB flush counts, for the benchmark.  QEMU already maintains these; the
+ * question is how often a full flush happens per frame.  Each one wipes all
+ * 22 mmu-mode TLBs AND calls tcg_flush_jmp_cache(), so it is far more
+ * expensive than its name suggests, and xemu triggers it from the GPU thread
+ * whenever an NV2A surface is created or destroyed.
+ */
+void xemu_tlb_flush_counts(unsigned long long *full,
+                           unsigned long long *part,
+                           unsigned long long *elide);
+void xemu_tlb_flush_counts(unsigned long long *full,
+                           unsigned long long *part,
+                           unsigned long long *elide)
+{
+    CPUState *cpu = first_cpu;
+
+    *full = *part = *elide = 0;
+    if (cpu) {
+        *full  = cpu->neg.tlb.c.full_flush_count;
+        *part  = cpu->neg.tlb.c.part_flush_count;
+        *elide = cpu->neg.tlb.c.elide_flush_count;
+    }
+}
+
 static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
                                         int64_t now)
 {

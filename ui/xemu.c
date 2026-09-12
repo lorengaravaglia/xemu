@@ -1537,6 +1537,14 @@ static uint64_t s_bench_worst_cycles;
 static uint64_t s_bench_prev_insn;
 static uint64_t s_cheap_cycles, s_cheap_insn; static int s_cheap_n;
 static uint64_t s_exp_cycles, s_exp_insn;     static int s_exp_n;
+/* TLB flush counts: each full flush wipes all 22 mmu-mode TLBs and the jump
+ * cache, and xemu triggers one from the GPU thread on every NV2A surface
+ * create/destroy.  Defined in accel/tcg/cputlb.c. */
+extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
+                                  unsigned long long *);
+static unsigned long long s_bench_start_full, s_bench_start_part,
+                          s_bench_start_elide;
+
 static double   s_bench_start_cpu_ms;
 
 void xemu_android_benchmark_start(int frames)
@@ -1595,6 +1603,8 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_tb = xemu_tb_exec_count;
     s_bench_start_insn = xemu_guest_insn_count;
     s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
+    xemu_tlb_flush_counts(&s_bench_start_full, &s_bench_start_part,
+                          &s_bench_start_elide);
     bench_open_cycles();
     s_bench_start_cycles = bench_read_cycles();
     s_bench_prev_cycles = s_bench_start_cycles;
@@ -1681,6 +1691,19 @@ static void bench_tick(void)
      * as an absolute instruction rate but good for confirming two runs did the
      * same work.
      */
+    {
+        unsigned long long f, pa, e;
+
+        xemu_tlb_flush_counts(&f, &pa, &e);
+        ALOGI("bench: TLB FLUSHES %.2f full/frame (each wipes 22 TLBs + the "
+              "jump cache) | %.2f partial/frame | %.2f elided/frame "
+              "| ABSOLUTE since boot: full=%llu part=%llu elide=%llu",
+              (double)(f - s_bench_start_full) / s_bench_frames_total,
+              (double)(pa - s_bench_start_part) / s_bench_frames_total,
+              (double)(e - s_bench_start_elide) / s_bench_frames_total,
+              f, pa, e);
+    }
+
     ALOGI("bench: RESULT %d frames | vcpu %.2f ms/frame (budget 33.33) | "
           "headroom %.0f%% | wall %.1f ms (%.2f fps, guest-paced) | "
           "util %.0f%% | reentry_insns %llu | reentry_tb %llu",
