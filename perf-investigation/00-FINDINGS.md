@@ -555,3 +555,35 @@ until measured -- the same standard applied to everything else here.
 3. TB cache hints are worth taking regardless -- they address first-minutes
    JIT stutter, which is a real user-visible problem our benchmark (which
    runs after a warmup) cannot see.
+
+---
+
+## I. HEAD-TO-HEAD HARNESS vs hakuX (2026-09-12)
+
+hakuX is installed (`com.rfandango.haku_x`, v0.3.1) and **configured with the
+same game** -- Halo CE (USA) (Rev 2), 3.4 GB.  It is NOT debuggable, so
+`run-as` and `simpleperf --app` are unavailable; measurement must come from
+outside the app.
+
+**`perf-investigation/neutral-bench.sh`** does that.  It reports process and
+per-thread CPU from `/proc` and `top -H`, which work on any app.  Validated
+against our own in-process benchmark: it reports vCPU thread 96-100% where the
+benchmark reports 98% util and 32.56 ms/frame.
+
+**SurfaceFlinger frame timing was tried and rejected.**  `dumpsys
+SurfaceFlinger --latency <BLAST layer>` does yield real timestamps (filter the
+INT64_MAX sentinel for un-presented frames), but it counts **panel
+presentations** -- ~60/s, each 30 fps guest frame shown twice -- not emulated
+frames.  It cannot discriminate between emulators and must not be used as an
+fps source.  Emulated fps has to come from each app's own overlay.
+
+**Metric:** `vcpu ms/frame = vCPU_thread_pct / 100 * 1000 / overlay_fps`.
+Both emulators are guest-paced at 30 fps, so in a light scene the fps ties and
+**CPU% is the efficiency signal**; in combat, where we run over budget, fps
+itself discriminates.
+
+**Blocked on:** hakuX needs to be driven to a combat scene comparable to our
+save slot 5.  Its emulation activity is `exported="false"` so it cannot be
+started from adb, and D-pad navigation of its library proved unreliable.  This
+is a 30-second manual step for the user, after which the measurement is
+automated.
