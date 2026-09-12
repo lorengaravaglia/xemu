@@ -566,6 +566,31 @@ int xemu_android_get_compiled_shader_count(void) {
  * on the first frame after QEMU/NV2A is fully initialized. */
 static volatile unsigned int g_surface_scale = 1;
 
+/*
+ * Debug override for the internal render scale, for one specific experiment:
+ * does the GPU thread's memory traffic evict the vCPU's working set?
+ *
+ * Raising the scale multiplies GPU-side memory traffic (larger surfaces to
+ * render, download and copy) while leaving guest work identical -- the game
+ * issues exactly the same draws either way.  So if the vCPU's last-level miss
+ * count follows the scale, the GPU is competing for L3; if it does not, the
+ * misses are the guest's own access pattern and there is nothing to reclaim.
+ */
+static unsigned int surface_scale_override(unsigned int requested)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+
+    if (__system_property_get("debug.xemu.surface_scale", v) > 0) {
+        int n = atoi(v);
+
+        if (n >= 1 && n <= 4) {
+            LOGI("surface scale overridden to %d (was %u)", n, requested);
+            return (unsigned int)n;
+        }
+    }
+    return requested;
+}
+
 /* Rumble state written by xemu_input_update_rumble() in ui/xemu-input.c. */
 extern volatile uint16_t g_android_rumble_l;
 extern volatile uint16_t g_android_rumble_r;
@@ -577,6 +602,7 @@ void xemu_android_get_rumble(uint16_t *left, uint16_t *right)
 }
 
 void xemu_android_set_surface_scale(unsigned int scale) {
+    scale = surface_scale_override(scale);
     g_surface_scale = (scale >= 1 && scale <= 4) ? scale : 1;
 }
 

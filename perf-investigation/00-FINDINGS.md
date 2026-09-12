@@ -297,15 +297,21 @@ doing**.  That closes the largest item previously listed as untested upside.
 **3. The L1D write-miss counter reads exactly 0** and is almost certainly
 unsupported on this PMU.  Do not read anything into it.
 
-**Still genuinely open:** L2 and L3 providing ~nothing is itself odd.  Either
-the guest working set simply dwarfs the 8 MB L3, or something is evicting it
-continuously -- the GPU thread spends ~11.5% of its cycles in
-memcpy/memcmp/memset.  Note the earlier "L3 contention is dead" entry in the
-dead-ends table ruled out contention *varying with frame weight* (IPC was flat
-cheap-vs-expensive); it did **not** rule out a constant baseline of eviction,
-which would depress IPC uniformly and be invisible to that test.  The cheap
-test is to re-measure last-level misses with the GPU doing less work (lower
-internal surface scale) and see whether the vCPU's miss count follows.
+**GPU L3 contention: TESTED 2026-09-12, not supported.**  Raising the internal
+surface scale from 1x to 3x multiplies GPU-side memory traffic roughly ninefold
+while leaving guest work unchanged (the game issues the same draws).  vCPU
+last-level misses went from 157,848 to 148,444 per frame -- slightly DOWN, the
+wrong direction for eviction.  Normalising by vCPU time, since at 3x the GPU
+becomes the bottleneck and the vCPU idles (util 98% -> 86%), gives 4,890 vs
+5,183 misses/ms: a 6% rise, inside the spread.  Combined with the earlier
+flat-IPC result, there is no evidence the GPU thread is competing for cache in
+a way that matters.  Switchable with `debug.xemu.surface_scale`.
+
+**So the remaining answer is the dull one:** L2 and L3 absorb almost nothing
+because the guest's working set genuinely dwarfs them.  Halo streams textures, geometry and game state through 64 MB of guest RAM
+against an 8 MB shared L3; ~150-190k of those accesses per frame reach DRAM at
+~110 cycles each, which is the 17-23% of frame time, and it is the game's own
+access pattern rather than anything the emulator adds.
 
 ### 6. DIAGNOSTIC (no lever): host dTLB pressure
 334k-364k host dTLB refills/frame, exceeding total cache misses. Guest RAM is
