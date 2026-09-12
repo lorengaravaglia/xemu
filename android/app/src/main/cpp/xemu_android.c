@@ -466,7 +466,29 @@ static void *xemu_android_thread(void *opaque) {
     argv[3] = strdup("-audio");
     argv[4] = strdup("driver=aaudio");
     argv[5] = strdup("-accel");
-    argv[6] = strdup("tcg,thread=multi,tb-size=256");
+    {
+        /*
+         * Translation buffer size, in MB.  Measured host iTLB refills are
+         * ~112k/frame, and a 256 MB buffer holding 533-byte blocks scatters
+         * hot code across far more pages than the iTLB can cover, so a
+         * smaller buffer may trade recompilation for locality.  Overridable
+         * with debug.xemu.tb_size for A/B measurement.
+         */
+        char tv[PROP_VALUE_MAX] = { 0 };
+        int mb = 256;
+        char *accel = malloc(64);
+
+        if (__system_property_get("debug.xemu.tb_size", tv) > 0) {
+            int v = atoi(tv);
+
+            if (v >= 8 && v <= 1024) {
+                mb = v;
+            }
+        }
+        snprintf(accel, 64, "tcg,thread=multi,tb-size=%d", mb);
+        argv[6] = accel;
+        LOGI("tcg translation buffer: %d MB", mb);
+    }
     argv[7] = NULL;
     int argc = 7;
 

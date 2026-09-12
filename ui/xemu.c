@@ -1392,6 +1392,34 @@ extern int xemu_vcpu_tid;      /* accel/tcg/cpu-exec.c */
 static int bench_cycles_fd = -1;
 
 static int bench_insn_fd = -1;
+static int bench_dtlb_fd = -1;   /* host dTLB walks */
+static int bench_itlb_fd = -1;   /* host iTLB walks */
+static int bench_l1d_fd  = -1;   /* host L1D read misses */
+
+/* PERF_TYPE_HW_CACHE config: id | (op << 8) | (result << 16) */
+#define BENCH_CACHE_CFG(id, op, res) ((id) | ((op) << 8) | ((res) << 16))
+
+static int bench_open_cache_counter(uint64_t config)
+{
+    struct perf_event_attr pe;
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_HW_CACHE;
+    pe.size = sizeof(pe);
+    pe.config = config;
+    pe.exclude_hv = 1;
+    return (int)syscall(__NR_perf_event_open, &pe, xemu_vcpu_tid, -1, -1, 0);
+}
+
+static uint64_t bench_read_fd(int fd)
+{
+    uint64_t v = 0;
+
+    if (fd >= 0 && read(fd, &v, sizeof(v)) != sizeof(v)) {
+        v = 0;
+    }
+    return v;
+}
 
 /*
  * Host instructions retired on the vCPU thread.  This is the honest work
@@ -1440,6 +1468,27 @@ static void bench_open_cycles(void)
     pe.exclude_hv = 1;
     bench_insn_fd = (int)syscall(__NR_perf_event_open, &pe,
                                  xemu_vcpu_tid, -1, -1, 0);
+
+    /*
+     * Host address-translation cost, never measured on this project.  Guest
+     * RAM is 64 MB over 16,384 4 KB host pages (THP is "never" on this
+     * device and cannot be changed without root), the JIT buffer is 256 MB,
+     * and blocks average 533 bytes -- so both the data and instruction sides
+     * could plausibly be walking page tables.  This says whether any of the
+     * 213k misses/frame are host TLB walks rather than real data misses.
+     */
+    bench_dtlb_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_DTLB,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_itlb_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_ITLB,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_l1d_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1D,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
 }
 
 static uint64_t bench_read_cycles(void)
@@ -1572,6 +1621,7 @@ extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
 extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
 static uint64_t s_bench_prev_hinsn, s_cheap_hinsn, s_exp_hinsn;
 static uint64_t s_bench_prev_mmio, s_cheap_mmio, s_exp_mmio;
+static uint64_t s_bench_start_dtlb, s_bench_start_itlb, s_bench_start_l1d;
 static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
 static unsigned long long s_bench_start_full, s_bench_start_part,
                           s_bench_start_elide;
@@ -1648,6 +1698,9 @@ void xemu_android_benchmark_start(int frames)
     s_bench_prev_insn = xemu_guest_insn_count;
     s_bench_prev_hinsn = bench_read_insns();
     s_bench_prev_mmio = xemu_mmio_reads + xemu_mmio_writes;
+    s_bench_start_dtlb = bench_read_fd(bench_dtlb_fd);
+    s_bench_start_itlb = bench_read_fd(bench_itlb_fd);
+    s_bench_start_l1d  = bench_read_fd(bench_l1d_fd);
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1736,6 +1789,26 @@ static void bench_tick(void)
      * as an absolute instruction rate but good for confirming two runs did the
      * same work.
      */
+    {
+        uint64_t dt = bench_read_fd(bench_dtlb_fd) - s_bench_start_dtlb;
+        uint64_t it = bench_read_fd(bench_itlb_fd) - s_bench_start_itlb;
+        uint64_t l1 = bench_read_fd(bench_l1d_fd) - s_bench_start_l1d;
+        uint64_t n = s_bench_frames_total;
+
+        ALOGI("bench: HOST TLB dtlb-miss %llu/frame | itlb-miss %llu/frame | "
+              "L1D-read-miss %llu/frame  (generic cache-miss is ~213k/frame; "
+              "if dtlb is a small fraction, host address translation is not "
+              "the cost)  [fds %d/%d/%d, -1 = counter unavailable]",
+              (unsigned long long)(dt / n), (unsigned long long)(it / n),
+              (unsigned long long)(l1 / n),
+              bench_dtlb_fd, bench_itlb_fd, bench_l1d_fd);
+    }
+
+    ALOGI("bench: MMIO %llu reads/frame, %llu writes/frame (each leaves "
+          "generated code and takes the BQL + a device lock)",
+          (xemu_mmio_reads - s_bench_start_mmio_r) / s_bench_frames_total,
+          (xemu_mmio_writes - s_bench_start_mmio_w) / s_bench_frames_total);
+
     {
         unsigned long long f, pa, e;
 
