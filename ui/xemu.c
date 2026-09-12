@@ -1395,6 +1395,30 @@ static int bench_insn_fd = -1;
 static int bench_dtlb_fd = -1;   /* host dTLB walks */
 static int bench_itlb_fd = -1;   /* host iTLB walks */
 static int bench_l1d_fd  = -1;   /* host L1D read misses */
+static int bench_ll_fd   = -1;   /* host LAST-LEVEL misses: the DRAM question */
+static int bench_l1dw_fd = -1;   /* host L1D write misses */
+static int bench_dwalk_fd = -1;  /* ARM DTLB_WALK  (raw 0x34) */
+static int bench_iwalk_fd = -1;  /* ARM ITLB_WALK  (raw 0x35) */
+
+/*
+ * A dTLB *refill* is not a page-table walk: most are satisfied by the
+ * 2048-entry L2 TLB.  A WALK is a real traversal of the page tables, and each
+ * level is itself a memory access that can miss to DRAM.  With 285k refills
+ * per frame against 194k last-level misses, walks could be a large share of
+ * the DRAM traffic -- which is exactly what 2 MB pages would remove.  These
+ * are architected Armv8 PMU events, so they are read raw.
+ */
+static int bench_open_raw(uint64_t config)
+{
+    struct perf_event_attr pe;
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_RAW;
+    pe.size = sizeof(pe);
+    pe.config = config;
+    pe.exclude_hv = 1;
+    return (int)syscall(__NR_perf_event_open, &pe, xemu_vcpu_tid, -1, -1, 0);
+}
 
 /* PERF_TYPE_HW_CACHE config: id | (op << 8) | (result << 16) */
 #define BENCH_CACHE_CFG(id, op, res) ((id) | ((op) << 8) | ((res) << 16))
@@ -1489,6 +1513,25 @@ static void bench_open_cycles(void)
         BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1D,
                         PERF_COUNT_HW_CACHE_OP_READ,
                         PERF_COUNT_HW_CACHE_RESULT_MISS));
+
+    /*
+     * The decisive one.  The generic HW_CACHE_MISSES counter reads ~213k/frame
+     * and L1D read misses read 203-232k -- nearly identical, which suggests
+     * the generic counter is reporting L1 refills rather than last-level
+     * misses.  That distinction is worth ~10x in cost per miss (an L2 hit is
+     * ~12 cycles, a DRAM trip 100+), and the whole "memory-latency bound,
+     * irreducible" conclusion rests on it.  Count last-level misses directly.
+     */
+    bench_ll_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_LL,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_l1dw_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1D,
+                        PERF_COUNT_HW_CACHE_OP_WRITE,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_dwalk_fd = bench_open_raw(0x34);   /* DTLB_WALK */
+    bench_iwalk_fd = bench_open_raw(0x35);   /* ITLB_WALK */
 }
 
 static uint64_t bench_read_cycles(void)
@@ -1634,6 +1677,8 @@ static unsigned long long s_bench_start_ccop[XEMU_CC_OP_MAX];
 static uint64_t s_bench_prev_hinsn, s_cheap_hinsn, s_exp_hinsn;
 static uint64_t s_bench_prev_mmio, s_cheap_mmio, s_exp_mmio;
 static uint64_t s_bench_start_dtlb, s_bench_start_itlb, s_bench_start_l1d;
+static uint64_t s_bench_start_ll, s_bench_start_l1dw;
+static uint64_t s_bench_start_dwalk, s_bench_start_iwalk;
 static unsigned long long s_bench_start_rep_i, s_bench_start_rep_e;
 static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
 static unsigned long long s_bench_start_full, s_bench_start_part,
@@ -1724,6 +1769,10 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_dtlb = bench_read_fd(bench_dtlb_fd);
     s_bench_start_itlb = bench_read_fd(bench_itlb_fd);
     s_bench_start_l1d  = bench_read_fd(bench_l1d_fd);
+    s_bench_start_ll   = bench_read_fd(bench_ll_fd);
+    s_bench_start_l1dw = bench_read_fd(bench_l1dw_fd);
+    s_bench_start_dwalk = bench_read_fd(bench_dwalk_fd);
+    s_bench_start_iwalk = bench_read_fd(bench_iwalk_fd);
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1843,6 +1892,45 @@ static void bench_tick(void)
         uint64_t it = bench_read_fd(bench_itlb_fd) - s_bench_start_itlb;
         uint64_t l1 = bench_read_fd(bench_l1d_fd) - s_bench_start_l1d;
         uint64_t n = s_bench_frames_total;
+
+        {
+            uint64_t ll = bench_read_fd(bench_ll_fd) - s_bench_start_ll;
+            uint64_t l1w = bench_read_fd(bench_l1dw_fd) - s_bench_start_l1dw;
+            uint64_t l1r = bench_read_fd(bench_l1d_fd) - s_bench_start_l1d;
+            uint64_t nn = s_bench_frames_total;
+            double cyc_frame = 93.0e6;
+
+            ALOGI("bench: MEMORY L1D read-miss %llu/frame | L1D write-miss "
+                  "%llu/frame | LAST-LEVEL miss %llu/frame  [fds %d/%d]",
+                  (unsigned long long)(l1r / nn),
+                  (unsigned long long)(l1w / nn),
+                  (unsigned long long)(ll / nn),
+                  bench_l1d_fd, bench_ll_fd);
+            {
+                uint64_t dw = bench_read_fd(bench_dwalk_fd)
+                              - s_bench_start_dwalk;
+                uint64_t iw = bench_read_fd(bench_iwalk_fd)
+                              - s_bench_start_iwalk;
+
+                ALOGI("bench: PAGE WALKS dtlb-walk %llu/frame | itlb-walk "
+                      "%llu/frame | vs %llu last-level misses/frame  "
+                      "(walks are memory accesses too; 2 MB pages would "
+                      "remove nearly all of them)  [fds %d/%d, -1 = "
+                      "counter unavailable]",
+                      (unsigned long long)(dw / nn),
+                      (unsigned long long)(iw / nn),
+                      (unsigned long long)(ll / nn),
+                      bench_dwalk_fd, bench_iwalk_fd);
+            }
+
+            ALOGI("bench: MEMORY cost model | LL misses at ~110 cyc = %.1f%% "
+                  "of frame | L1 misses served by L2 at ~12 cyc = %.1f%% "
+                  "(the two together are the whole memory story)",
+                  100.0 * (ll / nn) * 110.0 / cyc_frame,
+                  100.0 * ((l1r + l1w) / nn > (ll / nn) ?
+                           ((l1r + l1w) / nn - (ll / nn)) : 0) * 12.0
+                      / cyc_frame);
+        }
 
         ALOGI("bench: HOST TLB dtlb-miss %llu/frame | itlb-miss %llu/frame | "
               "L1D-read-miss %llu/frame  (generic cache-miss is ~213k/frame; "

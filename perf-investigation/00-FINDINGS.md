@@ -271,13 +271,49 @@ Self-contained: no kernel-API hook, no per-title signature fragility.
 ECX; if under ~200k iterations/frame, drop it. Currently the most promising
 untested lead.
 
-### 5. DIAGNOSTIC (no lever): host dTLB pressure
+### 5. SETTLED: the memory hierarchy, measured properly
+**2026-09-12.  Three counters that had never been read settle what "memory
+bound" actually means here.**
+
+| per frame | count |
+|---|---|
+| L1D read misses | 136k-202k |
+| **last-level misses** | **148k-194k** |
+| dTLB *walks* (raw ARM 0x34) | **~4,800** |
+| iTLB walks (raw 0x35) | ~2,000 |
+| dTLB refills (L1D_TLB_REFILL) | 276k-364k |
+
+**1. Nearly every L1 miss reaches DRAM.** Last-level misses are 96-98% of L1D
+read misses, so L2 and L3 absorb almost nothing.  At ~110 cycles each that is
+**17-23% of the frame** -- the original "23%" estimate was right, and the
+worry that the generic counter was really measuring L1 refills was unfounded.
+
+**2. Huge pages are NOT the missed opportunity.**  A dTLB *refill* is not a
+page-table walk -- almost all refills are served by the 2048-entry L2 TLB.
+Actual walks are ~4,800/frame, **3% of the last-level misses**.  2 MB pages
+would remove a rounding error, so **rooting the device for THP is not worth
+doing**.  That closes the largest item previously listed as untested upside.
+
+**3. The L1D write-miss counter reads exactly 0** and is almost certainly
+unsupported on this PMU.  Do not read anything into it.
+
+**Still genuinely open:** L2 and L3 providing ~nothing is itself odd.  Either
+the guest working set simply dwarfs the 8 MB L3, or something is evicting it
+continuously -- the GPU thread spends ~11.5% of its cycles in
+memcpy/memcmp/memset.  Note the earlier "L3 contention is dead" entry in the
+dead-ends table ruled out contention *varying with frame weight* (IPC was flat
+cheap-vs-expensive); it did **not** rule out a constant baseline of eviction,
+which would depress IPC uniformly and be invisible to that test.  The cheap
+test is to re-measure last-level misses with the GPU doing less work (lower
+internal surface scale) and see whether the vCPU's miss count follows.
+
+### 6. DIAGNOSTIC (no lever): host dTLB pressure
 334k-364k host dTLB refills/frame, exceeding total cache misses. Guest RAM is
 64 MB over 16,384 4 KB pages against an L2 TLB covering ~8 MB. Huge pages
 would fix it; THP is `[never]` on this device and root-only. See
 `04-host-memory.md`. Upper bound, not a walk count (ARM L1D_TLB_REFILL).
 
-### 6. OPEN (reduced): tlb_reset_dirty's O(whole TLB) scan
+### 7. OPEN (reduced): tlb_reset_dirty's O(whole TLB) scan
 From the heavy-frames agent, not yet measured:
 - `tlb_reset_dirty` is O(whole TLB), not O(range): 22 mmu indexes x (256+8)
   entries = 5,808 entries / ~400 KB touched per call, larger than the X3's L1D.
@@ -286,7 +322,7 @@ From the heavy-frames agent, not yet measured:
   Measured at 2.8% of the vCPU's libxemu cycles (= 0.39% of vCPU) directly,
   but the cache-pollution cost is unmeasured.
 
-### 7. ~~L3 contention from the GPU thread~~ — DEAD, see section D
+### 8. ~~L3 contention from the GPU thread~~ — see section 5, NOT fully dead
 
 ---
 
@@ -306,7 +342,7 @@ From the heavy-frames agent, not yet measured:
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
 | GPU thread stealing vCPU time by blocking | vCPU shows no wait symbols, 1.26% kernel |
 | Shrinking the JIT translation buffer (iTLB locality) | **MEASURED 2026-09-12: tb-size 256 vs 32 MB = 32.55 vs 32.55 ms/frame.** iTLB misses rose with the smaller buffer. Switchable via `debug.xemu.tb_size`, default 256. |
-| Huge pages for guest RAM | THP is `[never]` on this device and the sysfs file is root-only. QEMU already issues MADV_HUGEPAGE (physmem.c:2421); the kernel ignores it. Only unlocked by rooting the device — not a code change. |
+| Huge pages for guest RAM | **MEASURED 2026-09-12: actual page-table walks are ~4,800/frame against ~148k last-level misses, about 3%.** Nearly all dTLB refills are served by the L2 TLB and never become walks. 2 MB pages would remove a rounding error, so rooting the device for THP is not worth doing. (THP is also `[never]` here and root-only; QEMU already issues MADV_HUGEPAGE at physmem.c:2421.) |
 | Guest busy-wait / spin elimination (idle detection) | **MEASURED 2026-09-11.** MMIO is only ~730 accesses/frame, and it is FLAT across frame classes (x1.06, x1.09) while host work rises x1.48 — heavy frames are not spinning. Cheap frames sit at 93 Mcyc against a 98 Mcyc budget, so there is barely any slack to spin in during combat. The 96-98% utilisation figure reflects real work, not polling. |
 | MMIO lockless_io fast path (skipping BQL + device lock) | Same run: ~730 MMIO accesses/frame. Even at a generous ~1000 cycles each that is <1% of a 93 Mcyc frame. The ~10-line change is real and QEMU already ships the switch, but there is nothing to win. |
 | L3 contention from the GPU thread evicting the vCPU's data | **MEASURED 2026-09-11: IPC is FLAT across frame weights** (cheap vs expensive: 1.69/1.67, 1.85/1.90, 1.86/1.90). If GPU memory traffic were evicting us, heavy frames — which have more GPU work — would show *lower* IPC. They do not. My hypothesis, killed by my own measurement. |
