@@ -1402,6 +1402,8 @@ static int bench_iwalk_fd = -1;  /* ARM ITLB_WALK  (raw 0x35) */
 static int bench_l1i_fd  = -1;   /* host L1I read misses */
 static int bench_l2r_fd  = -1;   /* ARM L2D_CACHE_REFILL (raw 0x17) */
 static int bench_l1irf_fd = -1;  /* ARM L1I_CACHE_REFILL (raw 0x01) */
+static int bench_stallf_fd = -1; /* ARM STALL_FRONTEND (raw 0x23) */
+static int bench_stallb_fd = -1; /* ARM STALL_BACKEND  (raw 0x24) */
 
 /*
  * A dTLB *refill* is not a page-table walk: most are satisfied by the
@@ -1548,6 +1550,18 @@ static void bench_open_cycles(void)
                         PERF_COUNT_HW_CACHE_OP_READ,
                         PERF_COUNT_HW_CACHE_RESULT_MISS));
     bench_l1irf_fd = bench_open_raw(0x01);   /* L1I_CACHE_REFILL */
+
+    /*
+     * Why is IPC only 1.85 on a 6-wide core with 0.10% branch mispredicts?
+     * These two say where the issue slots go.  STALL_FRONTEND counts cycles
+     * with no operation issued because none was available to dispatch --
+     * instruction fetch, i.e. the code side.  STALL_BACKEND counts cycles
+     * where one was available but could not issue -- execution resources or
+     * waiting on memory.  Which one dominates decides whether the lever is
+     * code layout or the dependency structure of the generated code.
+     */
+    bench_stallf_fd = bench_open_raw(0x23);
+    bench_stallb_fd = bench_open_raw(0x24);
     bench_l2r_fd   = bench_open_raw(0x17);   /* L2D_CACHE_REFILL */
 }
 
@@ -1697,6 +1711,7 @@ static uint64_t s_bench_start_dtlb, s_bench_start_itlb, s_bench_start_l1d;
 static uint64_t s_bench_start_ll, s_bench_start_l1dw;
 static uint64_t s_bench_start_dwalk, s_bench_start_iwalk;
 static uint64_t s_bench_start_l1i, s_bench_start_l1irf, s_bench_start_l2r;
+static uint64_t s_bench_start_stallf, s_bench_start_stallb;
 static unsigned long long s_bench_start_rep_i, s_bench_start_rep_e;
 static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
 static unsigned long long s_bench_start_full, s_bench_start_part,
@@ -1794,6 +1809,8 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_l1i   = bench_read_fd(bench_l1i_fd);
     s_bench_start_l1irf = bench_read_fd(bench_l1irf_fd);
     s_bench_start_l2r   = bench_read_fd(bench_l2r_fd);
+    s_bench_start_stallf = bench_read_fd(bench_stallf_fd);
+    s_bench_start_stallb = bench_read_fd(bench_stallb_fd);
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1927,6 +1944,22 @@ static void bench_tick(void)
                   (unsigned long long)(l1w / nn),
                   (unsigned long long)(ll / nn),
                   bench_l1d_fd, bench_ll_fd);
+            {
+                uint64_t sf = bench_read_fd(bench_stallf_fd)
+                              - s_bench_start_stallf;
+                uint64_t sb = bench_read_fd(bench_stallb_fd)
+                              - s_bench_start_stallb;
+
+                ALOGI("bench: STALLS frontend %llu Mcyc/frame (%.1f%% of "
+                      "frame) | backend %llu Mcyc/frame (%.1f%%)  "
+                      "[frontend = starved of instructions -> code layout; "
+                      "backend = cannot issue -> dependencies or memory]",
+                      (unsigned long long)(sf / nn / 1000000),
+                      100.0 * (sf / nn) / cyc_frame,
+                      (unsigned long long)(sb / nn / 1000000),
+                      100.0 * (sb / nn) / cyc_frame);
+            }
+
             {
                 uint64_t i1 = bench_read_fd(bench_l1i_fd) - s_bench_start_l1i;
                 uint64_t irf = bench_read_fd(bench_l1irf_fd)

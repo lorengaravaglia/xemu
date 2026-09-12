@@ -462,3 +462,96 @@ every TB exit returns to the dispatcher and the counter becomes an EXACT guest
 instruction count. Then the cheap-vs-expensive work ratio is real. Better
 still, use NV2A draw-call counters (`hw/xbox/nv2a/debug.h:71-134`) as an
 independent, uncontaminated denominator.
+
+---
+
+## G. THE REFRAME (2026-09-12): it is dependency chains, not instruction count
+
+Measured `STALL_FRONTEND` (raw 0x23) and `STALL_BACKEND` (raw 0x24) on the
+vCPU thread -- the diagnostic that explains why IPC sits at 1.85 on a 6-wide
+core, and which had never been run.
+
+| | Mcyc/frame | share |
+|---|---|---|
+| frontend stall (starved of instructions) | 3 | **4%** |
+| backend stall (cannot issue) | 16 | **18%** |
+| actually issuing | ~74 | 78% |
+
+**Two conclusions, and the second one changes the strategy.**
+
+**1. The frontend is fine.**  Despite ~700k L1I misses/frame, only 4% of
+cycles are spent starved of instructions -- the fetch machinery hides them.
+So TB layout/packing is worth at most ~4%, and that lead should be dropped.
+
+**2. We are not stall-bound; we are ISSUE-bound at low ILP.**  78% of cycles
+are issuing, but at ~2.2 instructions per cycle against a 6-wide core -- about
+37% of the machine's width.  The generated code does not contain enough
+independent work to fill it.
+
+**This explains all six null results at once.**  Barriers, fastmem, the TLB
+check, the flag helper, the dispatch switch -- every one removed *independent*
+instructions, which were riding in spare issue slots and cost nothing.  The
+binding constraint is the **length of dependency chains** in generated code,
+not the number of instructions in it.
+
+**What shortens dependency chains** (and is therefore worth trying, unlike
+everything tried so far):
+- **Static register allocation** -- guest registers pinned in host registers
+  instead of round-tripping through `env`.  Every env store followed by an env
+  load is a store-to-load forwarding dependency.  FEX reports ~20% on 32-bit
+  guests, and our guest is 32-bit x86 with 8 GPRs against ~25 free host regs.
+- **Dead flag elimination by dataflow** -- not the peephole we tried, but a
+  real backward pass removing cc_* writes never read.  Each one is a chain.
+- **Superblocks** -- previously rejected on trace-formation cost, but their
+  value here is exposing ILP across block boundaries, not saving the exit.
+
+**A sibling project has already built two of these.**  See section H.
+
+---
+
+## H. PRIOR ART ON DISK: hakuX and x1box (2026-09-12)
+
+`/Users/lorengaravaglia/projects/hakuX` (github.com/rfandango/hakuX) and
+`/Users/lorengaravaglia/projects/x1box/xemu` are **separate Xbox-on-Android
+projects of the same lineage**, not forks of ours.  Both carry substantial TCG
+work we do not have -- identical line counts, so they share a patched
+ancestor:
+
+| file | lines they have that we do not |
+|---|---|
+| `tcg/aarch64/tcg-target.c.inc` | **+734** |
+| `accel/tcg/cpu-exec.c` | +368 / +374 |
+| `target/i386/tcg/translate.c` | +203 / +232 |
+| `accel/tcg/tb-maint.c` | +44 / +61 |
+
+**Files that do not exist in our tree at all:**
+
+- **`tcg/tier1-opt.c` (378 lines)** -- a two-tier JIT.  Blocks compiled with
+  `CF_TIER1` get a tier-1 pass doing **dead flag elimination by backward
+  dataflow** over `cc_op`/`cc_dst`/`cc_src`/`cc_src2`, removing writes whose
+  results are overwritten before being read.  Runs after `tcg_optimize()` and
+  before liveness.  **This is exactly the dependency-chain problem section G
+  identifies, solved structurally.**
+- **`accel/tcg/tb-cache-hints.c` (713 lines)** -- persistent TB cache hints.
+  Records which blocks are generated during gameplay, saves them to disk, and
+  pre-translates them on the next launch to eliminate JIT stutter.  Carries
+  hotness metadata for tiered recompilation.
+- **Xbox-specific reserved registers**: `TCG_REG_X27` pinned to
+  `&xbox_ram_fp` and `TCG_REG_X26` as a host base, with a `CBZ` guard on the
+  fast path -- a different and cheaper approach to guest memory than our
+  4 GB-window fastmem (which measured neutral).
+- Their own AArch64 scalar FP encodings, independent of our x87 work.
+
+**hakuX is already installed on the test device as `com.rfandango.haku_x`**,
+so a head-to-head on the same hardware and scene is possible and is the
+cheapest way to find out whether any of this actually delivers.  Their
+CHANGELOG makes no performance claims, so treat the techniques as unproven
+until measured -- the same standard applied to everything else here.
+
+**Recommended order:**
+1. Head-to-head hakuX vs ours, same scene, same device.  Decides everything.
+2. If they win: port the tier-1 dead-flag pass first (it targets dependency
+   chains, which section G says is the binding constraint).
+3. TB cache hints are worth taking regardless -- they address first-minutes
+   JIT stutter, which is a real user-visible problem our benchmark (which
+   runs after a warmup) cannot see.
