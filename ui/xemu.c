@@ -1621,6 +1621,8 @@ extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
 extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
 extern unsigned long long xemu_rep_iters, xemu_rep_execs;
 extern unsigned long long xemu_ccop_hist[];
+extern unsigned long long xemu_cc_checks, xemu_cc_bad;
+extern int g_cc_inline, g_cc_validate, g_cc_fastpath;
 extern const char *xemu_ccop_name(int op);
 extern const int xemu_ccop_nb;          /* real size -- do NOT guess */
 #define XEMU_CC_OP_MAX 80
@@ -1886,6 +1888,17 @@ static void bench_tick(void)
                   xemu_ccop_name(top[2]), 100.0 * cur[top[2]] / tot,
                   xemu_ccop_name(top[3]), 100.0 * cur[top[3]] / tot);
         }
+    }
+
+    ALOGI("bench: CC SWITCHES inline=%d validate=%d fastpath=%d "
+          "(if these do not follow the properties, the wiring is broken)",
+          g_cc_inline, g_cc_validate, g_cc_fastpath);
+
+    if (xemu_cc_checks) {
+        ALOGI("bench: CC INLINE VALIDATION %llu checks, %llu MISMATCHES%s",
+              xemu_cc_checks, xemu_cc_bad,
+              xemu_cc_bad ? "  <-- INLINE PATH IS WRONG, DO NOT SHIP"
+                          : "  (inline result is bit-identical)");
     }
 
     ALOGI("bench: REP-STRING %llu iterations/frame over %llu instructions "

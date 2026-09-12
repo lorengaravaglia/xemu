@@ -61,6 +61,9 @@ int g_x86_inline_ic = 1;                /* debug.xemu.ic=0 disables */
  * Safe to flip at runtime: both paths keep guest FP state in env->fpregs in
  * the same format, and the flush means no half-translated block survives.
  */
+int g_cc_inline = 1;        /* debug.xemu.cc_inline=0 disables */
+int g_cc_validate;          /* debug.xemu.cc_validate=1 checks every result */
+
 void x86_refresh_fpu_mode(void);
 void x86_refresh_fpu_mode(void)
 {
@@ -92,6 +95,33 @@ void x86_refresh_fpu_mode(void)
             }
         }
     }
+
+    {
+        extern int g_cc_fastpath;
+        char fv[PROP_VALUE_MAX] = { 0 };
+
+        g_cc_fastpath = !(__system_property_get("debug.xemu.cc_fastpath", fv) > 0
+                          && (fv[0] == '0' || fv[0] == 'n' || fv[0] == 'f'));
+    }
+
+    {
+        char iv[PROP_VALUE_MAX] = { 0 };
+        char vv[PROP_VALUE_MAX] = { 0 };
+        int want = !(__system_property_get("debug.xemu.cc_inline", iv) > 0 &&
+                     (iv[0] == '0' || iv[0] == 'n' || iv[0] == 'f'));
+        int wantv = (__system_property_get("debug.xemu.cc_validate", vv) > 0 &&
+                     (vv[0] == '1' || vv[0] == 'y' || vv[0] == 't'));
+
+        if (want != g_cc_inline || wantv != g_cc_validate) {
+            g_cc_inline = want;
+            g_cc_validate = wantv;
+            xemu_ic_generation++;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
 }
 #endif
 
@@ -1053,6 +1083,84 @@ static void gen_movs(DisasContext *s, MemOp ot, TCGv dshift)
 }
 
 /* compute all eflags to reg */
+
+/*
+ * Inline EFLAGS for CC_OP_SUBL.
+ *
+ * cc_op resets to CC_OP_DYNAMIC at every TB entry, so the first flag consumer
+ * in a block calls helper_cc_compute_all even though the runtime op is a
+ * plain 32-bit compare 94% of the time (measured: ~678k calls/frame against
+ * ~740k TB executions).  Short-circuiting the helper's switch was measured at
+ * zero, so the cost is the call itself; this emits the computation instead.
+ *
+ * Mirrors compute_all_subl exactly.  CC_SRC is the minuend, CC_DST the
+ * result, so the subtrahend is recovered as src1 - dst.  Parity is folded
+ * with shifts rather than a table lookup to keep it register-only.
+ */
+static void gen_inline_eflags_subl(TCGv reg, TCGv dst, TCGv src2)
+{
+    TCGv src1 = tcg_temp_new();
+    TCGv carries = tcg_temp_new();
+    TCGv acc = tcg_temp_new();
+    TCGv t = tcg_temp_new();
+    TCGv u = tcg_temp_new();
+
+    /*
+     * Mirrors compute_all_subl exactly -- see cc_helper_template.h.inc and
+     * SUB_COUT_VEC/MAJ_INV1 in cpu.h.  Note the second helper argument is
+     * src2, the SUBTRAHEND, and the minuend is recovered as dst + src2; a
+     * first version of this had the two the other way round and produced a
+     * wrong carry flag on 6.4% of executions.
+     */
+    tcg_gen_add_tl(src1, dst, src2);
+
+    /* carries = MAJ_INV1(src1, src2, dst) = ((src1^src2) & (src2^dst)) ^ dst */
+    tcg_gen_xor_tl(t, src1, src2);
+    tcg_gen_xor_tl(u, src2, dst);
+    tcg_gen_and_tl(t, t, u);
+    tcg_gen_xor_tl(carries, t, dst);
+
+    /* PF: set when the low byte has even parity */
+    tcg_gen_andi_tl(t, dst, 0xff);
+    tcg_gen_shri_tl(u, t, 4);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_shri_tl(u, t, 2);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_shri_tl(u, t, 1);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_not_tl(t, t);
+    tcg_gen_andi_tl(t, t, 1);
+    tcg_gen_shli_tl(acc, t, 2);                 /* CC_P */
+
+    /* ZF */
+    tcg_gen_setcondi_tl(TCG_COND_EQ, t, dst, 0);
+    tcg_gen_shli_tl(t, t, 6);                   /* CC_Z */
+    tcg_gen_or_tl(acc, acc, t);
+
+    /* SF: bit 31 of the result down to bit 7 */
+    tcg_gen_shri_tl(t, dst, 24);
+    tcg_gen_andi_tl(t, t, 0x80);                /* CC_S */
+    tcg_gen_or_tl(acc, acc, t);
+
+    /* AF and CF: rotate the carry vector left by one, keep bits 4 and 0 */
+    tcg_gen_shli_tl(t, carries, 1);
+    tcg_gen_shri_tl(u, carries, 31);
+    tcg_gen_or_tl(t, t, u);
+    tcg_gen_andi_tl(t, t, 0x11);                /* CC_A | CC_C */
+    tcg_gen_or_tl(acc, acc, t);
+
+    /*
+     * OF: the top two carry bits land in CC_O and the bit to its right, and
+     * adding CC_O/2 XORs them.  This must be an add, not an or.
+     */
+    tcg_gen_shri_tl(t, carries, 20);
+    tcg_gen_addi_tl(t, t, 0x400);
+    tcg_gen_andi_tl(t, t, 0x800);               /* CC_O */
+    tcg_gen_or_tl(acc, acc, t);
+
+    tcg_gen_mov_tl(reg, acc);
+}
+
 static void gen_mov_eflags(DisasContext *s, TCGv reg)
 {
     TCGv dst, src1, src2;
@@ -1089,6 +1197,37 @@ static void gen_mov_eflags(DisasContext *s, TCGv reg)
     } else {
         cc_op = cpu_cc_op;
     }
+
+    if (s->cc_op == CC_OP_DYNAMIC && g_cc_inline) {
+        TCGLabel *slow = gen_new_label();
+        TCGLabel *done = gen_new_label();
+
+        tcg_gen_brcondi_i32(TCG_COND_NE, cpu_cc_op, CC_OP_SUBL, slow);
+        if (g_cc_validate) {
+            /*
+             * reg is usually cpu_cc_src itself (gen_compute_eflags passes it),
+             * so the inline computation overwrites the operand.  Snapshot the
+             * inputs first or the checker compares against the result it just
+             * produced -- which is what made the first validation run report
+             * a 6% mismatch rate that had nothing to do with the arithmetic.
+             */
+            TCGv save_dst = tcg_temp_new();
+            TCGv save_src = tcg_temp_new();
+
+            tcg_gen_mov_tl(save_dst, cpu_cc_dst);
+            tcg_gen_mov_tl(save_src, cpu_cc_src);
+            gen_inline_eflags_subl(reg, cpu_cc_dst, cpu_cc_src);
+            gen_helper_cc_check_subl(reg, reg, save_dst, save_src);
+        } else {
+            gen_inline_eflags_subl(reg, cpu_cc_dst, cpu_cc_src);
+        }
+        tcg_gen_br(done);
+        gen_set_label(slow);
+        gen_helper_cc_compute_all(reg, dst, src1, src2, cc_op);
+        gen_set_label(done);
+        return;
+    }
+
     gen_helper_cc_compute_all(reg, dst, src1, src2, cc_op);
 }
 

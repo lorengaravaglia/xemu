@@ -113,6 +113,33 @@ const char *xemu_ccop_name(int op)
     return buf;
 }
 
+unsigned long long xemu_cc_checks, xemu_cc_bad;
+
+/*
+ * Validation for the inlined CC_OP_SUBL path: recompute with the helper and
+ * compare.  Flag computation decides every conditional branch, so the inline
+ * version is checked against the reference on real workloads before it is
+ * trusted.  Returns the inline value unchanged so behaviour is identical
+ * either way; enable with debug.xemu.cc_validate=1.
+ */
+target_ulong helper_cc_check_subl(target_ulong inlined, target_ulong dst,
+                                  target_ulong src1)
+{
+    target_ulong ref = compute_all_subl(dst, src1);
+
+    xemu_cc_checks++;
+    if (inlined != ref) {
+        if (xemu_cc_bad < 8) {
+            fprintf(stderr, "cc_inline MISMATCH: dst=%08x src1=%08x "
+                    "inline=%08x ref=%08x xor=%08x\n",
+                    (uint32_t)dst, (uint32_t)src1, (uint32_t)inlined,
+                    (uint32_t)ref, (uint32_t)(inlined ^ ref));
+        }
+        xemu_cc_bad++;
+    }
+    return inlined;
+}
+
 target_ulong helper_cc_compute_all(target_ulong dst, target_ulong src1,
                                    target_ulong src2, int op)
 {

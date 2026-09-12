@@ -144,7 +144,38 @@ TCG allocation is block-local; guest regs live in env and sync at every exit.
 instructions). Cheap test: split env-load/store attribution into mid-TB vs
 at-boundary.
 
-### 1b. BEST REMAINING LEAD: specialise the CC_OP_DYNAMIC flag path
+### 1b. DONE AND DEAD: inlining the CC_OP_DYNAMIC flag path
+**BUILT AND MEASURED 2026-09-12.  The prediction was confirmed exactly and it
+bought nothing.**
+
+| cc_inline | CC helper calls/frame | ms/frame |
+|---|---|---|
+| off | 621k, 676k, 612k, 674k | 33.04, 32.68, 33.00, 32.56 |
+| **on** | **40k, 38k (-94%)** | 33.04, 32.64 |
+
+The 94% prediction was exact, and the calls that remain are 96% LOGICB -- the
+other op, untouched by design.  Frame time did not move: ~32.82 vs ~32.84,
+inside the ~1.5% run-to-run spread.
+
+Removing ~620k helper calls per frame is worth nothing on this core.  That is
+the same lesson as the barriers and fastmem: the Cortex-X3's 320-entry window
+absorbs work that is not on the critical path, and a predicted call whose
+operands are already in registers costs far less than its instruction count
+suggests.  **Five separate attempts to remove work have now measured zero.**
+
+Kept, default ON, behind `debug.xemu.cc_inline` -- it is bit-identical and
+harmless, and it is the record of what was tested.
+
+**Correctness note:** validated with `debug.xemu.cc_validate=1`, which
+recomputes every result with the reference helper and compares:
+**52,216,487 checks, 0 mismatches.**  Getting there took two real fixes --
+the first version had the helper's operands backwards (the second argument is
+the SUBTRAHEND and the minuend is `dst + src2`), and the validator itself
+compared against its own output, because `gen_compute_eflags` passes
+`cpu_cc_src` as the destination so the computation overwrites its own input.
+Without the validation harness the operand bug would have shipped.
+
+Original entry: BEST REMAINING LEAD: specialise the CC_OP_DYNAMIC flag path
 **Measured 2026-09-12.** `helper_cc_compute_all` is called **~678,000 times
 per frame**, and there are ~740k TB executions per frame -- **0.92 calls per
 TB, i.e. almost exactly one per block.** The op distribution is
@@ -171,6 +202,11 @@ x87 path.
 **Falsifiable first:** the 0.92-calls-per-TB ratio already predicts the
 saving; if an implementation does not move the helper call count down by
 ~94%, the theory is wrong.
+
+**NOTE: the cc_fastpath A/B below was INVALID** -- its property block was
+anchored on text that exists only on another branch, so the replace silently
+did nothing and both arms ran with the fast path on.  Re-wired since, with the
+switch state now printed in the benchmark output so this cannot recur.
 
 **PARTIAL RESULT 2026-09-12 — the dispatch is NOT the cost.**  Tested the
 cheap increment first: `if (op == CC_OP_SUBL) return compute_all_subl(...)`
