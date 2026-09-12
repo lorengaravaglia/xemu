@@ -35,6 +35,8 @@ void tcg_cflags_set(CPUState *cpu, uint32_t flags)
     cpu->tcg_cflags |= flags;
 }
 
+int g_xemu_keep_chain;
+
 uint32_t curr_cflags(CPUState *cpu)
 {
     uint32_t cflags = cpu->tcg_cflags;
@@ -49,7 +51,20 @@ uint32_t curr_cflags(CPUState *cpu)
     if (unlikely(cpu->singlestep_enabled)) {
         cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR | CF_SINGLE_STEP | 1;
     } else if (qatomic_read(&one_insn_per_tb)) {
-        cflags |= CF_NO_GOTO_TB | 1;
+        /*
+         * g_xemu_keep_chain: one instruction per TB but still chained.
+         * Stock one_insn_per_tb also forces CF_NO_GOTO_TB, so it multiplies
+         * dispatcher round-trips as well as global syncs and cannot isolate
+         * either.  Keeping the chain varies only the number of TB boundaries
+         * -- i.e. the global sync/reload frequency -- which is what static
+         * register allocation would remove.
+         */
+        extern int g_xemu_keep_chain;
+
+        cflags |= 1;
+        if (!g_xemu_keep_chain) {
+            cflags |= CF_NO_GOTO_TB;
+        }
     } else if (qemu_loglevel_mask(CPU_LOG_TB_NOCHAIN)) {
         cflags |= CF_NO_GOTO_TB;
     }

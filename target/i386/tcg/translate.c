@@ -97,6 +97,33 @@ void x86_refresh_fpu_mode(void)
     }
 
     {
+        /*
+         * Boundary-cost probe for the static-register-allocation question.
+         * one_insn_per_tb puts every guest instruction in its own TB, so the
+         * per-TB costs -- the global sync to env, the reload on entry, and
+         * dispatch -- are paid 6.5x more often.  Measuring the slope gives
+         * the real cost of a TB boundary, which is what SRA would remove part
+         * of, without having to build SRA to find out.
+         */
+        extern bool one_insn_per_tb;
+        char ov[PROP_VALUE_MAX] = { 0 };
+        bool want = (__system_property_get("debug.xemu.one_insn_tb", ov) > 0 &&
+                     (ov[0] == '1' || ov[0] == '2' || ov[0] == 'y' ||
+                      ov[0] == 't'));
+
+        {
+            extern int g_xemu_keep_chain;
+            g_xemu_keep_chain = (ov[0] == '2');
+        }
+        if (want != one_insn_per_tb) {
+            one_insn_per_tb = want;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
+    {
         extern int g_xemu_dfe;
         char dv[PROP_VALUE_MAX] = { 0 };
         int want = !(__system_property_get("debug.xemu.dfe", dv) > 0 &&

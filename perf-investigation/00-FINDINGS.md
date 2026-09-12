@@ -646,3 +646,36 @@ change that is keeping guest registers in host registers so ALU work chains
 register-to-register instead of through `env` -- static register allocation,
 which FEX reports at ~20% for 32-bit guests.  **That is the one remaining
 idea whose mechanism matches the measured constraint.**
+
+---
+
+## K. SRA PROTOTYPE: measured the ceiling instead of building it (2026-09-12)
+
+Static register allocation would remove the global sync/reload at TB
+boundaries.  Rather than implement it -- a deep change needing separate TB
+entry points for chained versus dispatcher entry, plus a helper ABI -- the
+cost of a boundary was measured directly.
+
+`debug.xemu.one_insn_tb=2` puts one guest instruction in each TB **while
+keeping chaining** (stock `one_insn_per_tb` also forces `CF_NO_GOTO_TB`, so it
+multiplies dispatcher round-trips too and measures the wrong thing -- it came
+out at ~160 cycles/boundary and 300 ms/frame, all dispatch).  With chaining
+preserved, only the sync frequency changes.
+
+| | ms/frame | TB boundaries/frame |
+|---|---|---|
+| baseline, 6.5 insn/TB | **31.80** | ~738k |
+| 1 insn/TB, chained | **34.73** | 4.8M |
+
+2.93 ms over 4.06M extra boundaries = **~2.1 cycles per TB boundary**, so at
+baseline the whole sync cost is ~1.6M cycles/frame, **1.7% of frame**.
+
+**Confound, stated honestly:** a 1-instruction TB has fewer dirty registers at
+its boundary than a 6.5-instruction one, so this understates a real boundary.
+Scaling 2-3x for that gives a realistic **SRA ceiling of 2-4%**.
+
+**Either way it is far below the 7.6% the cycle attribution suggested**, which
+counted all env traffic including mid-TB spills that SRA would not remove.
+Against a ~1% measurement floor and deep TCG surgery, **SRA is not worth
+building.**  This is the last idea whose mechanism matched the measured
+constraint, and it is now bounded.
