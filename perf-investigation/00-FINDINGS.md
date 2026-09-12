@@ -172,6 +172,28 @@ x87 path.
 saving; if an implementation does not move the helper call count down by
 ~94%, the theory is wrong.
 
+**PARTIAL RESULT 2026-09-12 — the dispatch is NOT the cost.**  Tested the
+cheap increment first: `if (op == CC_OP_SUBL) return compute_all_subl(...)`
+ahead of the switch in the helper (`debug.xemu.cc_fastpath`, default on).
+Interleaved A/B, warmup discarded: **on 32.50/32.50, off 32.58/32.42 —
+zero difference.**  The compiler's jump table was already cheap.
+
+This *narrows* the remaining opportunity rather than killing it: whatever the
+helper costs is the CALL plus the computation, not the dispatch.  Only
+inlining into generated code removes the call.  Revised estimate for the full
+inline version: **2-4%** (678k calls x ~5-8 cycles of net call overhead after
+paying ~3 cycles for the runtime cc_op check), down from the 3-7% estimated
+before this measurement, and with two real risks: hand-written eflags
+computation in TCG is a correctness hazard on the path that decides every
+branch, and the code growth at each DYNAMIC site works against an already
+measured 112k iTLB misses/frame.
+
+**Harness note discovered here:** Android's idle manager SIGKILLs both xemu
+processes about 4 minutes into an unattended benchmark session, even with
+FLAG_KEEP_SCREEN_ON set (EmulationActivity.kt:292) and a 30-minute screen
+timeout.  `adb shell dumpsys deviceidle disable` before a long run fixes it;
+re-enable afterwards.
+
 ### 4. DEAD: `rep movs`/`rep stos` -> host memcpy
 **MEASURED 2026-09-12: 65,686-105,173 iterations/frame over ~3,000-4,600 rep
 instructions — an UPPER BOUND (the counter adds ECX at entry, but repnz exits

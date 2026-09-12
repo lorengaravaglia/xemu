@@ -80,6 +80,7 @@ target_ulong helper_cc_compute_nz(target_ulong dst, target_ulong src1,
  * ops that dominate here.  Measurement build only.
  */
 unsigned long long xemu_ccop_hist[CC_OP_DYNAMIC + 1];
+int g_cc_fastpath = 1;      /* debug.xemu.cc_fastpath=0 disables, for A/B */
 const int xemu_ccop_nb = CC_OP_DYNAMIC + 1;
 
 const char *xemu_ccop_name(int op);
@@ -117,6 +118,19 @@ target_ulong helper_cc_compute_all(target_ulong dst, target_ulong src1,
 {
     if ((unsigned)op <= CC_OP_DYNAMIC) {
         xemu_ccop_hist[op]++;
+    }
+
+    /*
+     * 94% of calls here are CC_OP_SUBL -- a plain 32-bit compare -- because
+     * cc_op resets to CC_OP_DYNAMIC at every TB entry, so the first flag
+     * consumer in a block cannot use the translator's fast paths.  Testing
+     * for it before the switch costs one compare and skips the dispatch.
+     * This isolates how much of the helper's cost is dispatch rather than
+     * call overhead, which decides whether inlining the computation into
+     * generated code is worth the code growth.
+     */
+    if (g_cc_fastpath && op == CC_OP_SUBL) {
+        return compute_all_subl(dst, src1);
     }
 
     switch (op) {
