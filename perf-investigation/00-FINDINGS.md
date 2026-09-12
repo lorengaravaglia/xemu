@@ -144,12 +144,18 @@ TCG allocation is block-local; guest regs live in env and sync at every exit.
 instructions). Cheap test: split env-load/store attribution into mid-TB vs
 at-boundary.
 
-### 4. OPEN: guest spin-wait on MMIO, and tlb_reset_dirty's O(whole TLB) scan
+### 4. OPEN: `rep movs`/`rep stos` -> host memcpy
+QEMU emits x86 string ops as a per-element in-TB loop
+(target/i386/tcg/translate.c:1564-1680), so a `rep movsd` of 4 KB is 1,024
+iterations at ~20-30 host instructions each. Halo streams and decompresses
+assets, so this may be a real slice of the ~4.4-6M guest instructions/frame.
+Self-contained: no kernel-API hook, no per-title signature fragility.
+**Falsify in ~15 lines:** one counting helper per `rep` execution, passing
+ECX; if under ~200k iterations/frame, drop it. Currently the most promising
+untested lead.
+
+### 5. OPEN (reduced): tlb_reset_dirty's O(whole TLB) scan
 From the heavy-frames agent, not yet measured:
-- `pgraph_read` takes `pg->lock` and `pfifo_read` takes `pfifo.lock` on EVERY
-  guest MMIO register read, and the guest busy-waits by polling those
-  registers. A spin-wait produces exactly the "more cycles AND more
-  instructions" signature that was attributed to heavier game frames.
 - `tlb_reset_dirty` is O(whole TLB), not O(range): 22 mmu indexes x (256+8)
   entries = 5,808 entries / ~400 KB touched per call, larger than the X3's L1D.
   It is called per dirty page from the GPU thread, writing into the vCPU's
@@ -157,7 +163,7 @@ From the heavy-frames agent, not yet measured:
   Measured at 2.8% of the vCPU's libxemu cycles (= 0.39% of vCPU) directly,
   but the cache-pollution cost is unmeasured.
 
-### 5. ~~L3 contention from the GPU thread~~ — DEAD, see section D
+### 6. ~~L3 contention from the GPU thread~~ — DEAD, see section D
 
 ---
 
@@ -176,6 +182,8 @@ From the heavy-frames agent, not yet measured:
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
 | GPU thread stealing vCPU time by blocking | vCPU shows no wait symbols, 1.26% kernel |
+| Guest busy-wait / spin elimination (idle detection) | **MEASURED 2026-09-11.** MMIO is only ~730 accesses/frame, and it is FLAT across frame classes (x1.06, x1.09) while host work rises x1.48 — heavy frames are not spinning. Cheap frames sit at 93 Mcyc against a 98 Mcyc budget, so there is barely any slack to spin in during combat. The 96-98% utilisation figure reflects real work, not polling. |
+| MMIO lockless_io fast path (skipping BQL + device lock) | Same run: ~730 MMIO accesses/frame. Even at a generous ~1000 cycles each that is <1% of a 93 Mcyc frame. The ~10-line change is real and QEMU already ships the switch, but there is nothing to win. |
 | L3 contention from the GPU thread evicting the vCPU's data | **MEASURED 2026-09-11: IPC is FLAT across frame weights** (cheap vs expensive: 1.69/1.67, 1.85/1.90, 1.86/1.90). If GPU memory traffic were evicting us, heavy frames — which have more GPU work — would show *lower* IPC. They do not. My hypothesis, killed by my own measurement. |
 | ARM native-flag (NZCV/FEAT_FlagM2) mapping | AXFLAG needs 7 instructions where the current code needs 7 (PF = Z AND NOT C is not an AArch64 condition). NZCV-resident flags are impossible in system mode: the softmmu TLB check emits CMP+B.NE on every guest memory access and clobbers them. The hot `cmp; jcc` pattern already compiles to CMP+B.LT. |
 | NV2A surface churn forcing TLB + jump-cache flushes | **MEASURED 2026-09-11: 0.00 full flushes/frame, and full=0 ABSOLUTE since boot** (part=337, elide=7615 prove the counter works). The code path is real (vk/surface.c:582-601 -> physmem.c:891 async_safe_run_on_cpu + tlb_flush_all_cpus_synced, and cputlb.c:392 wipes the jump cache too) but it never fires in steady-state gameplay: `expire_old_surfaces` only evicts surfaces unused for 5+ frames, and a combat scene reuses its surfaces every frame. |
@@ -188,8 +196,9 @@ From the heavy-frames agent, not yet measured:
        reentry_insns contamination (section F); left leads 4 open.
 2. [x] lazy-flags — DONE. Corrected lead 1 (my AXFLAG claim was wrong);
        promoted lead 2; surfaced a ~200-line gen_prepare_cc win worth 1.5-3%.
-3. [~] guest-work — RUNNING — full cost of x86 flag emulation, NZCV mapping
-4. [ ] host-memory — huge pages, host dTLB, L3 contention hypothesis
+3. [x] guest-work — DONE. Killed spin-elimination and the MMIO fast path by
+       measurement; surfaced `rep movs` as the best remaining lead.
+4. [~] host-memory — RUNNING (its L3 component is already dead) — full cost of x86 flag emulation, NZCV mapping
 5. [x] prior-art — DONE, folded into sections B/C/D above
 6. [x] threads — DONE by direct measurement, folded into section A
 
@@ -228,6 +237,13 @@ cannot be inflated by `cpu_exit()`. Three runs:
 | 1 | x1.62 | x1.60 | 1.69 -> 1.67 |
 | 2 | x1.43 | x1.47 | 1.85 -> 1.90 |
 | 3 | x1.47 | x1.51 | 1.86 -> 1.90 |
+
+**Second challenge, also answered.** Host instructions retired cannot by
+itself separate real game work from spin iterations (a spin iteration is real
+retired work). So MMIO accesses per frame were added and split the same way:
+x1.06 and x1.09 across frame classes against host work x1.48, on ~730
+accesses/frame. Heavy frames are not polling more. Both objections are now
+closed.
 
 Host work tracks cycles almost exactly and IPC is flat (slightly higher on
 expensive frames). Heavy frames genuinely run ~1.5x more code; the emulator

@@ -1569,7 +1569,10 @@ static uint64_t s_exp_cycles, s_exp_insn;     static int s_exp_n;
  * create/destroy.  Defined in accel/tcg/cputlb.c. */
 extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
                                   unsigned long long *);
+extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
 static uint64_t s_bench_prev_hinsn, s_cheap_hinsn, s_exp_hinsn;
+static uint64_t s_bench_prev_mmio, s_cheap_mmio, s_exp_mmio;
+static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
 static unsigned long long s_bench_start_full, s_bench_start_part,
                           s_bench_start_elide;
 
@@ -1632,6 +1635,9 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_insn = xemu_guest_insn_count;
     s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
     s_cheap_hinsn = s_exp_hinsn = 0;
+    s_cheap_mmio = s_exp_mmio = 0;
+    s_bench_start_mmio_r = xemu_mmio_reads;
+    s_bench_start_mmio_w = xemu_mmio_writes;
     xemu_tlb_flush_counts(&s_bench_start_full, &s_bench_start_part,
                           &s_bench_start_elide);
     bench_open_cycles();
@@ -1641,6 +1647,7 @@ void xemu_android_benchmark_start(int frames)
     s_bench_worst_cycles = 0;
     s_bench_prev_insn = xemu_guest_insn_count;
     s_bench_prev_hinsn = bench_read_insns();
+    s_bench_prev_mmio = xemu_mmio_reads + xemu_mmio_writes;
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1673,15 +1680,18 @@ static void bench_tick(void)
             uint64_t insn = insn_now - s_bench_prev_insn;
             uint64_t hi_now = bench_read_insns();
             uint64_t hi = hi_now - s_bench_prev_hinsn;
+            uint64_t mm_now = xemu_mmio_reads + xemu_mmio_writes;
+            uint64_t mm = mm_now - s_bench_prev_mmio;
 
             s_bench_prev_insn = insn_now;
             s_bench_prev_hinsn = hi_now;
+            s_bench_prev_mmio = mm_now;
             if (ratio <= 1.0) {
                 s_cheap_cycles += frame; s_cheap_insn += insn;
-                s_cheap_hinsn += hi; s_cheap_n++;
+                s_cheap_hinsn += hi; s_cheap_mmio += mm; s_cheap_n++;
             } else if (ratio > 1.2) {
                 s_exp_cycles += frame; s_exp_insn += insn;
-                s_exp_hinsn += hi; s_exp_n++;
+                s_exp_hinsn += hi; s_exp_mmio += mm; s_exp_n++;
             }
         }
     }
@@ -1798,6 +1808,16 @@ static void bench_tick(void)
              * The old "work x" column was reentry-insn and could not tell
              * these apart -- see perf-investigation/00-FINDINGS.md section F.
              */
+            ALOGI("bench: MMIO cheap %.0f/frame | expensive %.0f/frame | "
+                  "x%.2f (vs host work x%.2f) -- if MMIO scales WITH host "
+                  "work the heavy frames are spinning; if flat, real game work",
+                  s_cheap_n ? (double)s_cheap_mmio / s_cheap_n : 0.0,
+                  s_exp_n ? (double)s_exp_mmio / s_exp_n : 0.0,
+                  (s_cheap_n && s_cheap_mmio) ?
+                      ((double)s_exp_mmio / s_exp_n) /
+                      ((double)s_cheap_mmio / s_cheap_n) : 0.0,
+                  cheap_hm > 0 ? exp_hm / cheap_hm : 0.0);
+
             ALOGI("bench: cheap frames (n=%d) %.0f k reentry-insn | "
                   "expensive (n=%d) %.0f k reentry-insn  "
                   "(re-entry count, CONTAMINATED by cpu_exit -- not work)",

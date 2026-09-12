@@ -296,6 +296,16 @@ static void tlb_mmu_flush_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast)
 void xemu_tlb_flush_counts(unsigned long long *full,
                            unsigned long long *part,
                            unsigned long long *elide);
+/*
+ * Guest MMIO accesses.  The guest polls NV2A status registers in spin loops,
+ * and every such read leaves generated code and takes the BQL plus a device
+ * lock.  Two things need this number: the absolute rate (how much of a frame
+ * goes on polling) and the split between cheap and expensive frames -- host
+ * instructions retired cannot tell a spin iteration from real game work, but
+ * MMIO volume can.
+ */
+unsigned long long xemu_mmio_reads, xemu_mmio_writes;
+
 void xemu_tlb_flush_counts(unsigned long long *full,
                            unsigned long long *part,
                            unsigned long long *elide)
@@ -1978,6 +1988,8 @@ static uint64_t int_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
                                 int mmu_idx, MMUAccessType type, uintptr_t ra,
                                 MemoryRegion *mr, hwaddr mr_offset)
 {
+    xemu_mmio_reads++;
+
     do {
         MemOp this_mop;
         unsigned this_size;
@@ -2519,6 +2531,8 @@ static uint64_t int_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
                                 int mmu_idx, uintptr_t ra,
                                 MemoryRegion *mr, hwaddr mr_offset)
 {
+    xemu_mmio_writes++;
+
     do {
         MemOp this_mop;
         unsigned this_size;
