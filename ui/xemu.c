@@ -1694,6 +1694,8 @@ extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
                                   unsigned long long *);
 extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
 extern unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
+extern void xemu_dump_guest_map(void);
+extern void xemu_dump_guest_code(void);
 extern unsigned long long xemu_rep_iters, xemu_rep_execs;
 extern unsigned long long xemu_ccop_hist[];
 extern unsigned long long xemu_cc_checks, xemu_cc_bad;
@@ -2073,6 +2075,9 @@ static void bench_tick(void)
               xemu_cc_bad ? "  <-- INLINE PATH IS WRONG, DO NOT SHIP"
                           : "  (inline result is bit-identical)");
     }
+
+    xemu_dump_guest_map();
+    xemu_dump_guest_code();
 
     ALOGI("bench: NOTDIRTY %llu store-traps/frame (%llu of them SMC checks) "
           "-- guest stores forced out of generated code by VRAM dirty "

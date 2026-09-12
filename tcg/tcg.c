@@ -7100,6 +7100,73 @@ static void xemu_dead_flag_elimination(TCGContext *s)
     }
 }
 
+
+/*
+ * Guest-PC profiling map.
+ *
+ * Every profile on this project has been host-side: which TCG op, which cache
+ * level.  None has asked *which guest code* is hot.  Games usually
+ * concentrate -- a vertex transform, a collision loop, an audio mixer -- and
+ * if one Halo routine holds a large share of guest time, replacing that one
+ * routine natively beats every generic technique measured here.
+ *
+ * Records host code range -> guest PC per TB.  Correlated offline against
+ * perf samples by android/tools/guest-pc-profile.py.  debug.xemu.guest_map=1.
+ */
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/system_properties.h>
+
+typedef struct {
+    uint64_t host_addr;
+    uint32_t host_size;
+    uint32_t guest_pc;
+} XemuGuestTB;
+
+#define XM_GTB_CAP (512u * 1024u)
+
+int g_xemu_guest_map;
+const char *xemu_map_dir;
+static XemuGuestTB *xm_gtb;
+static size_t xm_gtb_n;
+static int xm_gtb_init;
+
+static void xm_gtb_lazy_init(void)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+
+    xm_gtb_init = 1;
+    if (__system_property_get("debug.xemu.guest_map", v) > 0 &&
+        (v[0] == '1' || v[0] == 'y' || v[0] == 't')) {
+        xm_gtb = calloc(XM_GTB_CAP, sizeof(*xm_gtb));
+        g_xemu_guest_map = (xm_gtb != NULL);
+    }
+    fprintf(stderr, "guest_map: %s\n", g_xemu_guest_map ? "recording" : "off");
+}
+
+void xemu_dump_guest_map(void);
+void xemu_dump_guest_map(void)
+{
+    char path[512];
+    FILE *f;
+    uint32_t n = xm_gtb_n;
+
+    if (!g_xemu_guest_map || !n) {
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/guestmap.bin",
+             xemu_map_dir ? xemu_map_dir : ".");
+    f = fopen(path, "wb");
+    if (!f) {
+        return;
+    }
+    fwrite("XGPC1", 1, 5, f);
+    fwrite(&n, 4, 1, f);
+    fwrite(xm_gtb, sizeof(*xm_gtb), n, f);
+    fclose(f);
+    fprintf(stderr, "guest_map: wrote %s (%u TBs)\n", path, n);
+}
+#endif
+
 int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
 {
     int i, num_insns;
@@ -7315,6 +7382,19 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     flush_idcache_range((uintptr_t)tcg_splitwx_to_rx(s->code_buf),
                         (uintptr_t)s->code_buf,
                         tcg_ptr_byte_diff(s->code_ptr, s->code_buf));
+#endif
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (unlikely(!xm_gtb_init)) {
+        xm_gtb_lazy_init();
+    }
+    if (unlikely(g_xemu_guest_map) && xm_gtb_n < XM_GTB_CAP) {
+        XemuGuestTB *r = &xm_gtb[xm_gtb_n++];
+
+        r->host_addr = (uint64_t)(uintptr_t)tcg_splitwx_to_rx(s->code_buf);
+        r->host_size = (uint32_t)tcg_current_code_size(s);
+        r->guest_pc = (uint32_t)pc_start;
+    }
 #endif
 
     return tcg_current_code_size(s);

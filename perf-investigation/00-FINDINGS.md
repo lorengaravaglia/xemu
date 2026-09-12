@@ -707,3 +707,57 @@ noise.  Copying it would cost image quality and gain nothing measurable.
 
 This also closes the last open item in section 5/7: `tlb_reset_dirty` and the
 NV2A dirty clients are not a meaningful vCPU cost.
+
+---
+
+## M. THE HOTSPOT: Halo spins on a 64-bit clock (2026-09-12)
+
+**Guest-PC profiling** (`debug.xemu.guest_map` + `android/tools/guest-pc-profile.py`)
+was the one profile never taken here -- everything before was host-side.  It
+found a hotspot immediately:
+
+| guest address | share of JIT cycles |
+|---|---|
+| `0x000bb0df` | **14.6%** |
+| `0x000bb0ec` | 7.7% |
+| **4 KB page `0x000bb000`** | **22.9%** |
+
+That is ~19% of total vCPU time in one routine.  Dumped the guest bytes
+(`debug.xemu.dump_pc`) and hand-decoded:
+
+```
+000bb0d4:  test bl, bl
+000bb0d6:  jz   0xbb0df
+000bb0d8:  push 1
+000bb0da:  call <far>                 ; yield / pump?
+000bb0df:  mov  eax, [0x1f8c80]       ; <-- 14.6%
+000bb0e4:  cmp  [0x1f8c84], esi
+000bb0ea:  jl   0xbb0d4               ; loop
+000bb0ec:  jg   0xbb0f2               ; <-- 7.7%, exit
+000bb0ee:  cmp  eax, edi
+000bb0f0:  jb   0xbb0d4               ; loop
+000bb0f2:  pop  ebx
+```
+
+**It is a 64-bit counter spin-wait**: loop while
+`[0x1f8c84]:[0x1f8c80] < EDI:ESI`, high dword first, low dword on equality.
+Halo is busy-waiting for a clock to reach a target.
+
+**This is the busy-wait hypothesis, confirmed -- and it is why the earlier
+test missed it.**  Section D records "guest busy-wait / spin elimination" as
+dead because MMIO was flat at ~730 accesses/frame.  That test was sound for
+MMIO but the spin reads *ordinary memory*, so it was invisible to it.  The
+dead-ends table is wrong on that row.
+
+**Before celebrating, the open question:** a clock spin means the guest
+finished its frame early, so the spin should concentrate in CHEAP frames --
+which are already under budget -- and be absent from the expensive frames that
+actually miss 30fps.  If so, eliding it cuts average work by ~23% and buys
+headroom, battery and thermals (and thermals feed back into sustained clock,
+worth ~9%), but does **not** directly fix the dips.
+
+**Next measurement, and it must come before any implementation:** split the
+guest-PC profile by frame cost.  If the spin's share is roughly equal in cheap
+and expensive frames, spin elision is a direct win on the dips.  If it is
+concentrated in cheap frames, the win is headroom rather than frame rate, and
+should be costed as such.

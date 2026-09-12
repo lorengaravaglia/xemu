@@ -64,6 +64,43 @@ int g_x86_inline_ic = 1;                /* debug.xemu.ic=0 disables */
 int g_cc_inline = 1;        /* debug.xemu.cc_inline=0 disables */
 int g_cc_validate;          /* debug.xemu.cc_validate=1 checks every result */
 
+/*
+ * Dump guest code bytes at a PC, so a hot guest address found by
+ * android/tools/guest-pc-profile.py can be disassembled offline and
+ * identified.  debug.xemu.dump_pc=0xbb0df
+ */
+void xemu_dump_guest_code(void);
+void xemu_dump_guest_code(void)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+    uint8_t buf[192];
+    char line[16 * 3 + 8];
+    unsigned long pc;
+    int i, j;
+
+    if (__system_property_get("debug.xemu.dump_pc", v) <= 0 || !first_cpu) {
+        return;
+    }
+    pc = strtoul(v, NULL, 0);
+    if (!pc) {
+        return;
+    }
+    if (cpu_memory_rw_debug(first_cpu, pc, buf, sizeof(buf), 0) != 0) {
+        fprintf(stderr, "dump_pc: cannot read guest 0x%lx\n", pc);
+        return;
+    }
+    fprintf(stderr, "dump_pc: guest code at 0x%lx (%zu bytes)\n",
+            pc, sizeof(buf));
+    for (i = 0; i < (int)sizeof(buf); i += 16) {
+        int n = 0;
+
+        for (j = 0; j < 16; j++) {
+            n += snprintf(line + n, sizeof(line) - n, "%02x ", buf[i + j]);
+        }
+        fprintf(stderr, "dump_pc: %08lx  %s\n", pc + i, line);
+    }
+}
+
 void x86_refresh_fpu_mode(void);
 void x86_refresh_fpu_mode(void)
 {

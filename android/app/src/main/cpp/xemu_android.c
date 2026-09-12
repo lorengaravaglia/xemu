@@ -463,6 +463,21 @@ static void *xemu_android_thread(void *opaque) {
     argv[0] = strdup("xemu");
     argv[1] = strdup("-config_path");
     argv[2] = strdup(g_android_args->configPath);
+
+    {
+        /* Where profiling maps are written -- beside the config file. */
+        extern const char *xemu_map_dir;
+        static char mapdir[512];
+        char *slash;
+
+        snprintf(mapdir, sizeof(mapdir), "%s", g_android_args->configPath);
+        slash = strrchr(mapdir, '/');
+        if (slash) {
+            *slash = '\0';
+        }
+        xemu_map_dir = mapdir;
+        LOGI("profiling map dir: %s", xemu_map_dir);
+    }
     argv[3] = strdup("-audio");
     argv[4] = strdup("driver=aaudio");
     argv[5] = strdup("-accel");
