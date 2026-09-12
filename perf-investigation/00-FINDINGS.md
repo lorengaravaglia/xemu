@@ -283,7 +283,42 @@ bound" actually means here.**
 | iTLB walks (raw 0x35) | ~2,000 |
 | dTLB refills (L1D_TLB_REFILL) | 276k-364k |
 
-**1. Nearly every L1 miss reaches DRAM.** Last-level misses are 96-98% of L1D
+**CORRECTION 2026-09-12: point 1 below was measured data-side only and is
+wrong as stated.**  With the instruction stream counted, the hierarchy does
+filter properly: ~800k L1 misses/frame -> 240k L2 refills -> 105k last-level.
+L2 catches about 70%, L3 over half of what is left.
+
+**THE DOMINANT CACHE EVENT IS INSTRUCTION FETCH, and it had never been
+measured.**
+
+| per frame | count |
+|---|---|
+| **L1I misses** | **695k-757k** |
+| L1D misses | 93k-104k |
+| L2 refills (both sides) | 211k-240k |
+| last-level misses | 96k-108k |
+
+Instruction-side misses are ~7x the data side.  Two things follow.
+
+*It is not code SIZE.*  `cc_inline` adds ~26 instructions at roughly one site
+per TB -- about +20% on a 533-byte average block -- and L1I misses did not
+move (717k/656k with it against 702k/672k without; frame time likewise).  So
+marginal code growth is free, which also means the earlier "reduce emitted
+code size" dead end stays dead for this mechanism too.
+
+*It is TB ENTRY SCATTER.*  ~700k L1I misses against ~740k TB executions is
+**0.95 misses per block entered** -- essentially one miss every time control
+jumps to a new block, which is what a 533-byte average block scattered through
+the code buffer predicts.
+
+**Bound on the whole instruction-side opportunity:** eliminating every L1I
+miss at ~12 cycles each would be ~8.4M cycles, **under 9% of frame**, and
+realistically far less because frontend misses overlap with execution far
+better than dependent data misses do.  A TB layout scheme that packed chained
+blocks adjacently is the only idea that addresses it, for maybe 4% at high
+effort against QEMU's allocation-order code cache.
+
+**1. (superseded, data-side only) Nearly every L1 miss reaches DRAM.** Last-level misses are 96-98% of L1D
 read misses, so L2 and L3 absorb almost nothing.  At ~110 cycles each that is
 **17-23% of the frame** -- the original "23%" estimate was right, and the
 worry that the generic counter was really measuring L1 refills was unfounded.

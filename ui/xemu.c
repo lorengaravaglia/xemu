@@ -1399,6 +1399,9 @@ static int bench_ll_fd   = -1;   /* host LAST-LEVEL misses: the DRAM question */
 static int bench_l1dw_fd = -1;   /* host L1D write misses */
 static int bench_dwalk_fd = -1;  /* ARM DTLB_WALK  (raw 0x34) */
 static int bench_iwalk_fd = -1;  /* ARM ITLB_WALK  (raw 0x35) */
+static int bench_l1i_fd  = -1;   /* host L1I read misses */
+static int bench_l2r_fd  = -1;   /* ARM L2D_CACHE_REFILL (raw 0x17) */
+static int bench_l1irf_fd = -1;  /* ARM L1I_CACHE_REFILL (raw 0x01) */
 
 /*
  * A dTLB *refill* is not a page-table walk: most are satisfied by the
@@ -1532,6 +1535,20 @@ static void bench_open_cycles(void)
                         PERF_COUNT_HW_CACHE_RESULT_MISS));
     bench_dwalk_fd = bench_open_raw(0x34);   /* DTLB_WALK */
     bench_iwalk_fd = bench_open_raw(0x35);   /* ITLB_WALK */
+
+    /*
+     * Instruction side.  We emit ~82 bytes of ARM per guest x86 instruction,
+     * a roughly 20x code-footprint expansion the real hardware never had, so
+     * the translated code may be competing with the game's data for the same
+     * 8 MB L3.  Every cache measurement so far has been data-side only, which
+     * cannot see that.  L1I_CACHE_REFILL is the architected Armv8 event.
+     */
+    bench_l1i_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1I,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_l1irf_fd = bench_open_raw(0x01);   /* L1I_CACHE_REFILL */
+    bench_l2r_fd   = bench_open_raw(0x17);   /* L2D_CACHE_REFILL */
 }
 
 static uint64_t bench_read_cycles(void)
@@ -1679,6 +1696,7 @@ static uint64_t s_bench_prev_mmio, s_cheap_mmio, s_exp_mmio;
 static uint64_t s_bench_start_dtlb, s_bench_start_itlb, s_bench_start_l1d;
 static uint64_t s_bench_start_ll, s_bench_start_l1dw;
 static uint64_t s_bench_start_dwalk, s_bench_start_iwalk;
+static uint64_t s_bench_start_l1i, s_bench_start_l1irf, s_bench_start_l2r;
 static unsigned long long s_bench_start_rep_i, s_bench_start_rep_e;
 static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
 static unsigned long long s_bench_start_full, s_bench_start_part,
@@ -1773,6 +1791,9 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_l1dw = bench_read_fd(bench_l1dw_fd);
     s_bench_start_dwalk = bench_read_fd(bench_dwalk_fd);
     s_bench_start_iwalk = bench_read_fd(bench_iwalk_fd);
+    s_bench_start_l1i   = bench_read_fd(bench_l1i_fd);
+    s_bench_start_l1irf = bench_read_fd(bench_l1irf_fd);
+    s_bench_start_l2r   = bench_read_fd(bench_l2r_fd);
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1906,6 +1927,23 @@ static void bench_tick(void)
                   (unsigned long long)(l1w / nn),
                   (unsigned long long)(ll / nn),
                   bench_l1d_fd, bench_ll_fd);
+            {
+                uint64_t i1 = bench_read_fd(bench_l1i_fd) - s_bench_start_l1i;
+                uint64_t irf = bench_read_fd(bench_l1irf_fd)
+                               - s_bench_start_l1irf;
+                uint64_t l2r = bench_read_fd(bench_l2r_fd) - s_bench_start_l2r;
+
+                ALOGI("bench: CODE SIDE L1I-miss %llu/frame | L1I-refill "
+                      "%llu/frame | L2 refill (both sides) %llu/frame | vs "
+                      "data L1D-miss %llu and LAST-LEVEL %llu  [fds %d/%d/%d]",
+                      (unsigned long long)(i1 / nn),
+                      (unsigned long long)(irf / nn),
+                      (unsigned long long)(l2r / nn),
+                      (unsigned long long)(l1r / nn),
+                      (unsigned long long)(ll / nn),
+                      bench_l1i_fd, bench_l1irf_fd, bench_l2r_fd);
+            }
+
             {
                 uint64_t dw = bench_read_fd(bench_dwalk_fd)
                               - s_bench_start_dwalk;
