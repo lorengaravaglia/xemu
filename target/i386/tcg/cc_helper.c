@@ -73,9 +73,52 @@ target_ulong helper_cc_compute_nz(target_ulong dst, target_ulong src1,
     }
 }
 
+/*
+ * Which CC_OPs actually reach the full helper.  helper_cc_compute_all is 31%
+ * of libxemu cycles (~4.3% of vCPU); the fix is to add gen_prepare_cc fast
+ * paths so common cases never call it, but that is only worth doing for the
+ * ops that dominate here.  Measurement build only.
+ */
+unsigned long long xemu_ccop_hist[CC_OP_DYNAMIC + 1];
+const int xemu_ccop_nb = CC_OP_DYNAMIC + 1;
+
+const char *xemu_ccop_name(int op);
+const char *xemu_ccop_name(int op)
+{
+    static __thread char bufs[4][24];
+    static __thread unsigned turn;
+    char *buf = bufs[turn++ & 3];
+    static const char *const fam[] = {
+        "MUL", "ADD", "ADC", "SUB", "SBB", "LOGIC",
+        "INC", "DEC", "SHL", "SAR", "BMILG", "BLSI",
+    };
+    static const char sz[] = { 'B', 'W', 'L', 'Q' };
+
+    if (op == CC_OP_EFLAGS) {
+        return "EFLAGS";
+    }
+    if (op == CC_OP_DYNAMIC) {
+        return "DYNAMIC";
+    }
+    if (op >= CC_OP_MULB) {
+        unsigned k = (unsigned)(op - CC_OP_MULB);
+
+        if (k / 4 < ARRAY_SIZE(fam)) {
+            snprintf(buf, sizeof(bufs[0]), "%s%c", fam[k / 4], sz[k % 4]);
+            return buf;
+        }
+    }
+    snprintf(buf, sizeof(bufs[0]), "op%d", op);
+    return buf;
+}
+
 target_ulong helper_cc_compute_all(target_ulong dst, target_ulong src1,
                                    target_ulong src2, int op)
 {
+    if ((unsigned)op <= CC_OP_DYNAMIC) {
+        xemu_ccop_hist[op]++;
+    }
+
     switch (op) {
     default: /* should never happen */
         return 0;

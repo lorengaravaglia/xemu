@@ -1619,9 +1619,20 @@ static uint64_t s_exp_cycles, s_exp_insn;     static int s_exp_n;
 extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
                                   unsigned long long *);
 extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
+extern unsigned long long xemu_rep_iters, xemu_rep_execs;
+extern unsigned long long xemu_ccop_hist[];
+extern const char *xemu_ccop_name(int op);
+extern const int xemu_ccop_nb;          /* real size -- do NOT guess */
+#define XEMU_CC_OP_MAX 80
+/* Captured when the window OPENS.  Taking a delta from the previous report
+ * instead would span the free-running gameplay between benchmarks -- about
+ * 55 s, or ~9x the measured window, which inflated this by an order of
+ * magnitude the first time. */
+static unsigned long long s_bench_start_ccop[XEMU_CC_OP_MAX];
 static uint64_t s_bench_prev_hinsn, s_cheap_hinsn, s_exp_hinsn;
 static uint64_t s_bench_prev_mmio, s_cheap_mmio, s_exp_mmio;
 static uint64_t s_bench_start_dtlb, s_bench_start_itlb, s_bench_start_l1d;
+static unsigned long long s_bench_start_rep_i, s_bench_start_rep_e;
 static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
 static unsigned long long s_bench_start_full, s_bench_start_part,
                           s_bench_start_elide;
@@ -1698,6 +1709,16 @@ void xemu_android_benchmark_start(int frames)
     s_bench_prev_insn = xemu_guest_insn_count;
     s_bench_prev_hinsn = bench_read_insns();
     s_bench_prev_mmio = xemu_mmio_reads + xemu_mmio_writes;
+    {
+        int i, nb = xemu_ccop_nb < XEMU_CC_OP_MAX ?
+                    xemu_ccop_nb : XEMU_CC_OP_MAX;
+
+        for (i = 0; i < nb; i++) {
+            s_bench_start_ccop[i] = xemu_ccop_hist[i];
+        }
+    }
+    s_bench_start_rep_i = xemu_rep_iters;
+    s_bench_start_rep_e = xemu_rep_execs;
     s_bench_start_dtlb = bench_read_fd(bench_dtlb_fd);
     s_bench_start_itlb = bench_read_fd(bench_itlb_fd);
     s_bench_start_l1d  = bench_read_fd(bench_l1d_fd);
@@ -1803,6 +1824,50 @@ static void bench_tick(void)
               (unsigned long long)(l1 / n),
               bench_dtlb_fd, bench_itlb_fd, bench_l1d_fd);
     }
+
+    {
+        unsigned long long tot = 0, cur[XEMU_CC_OP_MAX];
+        int nb = xemu_ccop_nb < XEMU_CC_OP_MAX ?
+                 xemu_ccop_nb : XEMU_CC_OP_MAX;
+        int i, top[4] = { -1, -1, -1, -1 };
+
+        for (i = 0; i < nb; i++) {
+            cur[i] = xemu_ccop_hist[i] - s_bench_start_ccop[i];
+            tot += cur[i];
+        }
+        for (i = 0; i < nb; i++) {
+            int r;
+
+            for (r = 0; r < 4; r++) {
+                if (top[r] < 0 || cur[i] > cur[top[r]]) {
+                    int k;
+
+                    for (k = 3; k > r; k--) {
+                        top[k] = top[k - 1];
+                    }
+                    top[r] = i;
+                    break;
+                }
+            }
+        }
+        if (tot) {
+            ALOGI("bench: CC helper %llu calls/frame | top ops: "
+                  "%s %.0f%%, %s %.0f%%, %s %.0f%%, %s %.0f%% "
+                  "(these are the ops a gen_prepare_cc fast path must cover)",
+                  tot / s_bench_frames_total,
+                  xemu_ccop_name(top[0]), 100.0 * cur[top[0]] / tot,
+                  xemu_ccop_name(top[1]), 100.0 * cur[top[1]] / tot,
+                  xemu_ccop_name(top[2]), 100.0 * cur[top[2]] / tot,
+                  xemu_ccop_name(top[3]), 100.0 * cur[top[3]] / tot);
+        }
+    }
+
+    ALOGI("bench: REP-STRING %llu iterations/frame over %llu instructions "
+          "| ABSOLUTE since boot: %llu iters over %llu instructions "
+          "(nonzero absolute proves the probe works)",
+          (xemu_rep_iters - s_bench_start_rep_i) / s_bench_frames_total,
+          (xemu_rep_execs - s_bench_start_rep_e) / s_bench_frames_total,
+          xemu_rep_iters, xemu_rep_execs);
 
     ALOGI("bench: MMIO %llu reads/frame, %llu writes/frame (each leaves "
           "generated code and takes the BQL + a device lock)",

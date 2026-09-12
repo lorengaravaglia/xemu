@@ -1604,6 +1604,8 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
     gen_update_cc_op(s);
     tcg_set_insn_start_param(s->base.insn_start, 1, CC_OP_DYNAMIC);
 
+    gen_helper_xemu_count_rep(cpu_regs[R_ECX]);
+
     /* Any iteration at all?  */
     tcg_gen_brcondi_tl(TCG_COND_TSTEQ, cpu_regs[R_ECX], cx_mask, done);
 

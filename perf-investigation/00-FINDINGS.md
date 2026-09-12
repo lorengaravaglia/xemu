@@ -144,8 +144,40 @@ TCG allocation is block-local; guest regs live in env and sync at every exit.
 instructions). Cheap test: split env-load/store attribution into mid-TB vs
 at-boundary.
 
-### 4. OPEN: `rep movs`/`rep stos` -> host memcpy
-QEMU emits x86 string ops as a per-element in-TB loop
+### 1b. BEST REMAINING LEAD: specialise the CC_OP_DYNAMIC flag path
+**Measured 2026-09-12.** `helper_cc_compute_all` is called **~678,000 times
+per frame**, and there are ~740k TB executions per frame -- **0.92 calls per
+TB, i.e. almost exactly one per block.** The op distribution is
+**SUBL 94%, LOGICB 5%**, everything else ~0%.
+
+That pins the mechanism exactly: `cc_op` resets to `CC_OP_DYNAMIC` at every TB
+entry (target/i386/tcg/translate.c:4501), so the FIRST flag consumer in each
+TB cannot use the existing `gen_prepare_cc` fast paths and calls the helper --
+even though the runtime value is a plain 32-bit compare 94% of the time.
+Inside a TB, dead-flag elision and the fast paths already work.
+
+**This inverts the fix proposed in 02-lazy-flags.md.** Adding fast paths for
+ADD/INC/DEC/SHL is pointless: those are ~0% of helper calls. The ops that
+dominate (SUB, LOGIC) ALREADY have fast paths that simply cannot fire from
+DYNAMIC.
+
+**Proposed fix, self-contained, no cross-TB machinery:** at a DYNAMIC flag
+consumer, emit an inline check -- load `cc_op`, and if it equals `CC_OP_SUBL`
+compute the flags inline from cc_dst/cc_src, else fall back to the helper.
+A 94% hit rate on a well-predicted branch.
+**Estimated 3-7% of frame** (678k calls x ~10-15 cycles of call overhead,
+less ~3-4 cycles for the check). Would be the largest win since the native
+x87 path.
+**Falsifiable first:** the 0.92-calls-per-TB ratio already predicts the
+saving; if an implementation does not move the helper call count down by
+~94%, the theory is wrong.
+
+### 4. DEAD: `rep movs`/`rep stos` -> host memcpy
+**MEASURED 2026-09-12: 65,686-105,173 iterations/frame over ~3,000-4,600 rep
+instructions — an UPPER BOUND (the counter adds ECX at entry, but repnz exits
+early). At ~20-30 host instructions each that is <=0.8-1.9% of frame, below
+the 200k threshold set in advance. Not worth a memcpy fast path.**
+Original reasoning: QEMU emits x86 string ops as a per-element in-TB loop
 (target/i386/tcg/translate.c:1564-1680), so a `rep movsd` of 4 KB is 1,024
 iterations at ~20-30 host instructions each. Halo streams and decompresses
 assets, so this may be a real slice of the ~4.4-6M guest instructions/frame.
