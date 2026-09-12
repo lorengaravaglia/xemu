@@ -80,23 +80,57 @@ box86.org, Phoronix Hangover 11.0, Cortex-X3 optimization guide.
 
 ## C. Ranked leads (updated as agents report)
 
-### 1. Native ARM flags (FEAT_FlagM2) — VERIFIED GAP, low cost
-The aarch64 backend contains **zero** `RMIF`/`CFINV`/`AXFLAG`/`XAFLAG`/
-`SETF8`/`SETF16` (all six grep to 0 in tcg/aarch64/tcg-target.c.inc) and
-detects only LSE2 (:1791). The FP-compare->EFLAGS path (:3305-3311) is six
-instructions (3x CSET + 3x ORR-LSL) where `AXFLAG` does one. Cortex-X3
-implements all six (Armv9.0-A mandates FEAT_FlagM2).
-Target: cc_compute_all ~4.3% of vCPU plus inline cc_src/cc_dst stores.
-**Size 2-4%. Incremental: start with the FP-compare sequence (~20 lines,
-backend only).** Prior art: Rosetta 2 uses CFINV/RMIF/SETF8; FEX maps EFLAGS
-to NZCV with a redundant-flag-elimination pass; MobiSys'25 "ARMing x86 Games"
-does software-only validated flag speculation for this exact workload class.
+### 1. x86 flag emulation — CORRECTED 2026-09-11, mostly dead as an ARM-flags idea
+My original entry here claimed `AXFLAG` would collapse the 6-instruction
+FP-compare sequence. **That was wrong.** `AXFLAG` gives `Z = Z OR V`,
+`C = C AND NOT V`. Against the four FCMP outcomes x86 needs `ZF = Z` and
+`CF = NOT C`, but `PF = Z AND NOT C`, which is not a single AArch64 condition
+(the available ones are EQ/NE/CS/CC/MI/PL/VS/VC/HI/LS/GE/LT/GT/LE; `Z AND !C`
+is none of them). So you still need three CSETs. Best AXFLAG sequence is 7
+instructions; the current code (tcg-target.c.inc:3300-3311) is also 7. **Win:
+zero.** The "all six FlagM instructions grep to 0" observation was true; the
+conclusion drawn from it was not.
 
-### 2. Superblocks / multiblock TBs — big pool, high cost
+**A FEX/Rosetta-style NZCV-resident design cannot be ported, and the reason is
+structural** (verified): the softmmu TLB check emits `tcg_out_cmp` + `B_C`
+(tcg-target.c.inc:1849-1853) on *every* guest memory access — roughly one per
+2-3 guest instructions. **NZCV is clobbered constantly, so flags physically
+cannot survive from producer to consumer.** FEX and Rosetta are user-mode with
+no such check; removing it is fastmem, already dead.
+
+**The hot integer pattern is already optimal:** `cmp eax,ebx; jl` inside a TB
+compiles to exactly `CMP` + `B.LT` via the CCPrepare fusion
+(translate.c:1290-1337); `test eax,eax; jz` becomes `CBZ`; single-bit tests
+become `TBNZ`. That is what hand-written ARM emits.
+
+**Where the flag cost actually leaks (both structural, both fixed by lead 2):**
+- `cc_op` resets to `CC_OP_DYNAMIC` at every TB entry (translate.c:4501), and
+  from DYNAMIC 6 of 8 Jcc groups call the full helper.
+- The last flag producer in each TB always pays ~3 env stores, because globals
+  are `TS_DEAD|TS_MEM` at TB end (tcg/tcg.c:3930-3948) so the stores survive
+  even when nothing reads them. *Inside* a TB, dead-flag elision already works.
+Both are consequences of the 6.5-instruction TB. **This is lead 2, not a flags
+project.**
+
+Total flag cost estimated **7-9% of vCPU** (4.3% measured in `cc_compute_all`,
+~1.7% inferred in per-TB stores, rest in consume-side ops). Lower half is
+inference. Note the cc helpers are `TCG_CALL_NO_RWG_SE` (helper.h:1-3), so they
+do NOT force a global spill wave.
+
+**Still worth doing, frontend-only, ~200 lines, nothing to do with ARM flags:**
+extend `gen_prepare_cc` fast paths beyond `CC_OP_SUB*`/`LOGIC*` to
+ADD/INC/DEC/SHL (today every `add; jbe` calls the helper), and stop
+`helper_cc_compute_all` computing PF and AF when only four flags were wanted.
+**Est. 1.5-3% of vCPU.** Full analysis and a 4-part sizing measurement (M0-M3)
+in `02-lazy-flags.md`.
+
+### 2. Superblocks / multiblock TBs — PROMOTED: also fixes the flag leaks
 Boundary tax = env loads 5.8 + env stores 3.3 + branches/exits 3.1 = 12.2% of
 JIT cycles, plus lookup_tb_ptr/qht ~3% of vCPU. **~13% ceiling, realistic
 5-8%.** High cost: TB formation is load-bearing in QEMU, and bigger TBs worsen
 SMC invalidation.
+Now carries the two flag leaks above as well, so its pool is larger than the
+12.2% boundary tax alone.
 **Decisive cheap test: histogram TB exit reasons + guest-insns-per-TB-entry.**
 If most TBs end on a direct branch within the same guest page, superblocks are
 available; if on indirect branches or page boundaries, they buy nothing.
@@ -123,11 +157,7 @@ From the heavy-frames agent, not yet measured:
   Measured at 2.8% of the vCPU's libxemu cycles (= 0.39% of vCPU) directly,
   but the cache-pollution cost is unmeasured.
 
-### 5. HYPOTHESIS (mine, unproven): L3 contention from the GPU thread
-The GPU thread spends ~11.5% of its cycles in memcpy/memcmp/memset -- bulk
-traffic through a shared 8MB L3 -- while the vCPU takes 213k misses/frame. It
-does not block us, but it may be evicting us. Fits every fact including heavy
-frames. **Untested. Four plausible mechanisms have already died here.**
+### 5. ~~L3 contention from the GPU thread~~ — DEAD, see section D
 
 ---
 
@@ -146,6 +176,8 @@ frames. **Untested. Four plausible mechanisms have already died here.**
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
 | GPU thread stealing vCPU time by blocking | vCPU shows no wait symbols, 1.26% kernel |
+| L3 contention from the GPU thread evicting the vCPU's data | **MEASURED 2026-09-11: IPC is FLAT across frame weights** (cheap vs expensive: 1.69/1.67, 1.85/1.90, 1.86/1.90). If GPU memory traffic were evicting us, heavy frames — which have more GPU work — would show *lower* IPC. They do not. My hypothesis, killed by my own measurement. |
+| ARM native-flag (NZCV/FEAT_FlagM2) mapping | AXFLAG needs 7 instructions where the current code needs 7 (PF = Z AND NOT C is not an AArch64 condition). NZCV-resident flags are impossible in system mode: the softmmu TLB check emits CMP+B.NE on every guest memory access and clobbers them. The hot `cmp; jcc` pattern already compiles to CMP+B.LT. |
 | NV2A surface churn forcing TLB + jump-cache flushes | **MEASURED 2026-09-11: 0.00 full flushes/frame, and full=0 ABSOLUTE since boot** (part=337, elide=7615 prove the counter works). The code path is real (vk/surface.c:582-601 -> physmem.c:891 async_safe_run_on_cpu + tlb_flush_all_cpus_synced, and cputlb.c:392 wipes the jump cache too) but it never fires in steady-state gameplay: `expire_old_surfaces` only evicts surfaces unused for 5+ frames, and a combat scene reuses its surfaces every frame. |
 
 ---
@@ -154,8 +186,9 @@ frames. **Untested. Four plausible mechanisms have already died here.**
 
 1. [x] heavy-frames — DONE. Killed the surface-churn lead; found the
        reentry_insns contamination (section F); left leads 4 open.
-2. [~] lazy-flags — RUNNING — full cost of x86 flag emulation, NZCV mapping
-3. [ ] guest-work — spin-wait detection, HLE, MMIO volume
+2. [x] lazy-flags — DONE. Corrected lead 1 (my AXFLAG claim was wrong);
+       promoted lead 2; surfaced a ~200-line gen_prepare_cc win worth 1.5-3%.
+3. [~] guest-work — RUNNING — full cost of x86 flag emulation, NZCV mapping
 4. [ ] host-memory — huge pages, host dTLB, L3 contention hypothesis
 5. [x] prior-art — DONE, folded into sections B/C/D above
 6. [x] threads — DONE by direct measurement, folded into section A
@@ -185,7 +218,23 @@ The code comment at `ui/xemu.c:1689-1692` already says the counter is "useless
 as an absolute instruction rate"; the error was then using its *ratio* as a
 work proxy anyway.
 
-**(a) game-caused vs (b) emulator-caused is still OPEN.**
+**RESOLVED 2026-09-11 — (a), the game, confirmed with an honest metric.**
+Replaced the contaminated counter with **host instructions retired per frame**,
+read from the hardware PMU on the vCPU thread: exact, sees chained code, and
+cannot be inflated by `cpu_exit()`. Three runs:
+
+| run | cycles ratio | host-work ratio | IPC cheap -> expensive |
+|---|---|---|---|
+| 1 | x1.62 | x1.60 | 1.69 -> 1.67 |
+| 2 | x1.43 | x1.47 | 1.85 -> 1.90 |
+| 3 | x1.47 | x1.51 | 1.86 -> 1.90 |
+
+Host work tracks cycles almost exactly and IPC is flat (slightly higher on
+expensive frames). Heavy frames genuinely run ~1.5x more code; the emulator
+behaves identically on them. **There is no emulator-side heavy-frame effect to
+fix.** The original conclusion was correct but had been resting on bad
+evidence; it is now properly established, and the same run killed the
+L3-contention hypothesis.
 
 **The fix is cheap and available:** re-run the per-frame cheap/expensive
 bucketing with `debug.xemu.nochain=1` (branch android-codegen-measure), where

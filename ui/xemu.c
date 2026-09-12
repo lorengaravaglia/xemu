@@ -1391,6 +1391,24 @@ extern int xemu_vcpu_tid;      /* accel/tcg/cpu-exec.c */
  */
 static int bench_cycles_fd = -1;
 
+static int bench_insn_fd = -1;
+
+/*
+ * Host instructions retired on the vCPU thread.  This is the honest work
+ * proxy: it is counted by hardware, it sees chained TBs (which the dispatcher
+ * counters cannot), and nothing in the emulator can inflate it the way
+ * cpu_exit() inflates a re-entry count.
+ */
+static uint64_t bench_read_insns(void)
+{
+    uint64_t v = 0;
+
+    if (bench_insn_fd >= 0 && read(bench_insn_fd, &v, sizeof(v)) != sizeof(v)) {
+        v = 0;
+    }
+    return v;
+}
+
 static void bench_open_cycles(void)
 {
     struct perf_event_attr pe;
@@ -1412,7 +1430,16 @@ static void bench_open_cycles(void)
                                    xemu_vcpu_tid, -1, -1, 0);
     if (bench_cycles_fd < 0) {
         ALOGI("bench: cycle counter unavailable (%s)", strerror(errno));
+        return;
     }
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_HARDWARE;
+    pe.size = sizeof(pe);
+    pe.config = PERF_COUNT_HW_INSTRUCTIONS;
+    pe.exclude_hv = 1;
+    bench_insn_fd = (int)syscall(__NR_perf_event_open, &pe,
+                                 xemu_vcpu_tid, -1, -1, 0);
 }
 
 static uint64_t bench_read_cycles(void)
@@ -1542,6 +1569,7 @@ static uint64_t s_exp_cycles, s_exp_insn;     static int s_exp_n;
  * create/destroy.  Defined in accel/tcg/cputlb.c. */
 extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
                                   unsigned long long *);
+static uint64_t s_bench_prev_hinsn, s_cheap_hinsn, s_exp_hinsn;
 static unsigned long long s_bench_start_full, s_bench_start_part,
                           s_bench_start_elide;
 
@@ -1603,6 +1631,7 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_tb = xemu_tb_exec_count;
     s_bench_start_insn = xemu_guest_insn_count;
     s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
+    s_cheap_hinsn = s_exp_hinsn = 0;
     xemu_tlb_flush_counts(&s_bench_start_full, &s_bench_start_part,
                           &s_bench_start_elide);
     bench_open_cycles();
@@ -1611,6 +1640,7 @@ void xemu_android_benchmark_start(int frames)
     memset(s_bench_frame_buckets, 0, sizeof(s_bench_frame_buckets));
     s_bench_worst_cycles = 0;
     s_bench_prev_insn = xemu_guest_insn_count;
+    s_bench_prev_hinsn = bench_read_insns();
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1641,12 +1671,17 @@ static void bench_tick(void)
         {
             uint64_t insn_now = xemu_guest_insn_count;
             uint64_t insn = insn_now - s_bench_prev_insn;
+            uint64_t hi_now = bench_read_insns();
+            uint64_t hi = hi_now - s_bench_prev_hinsn;
 
             s_bench_prev_insn = insn_now;
+            s_bench_prev_hinsn = hi_now;
             if (ratio <= 1.0) {
-                s_cheap_cycles += frame; s_cheap_insn += insn; s_cheap_n++;
+                s_cheap_cycles += frame; s_cheap_insn += insn;
+                s_cheap_hinsn += hi; s_cheap_n++;
             } else if (ratio > 1.2) {
-                s_exp_cycles += frame; s_exp_insn += insn; s_exp_n++;
+                s_exp_cycles += frame; s_exp_insn += insn;
+                s_exp_hinsn += hi; s_exp_n++;
             }
         }
     }
@@ -1735,11 +1770,38 @@ static void bench_tick(void)
             double cheap_ki = s_cheap_insn / (double)s_cheap_n / 1e3;
             double exp_ki   = s_exp_insn   / (double)s_exp_n   / 1e3;
 
-            ALOGI("bench: cheap frames (n=%d) %.0f Mcyc, %.0f k reentry-insn | "
-                  "expensive (n=%d) %.0f Mcyc, %.0f k reentry-insn | "
-                  "cycles x%.2f, work x%.2f",
-                  s_cheap_n, cheap_mc, cheap_ki, s_exp_n, exp_mc, exp_ki,
-                  exp_mc / cheap_mc, cheap_ki > 0 ? exp_ki / cheap_ki : 0.0);
+            double cheap_hm = s_cheap_n ?
+                (double)s_cheap_hinsn / s_cheap_n / 1e6 : 0.0;
+            double exp_hm = s_exp_n ?
+                (double)s_exp_hinsn / s_exp_n / 1e6 : 0.0;
+
+            ALOGI("bench: cheap frames (n=%d) %.0f Mcyc, %.1f Mhost-insn | "
+                  "expensive (n=%d) %.0f Mcyc, %.1f Mhost-insn | "
+                  "cycles x%.2f, HOST WORK x%.2f, IPC %.2f vs %.2f",
+                  s_cheap_n, cheap_mc, cheap_hm,
+                  s_exp_n, exp_mc, exp_hm,
+                  exp_mc / cheap_mc, cheap_hm > 0 ? exp_hm / cheap_hm : 0.0,
+                  cheap_mc > 0 ? cheap_hm / cheap_mc : 0.0,
+                  exp_mc > 0 ? exp_hm / exp_mc : 0.0);
+
+            /*
+             * How to read this.  HOST WORK is hardware-counted and sees
+             * chained code, so it cannot be inflated by cpu_exit() the way a
+             * dispatcher re-entry count is.
+             *
+             *   HOST WORK ~= cycles ratio, IPC flat  -> heavy frames simply
+             *       run more code: the game is doing more (hypothesis a).
+             *   HOST WORK flat but cycles up, IPC down -> the same work is
+             *       stalling more: an emulator or memory-system effect
+             *       (hypothesis b).
+             *
+             * The old "work x" column was reentry-insn and could not tell
+             * these apart -- see perf-investigation/00-FINDINGS.md section F.
+             */
+            ALOGI("bench: cheap frames (n=%d) %.0f k reentry-insn | "
+                  "expensive (n=%d) %.0f k reentry-insn  "
+                  "(re-entry count, CONTAMINATED by cpu_exit -- not work)",
+                  s_cheap_n, cheap_ki, s_exp_n, exp_ki);
         }
     }
 }
