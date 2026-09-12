@@ -587,3 +587,26 @@ save slot 5.  Its emulation activity is `exported="false"` so it cannot be
 started from adb, and D-pad navigation of its library proved unreliable.  This
 is a 30-second manual step for the user, after which the measurement is
 automated.
+
+**HEAD-TO-HEAD BLOCKED 2026-09-12: hakuX crashes loading Halo on this device.**
+SIGSEGV in the block-I/O coroutine path --
+`qcow2_co_decompress` -> `bdrv_co_preadv_part` -> `thread_pool_submit_co` ->
+`qemu_coroutine_delete` -- with return addresses carrying non-canonical high
+bits (`0x44a17a9f85021c`, `si_addr=0x8ba7a9f8500c4`) where valid text on this
+device is `0x7a9f......`.  Those high bits are pointer-authentication
+signatures left in place across a coroutine stack switch.
+
+**This is the exact failure CLAUDE.md documents and we fixed.**  We build with
+`-mbranch-protection=none -fno-sanitize=shadow-call-stack`
+(android/app/src/main/cpp/CMakeLists.txt:121-122) and additionally replaced
+the coroutine backend with hand-written AArch64 assembly
+(`android/app/src/main/cpp/coroutine_android_asm.c`).  hakuX has neither: no
+`mbranch-protection` anywhere in its tree, and only the stock QEMU
+ucontext/sigaltstack backends.
+
+**Consequence for the comparison:** their optimisations are **unproven on this
+hardware** -- the emulator does not survive game load.  So the plan changes
+from "measure them, then port what wins" to "port the technique into ours and
+measure it with our own harness", which is stronger anyway: the harness has
+caught eight wrong answers, and correctness can be validated the way the
+inline flag path was (52M checks, 0 mismatches).
