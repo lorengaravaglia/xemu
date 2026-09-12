@@ -188,11 +188,21 @@ computation in TCG is a correctness hazard on the path that decides every
 branch, and the code growth at each DYNAMIC site works against an already
 measured 112k iTLB misses/frame.
 
-**Harness note discovered here:** Android's idle manager SIGKILLs both xemu
-processes about 4 minutes into an unattended benchmark session, even with
-FLAG_KEEP_SCREEN_ON set (EmulationActivity.kt:292) and a 30-minute screen
-timeout.  `adb shell dumpsys deviceidle disable` before a long run fixes it;
-re-enable afterwards.
+**Harness note — RETRACTED.**  Two benchmark sessions died at signal 9 on
+both processes about 4 minutes in, and I attributed it to Android's idle
+manager.  **Wrong: the user was killing the process manually**, having seen
+the emulator apparently sitting idle.  `dumpsys deviceidle disable` did not
+fix anything; the next run simply was not killed.  No Android power-management
+change is needed, and `FLAG_KEEP_SCREEN_ON` (EmulationActivity.kt:292) was
+doing its job all along.
+
+The real lesson is a coordination one: **an unattended benchmark looks exactly
+like a hung emulator** -- a static scene, no input, no visible progress, for
+tens of seconds at a time.  Before concluding an automated run has stalled,
+check `adb logcat -s xemu-android:I | grep bench:` for RESULT lines, or
+`adb shell pidof com.xemu:EmulationProcess`.  Signal 9 on *both* processes at
+once is a manual stop or `am force-stop`; a real crash shows signal 6 or 11
+on one.
 
 ### 4. DEAD: `rep movs`/`rep stos` -> host memcpy
 **MEASURED 2026-09-12: 65,686-105,173 iterations/frame over ~3,000-4,600 rep
