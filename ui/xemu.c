@@ -1725,7 +1725,9 @@ void xemu_android_benchmark_start(int frames)
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    ALOGI("bench: started, %d guest frames — hands off the controls", frames);
+    ALOGI("bench: started, %d guest frames (~%d s) — hands off the controls; "
+          "the screen will look frozen, that is expected",
+          frames, (frames + 29) / 30);
 }
 
 /* Called once per guest frame. */
@@ -1769,6 +1771,30 @@ static void bench_tick(void)
             }
         }
     }
+    /*
+     * Heartbeat.  A benchmark window is indistinguishable from a hung
+     * emulator from the outside -- static scene, no input, nothing moving on
+     * screen for the better part of a minute, several times in a row.  That
+     * has twice led to a run being stopped by hand mid-measurement.  Say
+     * plainly that it is alive, how far along it is, and how long is left.
+     */
+    {
+        int done = s_bench_frames_total - s_bench_frames_left + 1;
+
+        if (s_bench_frames_left > 1 && done % 30 == 0) {
+            double el_ms =
+                (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s_bench_start_ns)
+                / 1e6;
+            double per = done ? el_ms / done : 0.0;
+
+            ALOGI("bench: RUNNING %d/%d frames (%d%%) | %.1f ms/frame so far "
+                  "| ~%.0f s left -- ALIVE, do not kill",
+                  done, s_bench_frames_total,
+                  100 * done / s_bench_frames_total, per,
+                  (s_bench_frames_left - 1) * per / 1000.0);
+        }
+    }
+
     if (--s_bench_frames_left > 0) {
         return;
     }

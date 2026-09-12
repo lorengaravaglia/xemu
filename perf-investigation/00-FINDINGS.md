@@ -196,7 +196,24 @@ fix anything; the next run simply was not killed.  No Android power-management
 change is needed, and `FLAG_KEEP_SCREEN_ON` (EmulationActivity.kt:292) was
 doing its job all along.
 
-The real lesson is a coordination one: **an unattended benchmark looks exactly
+**And the harness was the real culprit.**  A 200-frame benchmark takes about
+**7 seconds**.  My scripts slept a fixed 55 s after each one, so the emulator
+genuinely sat idle on a static scene for ~48 s between measurements -- which
+is exactly what looked like a hang.  With the heartbeat in place the runs can
+be polled instead:
+
+```sh
+adb shell am broadcast -a com.xemu.action.BENCHMARK --ei frames 200
+for i in $(seq 1 40); do sleep 3
+  adb logcat -d -s xemu-android:I | grep -q "bench: RESULT" && break
+done
+```
+
+That makes an 8-run interleaved A/B take about 1.5 minutes instead of 8, and
+cuts the thermal drift a session is exposed to by the same factor.  Use
+polling, not fixed sleeps.
+
+The secondary lesson is a coordination one: **an unattended benchmark looks exactly
 like a hung emulator** -- a static scene, no input, no visible progress, for
 tens of seconds at a time.  Before concluding an automated run has stalled,
 check `adb logcat -s xemu-android:I | grep bench:` for RESULT lines, or
