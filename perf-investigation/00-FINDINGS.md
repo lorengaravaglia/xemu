@@ -679,3 +679,31 @@ counted all env traffic including mid-TB spills that SRA would not remove.
 Against a ~1% measurement floor and deep TCG surgery, **SRA is not worth
 building.**  This is the last idea whose mechanism matched the measured
 constraint, and it is now bounded.
+
+---
+
+## L. WHY hakuX LOOKS SLIGHTLY FASTER (2026-09-12)
+
+User ran hakuX (after our coroutine fix let it boot) and reports it may be
+slightly faster **but with many graphical glitches**.  Their changelog says
+what that is:
+
+> `nv2a: lazy surface eviction downloads — skip when VRAM data is never read`
+> `nv2a: texture zero-upload detection + disable texture replace sync`
+
+They skip surface downloads and texture syncs.  That produces exactly those
+glitches, and it is a correctness-for-speed trade rather than a better
+emulator core.
+
+**Could we take the same trade?  No -- there is nothing there for us.**
+Skipping surface downloads also skips re-arming `TLB_NOTDIRTY` on VRAM pages,
+which is the only way that GPU-side choice reaches our vCPU.  Measured:
+**10-17 notdirty store-traps per frame** (8-9 of them SMC checks).  Even at a
+generous 1000 cycles each that is **0.02% of a frame**.
+
+So their visible speed difference is either GPU-thread work (which we measured
+does not bound our vCPU -- IPC is flat across frame weights) or run-to-run
+noise.  Copying it would cost image quality and gain nothing measurable.
+
+This also closes the last open item in section 5/7: `tlb_reset_dirty` and the
+NV2A dirty clients are not a meaningful vCPU cost.

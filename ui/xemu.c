@@ -1693,6 +1693,7 @@ static uint64_t s_exp_cycles, s_exp_insn;     static int s_exp_n;
 extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
                                   unsigned long long *);
 extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
+extern unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
 extern unsigned long long xemu_rep_iters, xemu_rep_execs;
 extern unsigned long long xemu_ccop_hist[];
 extern unsigned long long xemu_cc_checks, xemu_cc_bad;
@@ -1715,6 +1716,7 @@ static uint64_t s_bench_start_dwalk, s_bench_start_iwalk;
 static uint64_t s_bench_start_l1i, s_bench_start_l1irf, s_bench_start_l2r;
 static uint64_t s_bench_start_stallf, s_bench_start_stallb;
 static unsigned long long s_bench_start_rep_i, s_bench_start_rep_e;
+static unsigned long long s_bench_start_nd, s_bench_start_ndsmc;
 static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
 static unsigned long long s_bench_start_full, s_bench_start_part,
                           s_bench_start_elide;
@@ -1799,6 +1801,8 @@ void xemu_android_benchmark_start(int frames)
             s_bench_start_ccop[i] = xemu_ccop_hist[i];
         }
     }
+    s_bench_start_nd = xemu_notdirty_writes;
+    s_bench_start_ndsmc = xemu_notdirty_smc;
     s_bench_start_rep_i = xemu_rep_iters;
     s_bench_start_rep_e = xemu_rep_execs;
     s_bench_start_dtlb = bench_read_fd(bench_dtlb_fd);
@@ -2069,6 +2073,12 @@ static void bench_tick(void)
               xemu_cc_bad ? "  <-- INLINE PATH IS WRONG, DO NOT SHIP"
                           : "  (inline result is bit-identical)");
     }
+
+    ALOGI("bench: NOTDIRTY %llu store-traps/frame (%llu of them SMC checks) "
+          "-- guest stores forced out of generated code by VRAM dirty "
+          "tracking; this is what a fork skipping surface downloads avoids",
+          (xemu_notdirty_writes - s_bench_start_nd) / s_bench_frames_total,
+          (xemu_notdirty_smc - s_bench_start_ndsmc) / s_bench_frames_total);
 
     ALOGI("bench: REP-STRING %llu iterations/frame over %llu instructions "
           "| ABSOLUTE since boot: %llu iters over %llu instructions "

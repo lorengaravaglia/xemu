@@ -1371,14 +1371,29 @@ static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
     return false;
 }
 
+/*
+ * Guest stores forced down the slow path by dirty-memory tracking.
+ *
+ * The NV2A dirty clients re-arm TLB_NOTDIRTY on VRAM pages every time the GPU
+ * side clears them, so each first store to a re-armed page traps out of
+ * generated code into here.  A rival fork that skips surface downloads also
+ * skips this re-arming -- and reportedly runs slightly faster with graphical
+ * glitches, which is the signature of exactly that trade.  This counts the
+ * traps so the size of that trade can be judged before copying it.
+ */
+unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
+
 static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
                            CPUTLBEntryFull *full, uintptr_t retaddr)
 {
+    xemu_notdirty_writes++;
+
     ram_addr_t ram_addr = mem_vaddr + full->xlat_section;
 
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
 
     if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
+        xemu_notdirty_smc++;
         tb_invalidate_phys_range_fast(cpu, ram_addr, size, retaddr);
     }
 
