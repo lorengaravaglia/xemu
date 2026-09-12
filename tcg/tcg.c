@@ -6970,6 +6970,136 @@ static void tcg_out_st_helper_args(TCGContext *s, const TCGLabelQemuLdst *ldst,
     tcg_out_helper_load_common_args(s, ldst, parm, info, next_arg);
 }
 
+
+/*
+ * Dead flag elimination for the x86 condition-code globals.
+ *
+ * Ported from hakuX (tcg/tier1-opt.c, GPL-2.0-or-later, same licence).
+ * Backward liveness over cc_op/cc_dst/cc_src/cc_src2 only: an op whose sole
+ * outputs are CC globals that are already dead, and which has no side
+ * effects, is removed.
+ *
+ * Conservative everywhere it matters -- labels, block ends, conditional
+ * branches and calls all reset every CC global to live, and the walk starts
+ * with them live for the TB exit.
+ *
+ * Whether this finds anything is an open question: QEMU's own
+ * liveness_pass_1 already removes ops whose outputs are all dead and which
+ * are side-effect free.  The counter below exists to answer that before any
+ * conclusion is drawn about speed.  debug.xemu.dfe=0 disables.
+ */
+int g_xemu_dfe = 1;
+unsigned long long xemu_dfe_removed, xemu_dfe_tbs, xemu_dfe_ops_seen;
+
+#define XEMU_CC_N 4
+
+static bool xemu_find_cc_globals(TCGContext *s, TCGTemp **out)
+{
+    static const char *const names[XEMU_CC_N] = {
+        "cc_op", "cc_dst", "cc_src", "cc_src2"
+    };
+    int found = 0, i, g;
+
+    memset(out, 0, sizeof(*out) * XEMU_CC_N);
+    for (g = 0; g < s->nb_globals; g++) {
+        TCGTemp *ts = &s->temps[g];
+
+        if (!ts->name) {
+            continue;
+        }
+        for (i = 0; i < XEMU_CC_N; i++) {
+            if (!out[i] && strcmp(ts->name, names[i]) == 0) {
+                out[i] = ts;
+                found++;
+                break;
+            }
+        }
+    }
+    return found == XEMU_CC_N;
+}
+
+static inline int xemu_cc_index(TCGTemp **cc, TCGTemp *ts)
+{
+    int i;
+
+    for (i = 0; i < XEMU_CC_N; i++) {
+        if (ts == cc[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void xemu_dead_flag_elimination(TCGContext *s)
+{
+    TCGTemp *cc[XEMU_CC_N];
+    uint32_t live = (1u << XEMU_CC_N) - 1;
+    TCGOp *op, *op_prev;
+
+    if (!g_xemu_dfe || !xemu_find_cc_globals(s, cc)) {
+        return;
+    }
+    xemu_dfe_tbs++;
+
+    QTAILQ_FOREACH_REVERSE_SAFE(op, &s->ops, link, op_prev) {
+        TCGOpcode opc = op->opc;
+        const TCGOpDef *def = &tcg_op_defs[opc];
+        int nb_oargs, nb_iargs, i;
+        bool writes_cc = false, only_dead_cc = true;
+
+        xemu_dfe_ops_seen++;
+
+        if (opc == INDEX_op_set_label || opc == INDEX_op_call) {
+            live = (1u << XEMU_CC_N) - 1;
+            continue;
+        }
+        if (def->flags & (TCG_OPF_BB_EXIT | TCG_OPF_BB_END |
+                          TCG_OPF_COND_BRANCH)) {
+            live = (1u << XEMU_CC_N) - 1;
+        }
+
+        nb_oargs = def->nb_oargs;
+        nb_iargs = def->nb_iargs;
+
+        for (i = 0; i < nb_oargs; i++) {
+            int idx = xemu_cc_index(cc, arg_temp(op->args[i]));
+
+            if (idx >= 0) {
+                writes_cc = true;
+                if (live & (1u << idx)) {
+                    only_dead_cc = false;
+                }
+            } else {
+                only_dead_cc = false;
+            }
+        }
+
+        if (writes_cc && only_dead_cc && nb_oargs > 0 &&
+            !(def->flags & TCG_OPF_SIDE_EFFECTS)) {
+            tcg_op_remove(s, op);
+            xemu_dfe_removed++;
+            continue;
+        }
+
+        if (writes_cc) {
+            for (i = 0; i < nb_oargs; i++) {
+                int idx = xemu_cc_index(cc, arg_temp(op->args[i]));
+
+                if (idx >= 0) {
+                    live &= ~(1u << idx);
+                }
+            }
+        }
+        for (i = nb_oargs; i < nb_oargs + nb_iargs; i++) {
+            int idx = xemu_cc_index(cc, arg_temp(op->args[i]));
+
+            if (idx >= 0) {
+                live |= (1u << idx);
+            }
+        }
+    }
+}
+
 int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
 {
     int i, num_insns;
@@ -7007,6 +7137,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     tcg_temp_ebb_reset_freed(s);
 
     tcg_optimize(s);
+    xemu_dead_flag_elimination(s);
 
     reachable_code_pass(s);
     liveness_pass_0(s);

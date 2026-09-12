@@ -1697,6 +1697,8 @@ extern unsigned long long xemu_rep_iters, xemu_rep_execs;
 extern unsigned long long xemu_ccop_hist[];
 extern unsigned long long xemu_cc_checks, xemu_cc_bad;
 extern int g_cc_inline, g_cc_validate, g_cc_fastpath;
+extern int g_xemu_dfe;
+extern unsigned long long xemu_dfe_removed, xemu_dfe_tbs, xemu_dfe_ops_seen;
 extern const char *xemu_ccop_name(int op);
 extern const int xemu_ccop_nb;          /* real size -- do NOT guess */
 #define XEMU_CC_OP_MAX 80
@@ -2048,6 +2050,14 @@ static void bench_tick(void)
                   xemu_ccop_name(top[3]), 100.0 * cur[top[3]] / tot);
         }
     }
+
+    ALOGI("bench: DEAD-FLAG ELIM dfe=%d | %llu ops removed over %llu TBs "
+          "(%.2f per TB, %.3f%% of %llu ops seen) -- if ~0, QEMU's own "
+          "liveness already does this",
+          g_xemu_dfe, xemu_dfe_removed, xemu_dfe_tbs,
+          xemu_dfe_tbs ? (double)xemu_dfe_removed / xemu_dfe_tbs : 0.0,
+          xemu_dfe_ops_seen ? 100.0 * xemu_dfe_removed / xemu_dfe_ops_seen : 0.0,
+          xemu_dfe_ops_seen);
 
     ALOGI("bench: CC SWITCHES inline=%d validate=%d fastpath=%d "
           "(if these do not follow the properties, the wiring is broken)",

@@ -610,3 +610,39 @@ from "measure them, then port what wins" to "port the technique into ours and
 measure it with our own harness", which is stronger anyway: the harness has
 caught eight wrong answers, and correctness can be validated the way the
 inline flag path was (52M checks, 0 mismatches).
+
+---
+
+## J. PORTED: hakuX's dead-flag elimination (2026-09-12)
+
+Ported `tier1_dead_flag_elimination` from hakuX into `tcg/tcg.c` (same
+GPL-2.0-or-later licence), hooked after `tcg_optimize()`, gated on
+`debug.xemu.dfe`.  Backward liveness over cc_op/cc_dst/cc_src/cc_src2;
+conservative at labels, block ends, conditional branches and calls.
+
+**It works, and QEMU's own liveness does NOT already do this:**
+**1.68-1.71 ops removed per TB, 2.5% of all TCG ops seen.**  The counters
+freeze when the switch is off and climb when on, so the effect is real.
+
+**But frame time does not move:** dfe=1 gives 32.92/32.60, dfe=0 gives
+33.16/32.68/32.92/32.64 -- 32.76 against 32.85, inside the spread.
+
+**The arithmetic says that was predictable:** 1.68 ops/TB x ~740k TB
+executions = ~1.2M ops per frame against 164M host instructions, so the
+ceiling on this optimisation is **~0.8%** -- below our ~1% resolution.  Their
+cross-TB variant (`tier1_compute_cc_defines_first`, which lets a successor's
+defines-before-use kill a predecessor's trailing env stores, something QEMU
+cannot do because globals are `TS_DEAD|TS_MEM` at TB end) would add perhaps
+3 stores per TB, ~1.3% -- also below resolution.
+
+**Kept, default on.**  It is correct, conservative, costs only translation
+time, and removes real work.  But flag elimination as a direction caps out
+around 1-2% and is not the lever.
+
+**Why it does not help, in terms of section G:** these are *stores*.  Removing
+a store does not shorten the dependency chain feeding later work.  The stall
+data says we are issue-bound at ~2.2 IPC on a 6-wide core, and what would
+change that is keeping guest registers in host registers so ALU work chains
+register-to-register instead of through `env` -- static register allocation,
+which FEX reports at ~20% for 32-bit guests.  **That is the one remaining
+idea whose mechanism matches the measured constraint.**

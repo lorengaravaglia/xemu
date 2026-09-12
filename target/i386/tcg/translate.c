@@ -97,6 +97,20 @@ void x86_refresh_fpu_mode(void)
     }
 
     {
+        extern int g_xemu_dfe;
+        char dv[PROP_VALUE_MAX] = { 0 };
+        int want = !(__system_property_get("debug.xemu.dfe", dv) > 0 &&
+                     (dv[0] == '0' || dv[0] == 'n' || dv[0] == 'f'));
+
+        if (want != g_xemu_dfe) {
+            g_xemu_dfe = want;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
+    {
         extern int g_cc_fastpath;
         char fv[PROP_VALUE_MAX] = { 0 };
 
