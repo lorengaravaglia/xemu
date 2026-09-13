@@ -927,3 +927,46 @@ SIGABRT in the APU DSP scatter-gather DMA during normal play, with spin
 elision OFF, so unrelated to anything added here.  Upstream xemu code.  The
 guest asked for a page beyond the scatter-gather table and the assert is
 fatal.  Worth fixing separately; it is reachable in ordinary gameplay.
+
+---
+
+## Q. SOAK TEST: spin elision removes the dips after all (2026-09-12)
+
+Section N concluded that eliding the spin buys "headroom, not frame rate",
+because the spin sits in frames that already fit.  **That was right about the
+mechanism and wrong about the outcome**, and the error was measuring over 30
+seconds from a cool device.  The goal also changed -- not a consistent 30 fps
+but a floor above 20 -- which makes worst-case frames the metric rather than
+the average.
+
+Method: from 51 C, eight consecutive 600-frame runs per arm, letting the
+device reach its steady thermal state.  Runs 2-8 are the settled ones; run 1
+is discarded as warmup.
+
+| | spin OFF | spin ON |
+|---|---|---|
+| frames under 15 fps (>66 ms), per 600 | 1, 5, 3, 7, 6, 1, 7 (~4.3) | **0, 0, 0, 0, 0, 0, 0** |
+| frames under 20 fps (>50 ms), per 600 | 12-18 (~15) | **1-3 (~1.4)** |
+| worst frame | 68-93 ms (**10.8-14.7 fps**) | 50-63 ms (**15.9-20.0 fps**) |
+| die temperature | 90-95 C | 77-89 C |
+| vCPU ms/frame | 31.9 | 19.5 |
+
+**Sub-15 fps frames are eliminated entirely.  Sub-20 fps frames fall about
+90%.**
+
+**Why it works, given the spin is not in the heavy frames.**  Thermal
+headroom converts into sustained clock.  At 90-95 C the SoC throttles; the
+project has separately measured 2.86-2.94 GHz sustained against a 3.19 GHz
+ceiling.  Cutting 39% of average vCPU work keeps the die 10-15 C cooler, the
+clock stays higher, and the heavy frames -- which contain no spin at all --
+finish sooner because the core is faster when they arrive.
+
+This is the first change in the whole investigation that moves the metric the
+user actually cares about, and it was invisible to every short benchmark
+because the effect only appears once the device is hot.
+
+**Caveats.**  The two arms are separate launches, which this project usually
+distrusts; the effect is accepted here because it is large (15 -> 1.4, 4.3 ->
+0), consistent across seven runs per arm, and both arms started from 51 C.
+One scene only.  And the spin PC range is still hardcoded to Halo -- dynamic
+detection is required before this generalises.
