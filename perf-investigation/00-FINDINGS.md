@@ -1125,3 +1125,81 @@ at ~20 host instructions per guest instruction, issue-bound at IPC 1.85.
 Also note section R's noise floor: interleaved A/B moves +-0.3 ms/frame with
 both arms running identical code.  Measure dip work with the FLOOR and HIST
 counters on slot 5, not with mean ms/frame, which cannot resolve it.
+
+## T. LIVE COMBAT CAPTURE: the dips are input-driven, and the PMU is lying (2026-09-13)
+
+Slot 2 played by hand for ~70 s through the combat section, recorded with the
+BENCHMARK broadcast **without** a `slot` extra — that records in place, skips
+the state reload, and does not suppress input, so no new code was needed.
+
+### Playing produces the dips; idling does not
+
+| slot 2 | fps | frames >50ms (<20fps) | >66ms (<15fps) | worst |
+|---|---|---|---|---|
+| no input, 400 frames | 30.0 | 0-2 | 0-1 | 65 ms |
+| **played, 2000 frames** | 27.96 | **242** | **62** | **118 ms (8.5 fps)** |
+
+The dips are driven by input-dependent work — combat AI, projectiles,
+particles, audio voices — not by anything in the scene's baseline.  This is why
+the no-input benchmark on slot 2 looked perfect and slot 5 did not: slot 5 is
+simply a heavier static scene.
+
+Shape (`HIST`): 1591 of 1999 frames still sit in the healthy 33-36 ms pacing
+mode; the damage is 161 frames at 50-60 ms, 61 at 60-80 ms, 7 past 80 ms.
+`WORKSPLIT` puts the slow population at **1.65x the cycles** of the fast one —
+work, not a stall, same as section S.
+
+**`SLOWGAPS` is the new information:** `1 1 1 1 1 1 1 1 1 1 1 2 1 1 ...` —
+nearly every gap is 1, so slow frames run **consecutively**.  Under input the
+game enters a sustained heavy regime for stretches at a time, rather than the
+isolated 2-4 frame spikes the static slot-5 scene produces.  A dip is a
+*period*, not a spike, which is why it is felt as the game becoming unplayable
+rather than as a stutter.
+
+### notdirty is NOT the cause (again)
+
+The per-slow-frame diagnostic fired 20 times.  Nineteen of those show
+`notdirty +36` to `+175`, which is negligible.  Exactly one shows `+6583
+(smc +5762)`.  A single outlier frame does not explain 242 slow frames.
+Section P's conclusion stands; do not re-open this.
+
+### The PMU numbers in the bench output are scaled by ~0.4 — do not trust them
+
+The run reports `effective 1.13 GHz`.  Measured from outside during a live
+benchmark, the cores are pinned at **maximum** the entire time:
+
+```
+little 2016 MHz | mid 2803 MHz | prime 3187 MHz | maxtemp 83-87 C   (8 samples)
+```
+
+No DVFS throttling at all, at 87 C, with the vCPU thread (TID ...245) at a
+saturated 100%.  A thread running flat out on a 3.19 GHz core cannot accumulate
+1.13 GHz worth of cycles, so **the cycle counter is reading ~35-40% of actual.**
+
+Cause: the bench opens 15+ PMU counters simultaneously (fds 137/141/142, 156,
+168/169, 170/175/178 ...) on a PMU with ~6 programmable slots, so the kernel
+multiplexes and scales every counter down.  Section N caught this when
+simpleperf was running; it is happening **without** simpleperf too, all the
+time, to our own counters.
+
+**Consequences:**
+- Every absolute per-frame PMU figure in the bench output is understated by
+  ~2.9x: `L1I-miss 673611/frame`, `LL miss 93258/frame`, `STALLS backend 18.7%`,
+  `effective GHz`, and the `per-frame vs budget` buckets (which classify almost
+  everything as `<80%` and disagree with HIST's wall-time view for this reason).
+- **Ratios between two populations measured by the same counter are still
+  sound** — WORKSPLIT's 1.65x and the cheap/expensive splits survive.
+- The codegen-density case (84% of cycles in generated code, IPC 1.85, L1I
+  pressure) rests on these absolute numbers and should be re-measured with
+  <= 6 counters open before more work is built on it.
+
+Also: thermal throttling of the clock is **ruled out** as a dip mechanism.  The
+cores hold maximum frequency at 87 C.
+
+### Leads visible in the capture
+
+- **CC helper 39132 calls/frame, 96% of them LOGICB.**  A `gen_prepare_cc` fast
+  path covering one opcode would remove most of those calls.
+- REP-STRING 67635 iterations/frame across only 3150 instructions (~21 per).
+- MMIO 708 reads + 695 writes/frame, each leaving generated code and taking the
+  BQL plus a device lock.
