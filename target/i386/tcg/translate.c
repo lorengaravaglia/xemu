@@ -161,6 +161,34 @@ void x86_refresh_fpu_mode(void)
     }
 
     {
+        extern uint32_t g_spin_lo, g_spin_hi;
+        extern int g_spin_us, g_spin_thresh;
+        char v1[PROP_VALUE_MAX] = { 0 }, v2[PROP_VALUE_MAX] = { 0 };
+        char v3[PROP_VALUE_MAX] = { 0 }, v4[PROP_VALUE_MAX] = { 0 };
+        uint32_t lo = 0, hi = 0;
+
+        if (__system_property_get("debug.xemu.spin_lo", v1) > 0) {
+            lo = (uint32_t)strtoul(v1, NULL, 0);
+        }
+        if (__system_property_get("debug.xemu.spin_hi", v2) > 0) {
+            hi = (uint32_t)strtoul(v2, NULL, 0);
+        }
+        if (__system_property_get("debug.xemu.spin_us", v3) > 0) {
+            g_spin_us = atoi(v3) ? atoi(v3) : 200;
+        }
+        if (__system_property_get("debug.xemu.spin_thresh", v4) > 0) {
+            g_spin_thresh = atoi(v4) ? atoi(v4) : 64;
+        }
+        if (lo != g_spin_lo || hi != g_spin_hi) {
+            g_spin_lo = lo;
+            g_spin_hi = hi;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
+    {
         extern int g_xemu_dfe;
         char dv[PROP_VALUE_MAX] = { 0 };
         int want = !(__system_property_get("debug.xemu.dfe", dv) > 0 &&

@@ -177,6 +177,57 @@ unsigned long long xemu_guest_insn_count;
 int xemu_vcpu_tid;
 #endif
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * Spin-wait elision.
+ *
+ * Halo busy-waits for a 64-bit tick counter to reach a target -- measured at
+ * ~23% of generated-code time, at guest 0x000bb0d4-0x000bb0f2.  The guest is
+ * waiting for WALL-CLOCK TIME to pass, and that counter is advanced by a timer
+ * interrupt, so sleeping until the next interrupt is a faithful emulation of
+ * the wait rather than a shortcut: the guest cannot observe the difference,
+ * and the host stops burning a core at 90+ degrees to accomplish nothing.
+ *
+ * The loop is two chained blocks, so the dispatcher never sees it.  TBs whose
+ * PC falls in the configured range are therefore translated unchained, which
+ * makes each iteration visible here; after enough consecutive iterations with
+ * no other code running, the thread sleeps briefly.  Any block outside the
+ * range resets the count, so real work is never delayed.
+ *
+ *   debug.xemu.spin_lo / spin_hi   guest PC range (0 disables)
+ *   debug.xemu.spin_us            sleep per burst, default 200us
+ *   debug.xemu.spin_thresh        consecutive iterations before sleeping
+ *
+ * NOTE the range is game-specific.  Proving the value comes first; detecting
+ * spins dynamically is the follow-up if it is worth having.
+ */
+uint32_t g_spin_lo, g_spin_hi;
+int g_spin_us = 200, g_spin_thresh = 64;
+unsigned long long xemu_spin_hits, xemu_spin_sleeps, xemu_spin_us_total;
+
+static void xemu_spin_maybe_sleep(vaddr pc)
+{
+    static unsigned consec;
+
+    if (!g_spin_lo || pc < g_spin_lo || pc > g_spin_hi) {
+        consec = 0;
+        return;
+    }
+    xemu_spin_hits++;
+    if (++consec < (unsigned)g_spin_thresh) {
+        return;
+    }
+    consec = 0;
+    {
+        struct timespec ts = { 0, g_spin_us * 1000L };
+
+        nanosleep(&ts, NULL);
+        xemu_spin_sleeps++;
+        xemu_spin_us_total += g_spin_us;
+    }
+}
+#endif
+
 static bool tb_lookup_cmp(const void *p, const void *d)
 {
     const TranslationBlock *tb = p;
@@ -1010,6 +1061,16 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #endif
                 cpu->cflags_next_tb = -1;
             }
+
+#if defined(__ANDROID__) || defined(ANDROID)
+            /* Unchain the spin range so every iteration reaches the
+             * dispatcher, then sleep once it is clearly spinning. */
+            if (unlikely(g_spin_lo) &&
+                s.pc >= g_spin_lo && s.pc <= g_spin_hi) {
+                s.cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
+            }
+            xemu_spin_maybe_sleep(s.pc);
+#endif
 
             if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
                 break;

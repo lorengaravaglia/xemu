@@ -815,3 +815,63 @@ split was redone using wall time between frames, which is immune to this and
 is the more direct question anyway: a frame longer than 33.3 ms IS a dropped
 frame.  Caught only because the framelog contradicted the benchmark's own
 summary for the same run.
+
+---
+
+## O. SPIN ELISION: implemented and measured (2026-09-12)
+
+The guest waits for wall-clock time to pass, and the counter it polls is
+advanced by a timer interrupt.  Sleeping until that interrupt is therefore a
+faithful emulation of the wait, not a shortcut -- the guest cannot observe the
+difference.  That is what makes this safe where skipping work would not be.
+
+Implementation (`accel/tcg/cpu-exec.c`): TBs whose guest PC falls in a
+configured range are translated unchained, so every iteration reaches the
+dispatcher; after N consecutive iterations with nothing else running, the
+thread sleeps briefly.  Any block outside the range resets the count, so real
+work is never delayed.
+
+  debug.xemu.spin_lo / spin_hi   guest PC range (0 disables)
+  debug.xemu.spin_us             sleep per burst, default 200
+  debug.xemu.spin_thresh         consecutive iterations first, default 64
+
+### Result, interleaved, 900-frame runs
+
+| | spin OFF | spin ON |
+|---|---|---|
+| **vCPU ms/frame** | **32.81** | **19.90** |
+| headroom vs 33.3ms | 2% | **40%** |
+| vCPU utilisation | 98% | **59%** |
+| fps (guest-paced) | 29.88 | 29.89 |
+| wall for 900 frames | 30118 ms | 30115 ms |
+| die temp after 2x250 frames | 85-88 C | **70-78 C** |
+
+**~39% less vCPU work, identical frame rate and wall time, 10-15 C cooler.**
+About 12 ms per frame of pure spinning is replaced by sleeping.
+
+### What this does NOT show
+
+The per-frame budget histogram is **unusable in this build** and must not be
+cited: this session has accumulated ~14 open `perf_event_open` counters
+against an ARM PMU with roughly 6, so the kernel multiplexes them and every
+PMU-derived per-frame figure is scaled down.  Both configurations printed an
+identical histogram, which cannot be true given a 39% work difference.
+
+So **whether the dips improved is unmeasured here.**  Section N predicted they
+would not, since the spin sits in frames that already fit.  The honest claim
+is headroom and thermals, which are measured from /proc CPU time and wall
+clock and are unaffected by the PMU problem.
+
+Thermal headroom may feed back into sustained clock (section: we run at
+2.86-2.94 GHz against a 3.19 GHz ceiling), but that is a hypothesis, not a
+measurement.
+
+### Caveats before this ships
+
+- The PC range is **game-specific**.  Productionising needs dynamic spin
+  detection rather than a hardcoded range.
+- The loop is **not a pure spin**: `test bl,bl; push 1; call <far>` runs a
+  function on some iterations.  Sleeping between iterations preserves it, but
+  anything that skips iterations outright would not.
+- Needs play-testing for input latency and audio, which a throughput benchmark
+  cannot see.

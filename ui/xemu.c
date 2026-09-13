@@ -1697,6 +1697,9 @@ extern unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
 extern void xemu_dump_guest_map(void);
 extern const char *xemu_map_dir;
 extern void xemu_dump_guest_code(void);
+extern uint32_t g_spin_lo, g_spin_hi;
+extern unsigned long long xemu_spin_hits, xemu_spin_sleeps, xemu_spin_us_total;
+static unsigned long long s_spin_h0, s_spin_s0, s_spin_u0;
 extern unsigned long long xemu_rep_iters, xemu_rep_execs;
 extern unsigned long long xemu_ccop_hist[];
 extern unsigned long long xemu_cc_checks, xemu_cc_bad;
@@ -1794,6 +1797,9 @@ void xemu_android_benchmark_start(int frames)
     s_cheap_hinsn = s_exp_hinsn = 0;
     s_cheap_mmio = s_exp_mmio = 0;
     s_frame_log_n = 0;
+    s_spin_h0 = xemu_spin_hits;
+    s_spin_s0 = xemu_spin_sleeps;
+    s_spin_u0 = xemu_spin_us_total;
     s_bench_start_mmio_r = xemu_mmio_reads;
     s_bench_start_mmio_w = xemu_mmio_writes;
     xemu_tlb_flush_counts(&s_bench_start_full, &s_bench_start_part,
@@ -2117,6 +2123,15 @@ static void bench_tick(void)
 
     xemu_dump_guest_map();
     xemu_dump_guest_code();
+
+    ALOGI("bench: SPIN range 0x%x-0x%x | %llu iterations/frame | %llu "
+          "sleeps/frame | %llu us slept/frame (%.1f%% of a 33.3ms frame)",
+          g_spin_lo, g_spin_hi,
+          (xemu_spin_hits - s_spin_h0) / s_bench_frames_total,
+          (xemu_spin_sleeps - s_spin_s0) / s_bench_frames_total,
+          (xemu_spin_us_total - s_spin_u0) / s_bench_frames_total,
+          100.0 * ((xemu_spin_us_total - s_spin_u0) / (double)s_bench_frames_total)
+              / 33330.0);
 
     ALOGI("bench: NOTDIRTY %llu store-traps/frame (%llu of them SMC checks) "
           "-- guest stores forced out of generated code by VRAM dirty "
