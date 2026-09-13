@@ -20,6 +20,7 @@
  */
 
 #include "hw/xbox/mcpx/apu/apu_int.h"
+#include "qemu/log.h"
 
 static const int16_t ep_silence[256][2] = { 0 };
 
@@ -57,7 +58,31 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
     unsigned int bytes_to_copy = TARGET_PAGE_SIZE - offset_in_page;
 
     while (len > 0) {
-        assert(page_entry <= max_sge);
+        /*
+         * Both bounds here are derived from guest-programmed registers: the
+         * scatter-gather index from the requested address against GPSMAXSGE /
+         * EPSMAXSGE, and the target address from the PRD entry the guest
+         * wrote.  They were assertions, so a guest that programmed either out
+         * of range aborted the whole emulator -- observed in ordinary play as
+         *   gp_ep.c:60: assertion "page_entry <= max_sge" failed
+         * mid-session.  Guest data must not be able to kill the emulator.
+         *
+         * There is no defined hardware behaviour to reproduce here: reading
+         * past the table would fetch whatever happened to be in memory and
+         * DMA to wherever that pointed.  So refuse the access instead, and
+         * leave the destination deterministic -- on a read the DSP gets
+         * zeroes rather than stale scratch, which is the quieter failure.
+         */
+        if (page_entry > max_sge) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "mcpx apu: scatter-gather index %u exceeds max %u "
+                          "(addr 0x%x); dropping %zu bytes\n",
+                          page_entry, max_sge, addr, len);
+            if (!dir) {
+                memset(ptr, 0, len);
+            }
+            return;
+        }
 
         uint32_t prd_address = ldl_le_phys(&address_space_memory,
                                            sge_base + page_entry * 8 + 0);
@@ -70,7 +95,18 @@ static void scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
             bytes_to_copy = len;
         }
 
-        assert(paddr + bytes_to_copy < memory_region_size(d->ram));
+        if (paddr + bytes_to_copy > memory_region_size(d->ram)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "mcpx apu: scatter-gather target 0x%" HWADDR_PRIx
+                          "+0x%x is outside %" PRIu64 " bytes of RAM; "
+                          "dropping %zu bytes\n",
+                          paddr, bytes_to_copy,
+                          (uint64_t)memory_region_size(d->ram), len);
+            if (!dir) {
+                memset(ptr, 0, len);
+            }
+            return;
+        }
 
         if (dir) {
             memcpy(&d->ram_ptr[paddr], ptr, bytes_to_copy);
