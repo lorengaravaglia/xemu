@@ -135,6 +135,11 @@ int xemu_android_get_rendered_frame_count(void)
  * xemu_android_get_worst_frame_time_ms().  Written on the render thread,
  * read and reset on the JNI thread — the race is benign for a display metric. */
 static volatile int g_worst_frame_time_ms = 0;
+/* Wall time of the last NEW guest frame, for the frame-time graph. */
+static int64_t s_last_guest_frame_ms;
+/* Most recent eglSwapBuffers interval -- presentation smoothness, not
+ * emulation cost.  Kept for diagnostics; not shown as "frame time". */
+static volatile int g_present_interval_ms;
 static int64_t s_last_swap_ms = 0;  /* render-thread-only; no sharing */
 
 int xemu_android_get_worst_frame_time_ms(void)
@@ -2338,6 +2343,37 @@ static void gl_render_frame(struct xemu_console *scon)
             g_rendered_frame_count++;
             s_fpw.new_frames++;
             bench_tick();
+
+            /*
+             * Frame time, measured between NEW GUEST FRAMES.
+             *
+             * This used to be sampled at eglSwapBuffers instead, which was
+             * wrong in a way that hid exactly what it was meant to show: the
+             * render loop presents whether or not the guest produced a new
+             * frame (it reuses s_last_tex above), so the swap interval is
+             * pinned to the presentation cadence.  It could never read above
+             * ~31 ms, and sat there while the guest was managing 20 fps.
+             *
+             * The interval between new guest frames is the real cost of
+             * emulating a frame: ~33 ms when keeping up, ~50 ms at 20 fps,
+             * and it agrees with the fps counter beside it because both now
+             * advance at the same moment.
+             */
+            {
+                int64_t gnow = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+                if (s_last_guest_frame_ms != 0) {
+                    int ft = (int)(gnow - s_last_guest_frame_ms);
+
+                    if (ft > g_worst_frame_time_ms) {
+                        g_worst_frame_time_ms = ft;
+                    }
+                    g_frame_time_ring[g_frame_time_head] = ft;
+                    g_frame_time_head =
+                        (g_frame_time_head + 1) % FRAME_TIME_RING_SIZE;
+                }
+                s_last_guest_frame_ms = gnow;
+            }
         } else {
             s_fp.miss++;
             s_last_miss_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
@@ -2467,15 +2503,13 @@ static void gl_render_frame(struct xemu_console *scon)
         s_fpw.composites++;
     }
     {
+        /* Presentation cadence only.  Deliberately NOT fed to the frame-time
+         * graph any more: it is floored by the display rate and so cannot
+         * show a guest that has fallen behind.  See the guest-frame site. */
         int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
         if (s_last_swap_ms != 0) {
-            int ft = (int)(now - s_last_swap_ms);
-            if (ft > g_worst_frame_time_ms) {
-                g_worst_frame_time_ms = ft;
-            }
-            int head = g_frame_time_head;
-            g_frame_time_ring[head] = ft;
-            g_frame_time_head = (head + 1) % FRAME_TIME_RING_SIZE;
+            g_present_interval_ms = (int)(now - s_last_swap_ms);
         }
         s_last_swap_ms = now;
     }
