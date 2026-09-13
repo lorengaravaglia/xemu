@@ -761,3 +761,57 @@ guest-PC profile by frame cost.  If the spin's share is roughly equal in cheap
 and expensive frames, spin elision is a direct win on the dips.  If it is
 concentrated in cheap frames, the win is headroom rather than frame rate, and
 should be costed as such.
+
+---
+
+## N. THE SPLIT: the spin is in the frames that already fit (2026-09-12)
+
+Section M found Halo burning ~23% of generated-code time in a 64-bit clock
+spin-wait.  The open question was whether that spin also occurs in the frames
+that miss 30 fps.  It does not.
+
+Method: record a wall timestamp per frame (`framelog.bin`), assign each perf
+sample to a frame by timestamp, classify the frame by whether it exceeded
+33.3 ms, and split the guest-PC profile by class
+(`android/tools/guest-pc-split.py`).
+
+Frame distribution over 400 frames: 9% on time, 82% at 33-40 ms, 3% at
+40-50 ms, 6% over 50 ms (worst 68.5 ms).
+
+| guest page | on-time frames | dropped frames |
+|---|---|---|
+| **0x000bb000 (the spin)** | **14.2%** | **1.8%** |
+| 0x0011b000 | 3.1% | 6.9% |
+| 0x00052000 | 4.5% | 6.3% |
+| 0x00184000 | 2.6% | 4.8% |
+| 0x00088000 | 5.0% | 3.0% |
+
+**The spin is ~8x more prevalent in frames that hit 30 fps than in frames that
+miss.**  Exactly what a clock wait predicts: when the game has time to spare
+it burns it waiting; when it is behind, it does not wait at all.
+
+**So spin elision buys headroom, not frame rate.**  ~14% less work on the 91%
+of frames that already fit -- worth real thermal and battery savings, and
+indirectly some sustained clock, but it does not touch the dips.  It also
+carries risk: the loop body calls a function each iteration when BL is set
+(`push 1; call <far>`), so it is not a pure spin and cannot simply be skipped.
+
+**And the dropped frames have no hotspot.**  Their profile is flat -- 6.9%,
+6.3%, 4.8% spread across several pages of ordinary engine code.  That is the
+game doing more work: more AI, more physics, more draw calls.  This confirms,
+by a completely independent method, the conclusion reached in section F from
+frame-cost analysis.
+
+### Harness bug found here: PMU multiplexing
+
+The per-frame cycle counts recorded during that run were **wrong by ~2.5x**
+(median 0.38x budget against the same run's reported 0.96x).  simpleperf and
+our in-process `perf_event_open` counter use the same hardware PMU, and the
+kernel multiplexes them, scaling our reads down while simpleperf holds the
+counters.
+
+**Any cycle measurement taken while simpleperf is recording is suspect.**  The
+split was redone using wall time between frames, which is immune to this and
+is the more direct question anyway: a frame longer than 33.3 ms IS a dropped
+frame.  Caught only because the framelog contradicted the benchmark's own
+summary for the same run.

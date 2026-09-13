@@ -1695,6 +1695,7 @@ extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
 extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
 extern unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
 extern void xemu_dump_guest_map(void);
+extern const char *xemu_map_dir;
 extern void xemu_dump_guest_code(void);
 extern unsigned long long xemu_rep_iters, xemu_rep_execs;
 extern unsigned long long xemu_ccop_hist[];
@@ -1712,6 +1713,15 @@ extern const int xemu_ccop_nb;          /* real size -- do NOT guess */
 static unsigned long long s_bench_start_ccop[XEMU_CC_OP_MAX];
 static uint64_t s_bench_prev_hinsn, s_cheap_hinsn, s_exp_hinsn;
 static uint64_t s_bench_prev_mmio, s_cheap_mmio, s_exp_mmio;
+/* Per-frame wall timestamp and cost, so perf samples can be assigned to a
+ * frame offline and the guest-PC profile split by frame weight.  Timestamps
+ * are CLOCK_MONOTONIC, the same clock perf stamps samples with, and nothing
+ * is added to the hot path -- the alternative, counting spin iterations in
+ * generated code, would perturb the very frames being classified. */
+#define BENCH_FRAMELOG_MAX 2048
+static uint64_t s_frame_ts[BENCH_FRAMELOG_MAX];
+static uint64_t s_frame_cyc[BENCH_FRAMELOG_MAX];
+static int s_frame_log_n;
 static uint64_t s_bench_start_dtlb, s_bench_start_itlb, s_bench_start_l1d;
 static uint64_t s_bench_start_ll, s_bench_start_l1dw;
 static uint64_t s_bench_start_dwalk, s_bench_start_iwalk;
@@ -1783,6 +1793,7 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
     s_cheap_hinsn = s_exp_hinsn = 0;
     s_cheap_mmio = s_exp_mmio = 0;
+    s_frame_log_n = 0;
     s_bench_start_mmio_r = xemu_mmio_reads;
     s_bench_start_mmio_w = xemu_mmio_writes;
     xemu_tlb_flush_counts(&s_bench_start_full, &s_bench_start_part,
@@ -1841,6 +1852,15 @@ static void bench_tick(void)
         int b;
 
         s_bench_prev_cycles = now;
+        if (s_frame_log_n < BENCH_FRAMELOG_MAX) {
+            struct timespec ts;
+
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            s_frame_ts[s_frame_log_n] =
+                (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+            s_frame_cyc[s_frame_log_n] = frame;
+            s_frame_log_n++;
+        }
         if (frame > s_bench_worst_cycles) {
             s_bench_worst_cycles = frame;
         }
@@ -2074,6 +2094,25 @@ static void bench_tick(void)
               xemu_cc_checks, xemu_cc_bad,
               xemu_cc_bad ? "  <-- INLINE PATH IS WRONG, DO NOT SHIP"
                           : "  (inline result is bit-identical)");
+    }
+
+    {
+        char fp[512];
+        FILE *f;
+
+        snprintf(fp, sizeof(fp), "%s/framelog.bin",
+                 xemu_map_dir ? xemu_map_dir : ".");
+        f = fopen(fp, "wb");
+        if (f) {
+            uint32_t n = s_frame_log_n;
+
+            fwrite("XFRM1", 1, 5, f);
+            fwrite(&n, 4, 1, f);
+            fwrite(s_frame_ts, 8, n, f);
+            fwrite(s_frame_cyc, 8, n, f);
+            fclose(f);
+            ALOGI("bench: wrote framelog.bin (%u frames)", n);
+        }
     }
 
     xemu_dump_guest_map();
