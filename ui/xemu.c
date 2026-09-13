@@ -2365,6 +2365,35 @@ static void gl_render_frame(struct xemu_console *scon)
                 if (s_last_guest_frame_ms != 0) {
                     int ft = (int)(gnow - s_last_guest_frame_ms);
 
+                    /*
+                     * Slow-frame forensics.  The frame-time readout used to be
+                     * capped at the presentation rate, so spikes like these
+                     * were invisible; now that they are visible, log what else
+                     * happened during the frame so the cause is attributable
+                     * rather than guessed at.
+                     */
+                    if (ft >= 60) {
+                        unsigned long long f, pa, e;
+                        extern int xemu_android_get_compiled_shader_count(void);
+                        static unsigned long long p_nd, p_spin, p_sleep;
+                        static unsigned long long p_full, p_part;
+                        static int p_sh;
+                        int sh = xemu_android_get_compiled_shader_count();
+
+                        xemu_tlb_flush_counts(&f, &pa, &e);
+                        ALOGI("bench: SLOW FRAME %d ms | shaders +%d | "
+                              "tlb full +%llu part +%llu | notdirty +%llu | "
+                              "spin iters +%llu sleeps +%llu",
+                              ft, sh - p_sh, f - p_full, pa - p_part,
+                              xemu_notdirty_writes - p_nd,
+                              xemu_spin_hits - p_spin,
+                              xemu_spin_sleeps - p_sleep);
+                        p_sh = sh; p_full = f; p_part = pa;
+                        p_nd = xemu_notdirty_writes;
+                        p_spin = xemu_spin_hits;
+                        p_sleep = xemu_spin_sleeps;
+                    }
+
                     if (ft > g_worst_frame_time_ms) {
                         g_worst_frame_time_ms = ft;
                     }

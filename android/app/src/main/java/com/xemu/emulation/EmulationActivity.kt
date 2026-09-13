@@ -245,15 +245,20 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         override fun onDraw(canvas: Canvas) {
             val n = samples.size
             if (n < 2) return
-            val dx = width.toFloat() / (n - 1)
+            // Each sample occupies a slot and is held flat across it: a frame
+            // has a duration, so a step is the honest shape.  Interpolating
+            // between samples would draw times that never occurred.
+            val dx = width.toFloat() / n
 
-            // Filled area under the trace, for readability over the game.
+            // Filled area under the staircase.
             fillPath.reset()
             fillPath.moveTo(0f, height.toFloat())
             for (i in 0 until n) {
-                fillPath.lineTo(i * dx, yFor(samples[i]))
+                val y = yFor(samples[i])
+                fillPath.lineTo(i * dx, y)
+                fillPath.lineTo((i + 1) * dx, y)
             }
-            fillPath.lineTo((n - 1) * dx, height.toFloat())
+            fillPath.lineTo(width.toFloat(), height.toFloat())
             fillPath.close()
             canvas.drawPath(fillPath, fillPaint)
 
@@ -261,23 +266,31 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             val targetY = yFor(33)
             canvas.drawLine(0f, targetY, width.toFloat(), targetY, targetPaint)
 
-            // Trace, drawn in runs so segments over budget stand out in red.
-            var i = 0
-            while (i < n - 1) {
-                val over = samples[i] > 33
-                path.reset()
-                path.moveTo(i * dx, yFor(samples[i]))
-                var j = i
-                while (j < n - 1 && (samples[j + 1] > 33) == over) {
-                    j++
-                    path.lineTo(j * dx, yFor(samples[j]))
+            /*
+             * Draw per segment rather than per run.  Two things were wrong
+             * with run-splitting: the riser into a run was drawn in the
+             * PREVIOUS run's colour, so the rising edge into a late frame
+             * looked on-budget; and with a plain `ms > 33` test a steady
+             * 33.3 ms frame rounds to 33 or 34 alternately and the trace
+             * flickered red/blue while nothing was actually wrong.
+             *
+             * Hysteresis fixes the second: a frame only turns red above
+             * 36 ms (~8% late) and only returns to blue at or below 33 ms,
+             * so the boundary cannot oscillate.  The riser always takes the
+             * colour of the sample it is arriving at.
+             */
+            var late = false
+            for (k in 0 until n) {
+                val ms = samples[k]
+                late = if (late) ms > 33 else ms > 36
+                val paint = if (late) overPaint else linePaint
+                val y = yFor(ms)
+
+                if (k > 0) {
+                    // Riser into this sample, in THIS sample's colour.
+                    canvas.drawLine(k * dx, yFor(samples[k - 1]), k * dx, y, paint)
                 }
-                if (j == i) {
-                    j = i + 1
-                    path.lineTo(j * dx, yFor(samples[j]))
-                }
-                canvas.drawPath(path, if (over) overPaint else linePaint)
-                i = j
+                canvas.drawLine(k * dx, y, (k + 1) * dx, y, paint)
             }
         }
     }
