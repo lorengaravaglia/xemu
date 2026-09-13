@@ -137,6 +137,8 @@ int xemu_android_get_rendered_frame_count(void)
 static volatile int g_worst_frame_time_ms = 0;
 /* Wall time of the last NEW guest frame, for the frame-time graph. */
 static int64_t s_last_guest_frame_ms;
+static int s_slow_ms = 50;
+static int s_run_worst_ms, s_run_over50, s_run_over66;
 /* Most recent eglSwapBuffers interval -- presentation smoothness, not
  * emulation cost.  Kept for diagnostics; not shown as "frame time". */
 static volatile int g_present_interval_ms;
@@ -1803,6 +1805,13 @@ void xemu_android_benchmark_start(int frames)
     s_cheap_hinsn = s_exp_hinsn = 0;
     s_cheap_mmio = s_exp_mmio = 0;
     s_frame_log_n = 0;
+    s_run_worst_ms = s_run_over50 = s_run_over66 = 0;
+    {
+        char sv[PROP_VALUE_MAX] = { 0 };
+        if (__system_property_get("debug.xemu.slow_ms", sv) > 0 && atoi(sv)) {
+            s_slow_ms = atoi(sv);
+        }
+    }
     s_spin_h0 = xemu_spin_hits;
     s_spin_s0 = xemu_spin_sleeps;
     s_spin_u0 = xemu_spin_us_total;
@@ -2130,6 +2139,11 @@ static void bench_tick(void)
     xemu_dump_guest_map();
     xemu_dump_guest_code();
 
+    ALOGI("bench: FLOOR worst %d ms (%.1f fps) | frames over 50ms (20fps): %d "
+          "| over 66ms (15fps): %d",
+          s_run_worst_ms, s_run_worst_ms ? 1000.0 / s_run_worst_ms : 0.0,
+          s_run_over50, s_run_over66);
+
     ALOGI("bench: SPIN range 0x%x-0x%x | %llu iterations/frame | %llu "
           "sleeps/frame | %llu us slept/frame (%.1f%% of a 33.3ms frame)",
           g_spin_lo, g_spin_hi,
@@ -2373,7 +2387,9 @@ static void gl_render_frame(struct xemu_console *scon)
                      * happened during the frame so the cause is attributable
                      * rather than guessed at.
                      */
-                    if (ft >= 60) {
+                    /* 50 ms is 20 fps -- the floor that makes the game
+                     * hard to play.  Tunable with debug.xemu.slow_ms. */
+                    if (ft >= s_slow_ms) {
                         unsigned long long f, pa, e;
                         extern int xemu_android_get_compiled_shader_count(void);
                         static unsigned long long p_nd, p_spin, p_sleep;
@@ -2404,6 +2420,16 @@ static void gl_render_frame(struct xemu_console *scon)
                         p_nd = xemu_notdirty_writes;
                         p_spin = xemu_spin_hits;
                         p_sleep = xemu_spin_sleeps;
+                    }
+
+                    if (ft > s_run_worst_ms) {
+                        s_run_worst_ms = ft;
+                    }
+                    if (ft >= 50) {
+                        s_run_over50++;
+                    }
+                    if (ft >= 66) {
+                        s_run_over66++;
                     }
 
                     if (ft > g_worst_frame_time_ms) {
