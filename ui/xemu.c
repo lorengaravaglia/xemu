@@ -2142,6 +2142,125 @@ static void bench_tick(void)
     xemu_dump_guest_map();
     xemu_dump_guest_code();
 
+    /*
+     * Frame-time histogram.  The FLOOR counters say how many frames miss, but
+     * not what the distribution looks like, and that shape decides strategy:
+     * a mean sitting just over budget needs a few percent off everything,
+     * whereas a bimodal split needs whatever the expensive mode is doing.
+     * On the slot-5 scene the two are easy to confuse -- mean 35.7 ms with a
+     * quarter of frames past 50 ms -- so print the buckets and stop guessing.
+     */
+    if (s_frame_log_n > 1) {
+        static const int edge[] = { 20, 25, 30, 33, 36, 40, 45, 50, 60, 80 };
+        const int nb = (int)(sizeof(edge) / sizeof(edge[0]));
+        int bucket[sizeof(edge) / sizeof(edge[0]) + 1];
+        int i, b, n = 0;
+        double sum = 0.0;
+
+        memset(bucket, 0, sizeof(bucket));
+        for (i = 1; i < s_frame_log_n; i++) {
+            double ms = (double)(s_frame_ts[i] - s_frame_ts[i - 1]) / 1e6;
+
+            /* Skip the save-state reload stall at the head of the run. */
+            if (ms > 500.0) {
+                continue;
+            }
+            for (b = 0; b < nb && ms >= edge[b]; b++) {
+                /* find the bucket */
+            }
+            bucket[b]++;
+            sum += ms;
+            n++;
+        }
+        if (n) {
+            char line[512];
+            int off = 0;
+
+            for (b = 0; b <= nb; b++) {
+                if (b == 0) {
+                    off += snprintf(line + off, sizeof(line) - off,
+                                    " <%d:%d", edge[0], bucket[b]);
+                } else if (b == nb) {
+                    off += snprintf(line + off, sizeof(line) - off,
+                                    " %d+:%d", edge[nb - 1], bucket[b]);
+                } else {
+                    off += snprintf(line + off, sizeof(line) - off,
+                                    " %d-%d:%d", edge[b - 1], edge[b],
+                                    bucket[b]);
+                }
+                if (off >= (int)sizeof(line) - 16) {
+                    break;
+                }
+            }
+            ALOGI("bench: HIST n=%d mean %.1f ms |%s", n, sum / n, line);
+
+            /*
+             * Where the slow frames fall.  A bimodal distribution can come
+             * from periodic work (an autosave, an audio refill, a texture
+             * upload on a cycle) or from a scene that is simply heavy in
+             * bursts, and the spacing between slow frames tells them apart:
+             * a fixed stride means something is on a timer.
+             */
+            {
+                char g[400];
+                int off2 = 0, prev = -1, shown = 0;
+
+                for (i = 1; i < s_frame_log_n && shown < 40; i++) {
+                    double ms = (double)(s_frame_ts[i] - s_frame_ts[i - 1])
+                                / 1e6;
+
+                    if (ms < 45.0 || ms > 500.0) {
+                        continue;
+                    }
+                    if (prev >= 0) {
+                        off2 += snprintf(g + off2, sizeof(g) - off2, " %d",
+                                         i - prev);
+                        shown++;
+                        if (off2 >= (int)sizeof(g) - 8) {
+                            break;
+                        }
+                    }
+                    prev = i;
+                }
+                ALOGI("bench: SLOWGAPS (frames between >45ms frames):%s",
+                      off2 ? g : " none");
+
+            /*
+             * Work or wait?  s_frame_cyc holds real cycles for the frame, and
+             * nothing else is holding the PMU here, so comparing the two
+             * populations answers it outright: cycles scaling with wall time
+             * means the slow frames are doing more work, whereas flat cycles
+             * against longer frames would mean the vCPU was blocked on
+             * something and no amount of codegen work would help.
+             */
+            {
+                double fc = 0.0, sc = 0.0;
+                int fn = 0, sn = 0;
+
+                for (i = 1; i < s_frame_log_n; i++) {
+                    double ms = (double)(s_frame_ts[i] - s_frame_ts[i - 1])
+                                / 1e6;
+
+                    if (ms > 500.0) {
+                        continue;
+                    }
+                    if (ms < 40.0) {
+                        fc += (double)s_frame_cyc[i]; fn++;
+                    } else if (ms >= 45.0) {
+                        sc += (double)s_frame_cyc[i]; sn++;
+                    }
+                }
+                if (fn && sn) {
+                    ALOGI("bench: WORKSPLIT fast n=%d %.1f Mcyc | slow n=%d "
+                          "%.1f Mcyc | slow/fast %.2fx",
+                          fn, fc / fn / 1e6, sn, sc / sn / 1e6,
+                          (sc / sn) / (fc / fn));
+                }
+            }
+            }
+        }
+    }
+
     ALOGI("bench: FLOOR worst %d ms (%.1f fps) | frames over 50ms (20fps): %d "
           "| over 66ms (15fps): %d",
           s_run_worst_ms, s_run_worst_ms ? 1000.0 / s_run_worst_ms : 0.0,

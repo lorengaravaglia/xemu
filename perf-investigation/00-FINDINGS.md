@@ -1049,3 +1049,79 @@ and bounded. The manual `spin_lo`/`spin_hi` override is unchanged.
 **Dead end for the benchmark workload.** Worth re-testing only on a workload
 where a spin is known to dominate — and any such test must use a CPU-cycle or
 utilisation metric, not wall time per frame.
+
+## S. THE DIPS ARE IN SLOT 5, AND THEY ARE WORK (2026-09-13)
+
+Slot 2 was reported as the save state with the dips.  It is not — it is the
+clean one.  Slot 5, the state every benchmark in this document already uses,
+is where they are.  Interleaved in one process, 400 frames each:
+
+| slot | vcpu ms/frame | fps | frames >50ms (<20fps) | >66ms (<15fps) |
+|---|---|---|---|---|
+| 2 | 32.6-32.7 | 30.0 | 0-2 | 0-1 |
+| 5 | 35.7-37.1 | 25.1-26.5 | 91-111 | 17-24 |
+
+So the benchmark contained the dips all along; what it lacked was the *spin*
+(section R).  Those are separate facts and conflating them cost several runs.
+
+### Shape: bimodal, not a shifted mean
+
+New `bench: HIST` line.  Slot 5, typical:
+
+```
+<20:19  25-30:1  30-33:6  33-36:258  36-40:8  45-50:19  50-60:71  60-80:14  80+:3
+```
+
+~65% of frames sit in a tight 33-36 ms mode — the game's own 30 fps pacing,
+i.e. perfectly healthy — and a separate population of ~105 frames costs
+50-80 ms.  Slot 2 has the same 33-36 ms mode (311 frames) and nothing at all
+past 50 ms.  There is no broad drift to shave; there is a distinct heavy
+population.
+
+Slot 2's `45-50:42` frames pair with its `<20:45` frames: a late frame followed
+by a short one is pacing jitter, not slowdown.  Do not count those as dips.
+
+### Not periodic
+
+New `bench: SLOWGAPS` line reports frames between consecutive >45 ms frames.
+
+- slot 2: `4 7 7 7 13 13 9 ... 10 11 12 10` — regular, ~every 10 frames.
+- slot 5: `3 3 22 3 2 2 1 2 3 3 4 4 3 ... 1 1 1 2 2 2 3 2 3 1` — **bursts** of
+  near-consecutive slow frames, with occasional quiet stretches.
+
+Clustered rather than a fixed stride rules out periodic system work — autosave,
+audio refill, a texture upload on a timer — and points at scene content.
+
+### Work, not a stall
+
+New `bench: WORKSPLIT` line compares recorded cycles between the populations.
+
+| slot | fast | slow | ratio |
+|---|---|---|---|
+| 5 | 292 frames, 34.3 Mcyc | 107 frames, 59.2 Mcyc | **1.72x** |
+| 2 | 356 frames, 34.9 Mcyc | 43 frames, 52.4 Mcyc | 1.50x |
+
+Cycles scale with wall time, so the slow frames are **executing more**, not
+waiting.  Nothing that unblocks the vCPU can help; only making the work cheaper
+can.  This confirms the earlier dip analysis on the scene that actually dips.
+
+**Fast frames cost the same in both slots** (34.3 vs 34.9 Mcyc).  Slot 5 is not
+systemically more expensive — it has 2.5x as many heavy frames and they are
+heavier.  Baseline per-frame cost is not the problem.
+
+Caveat: absolute Mcyc is not trustworthy — 34.3 Mcyc across a 33 ms frame
+implies ~1 GHz, consistent with the ~40% PMU-multiplexing scaling noted in
+section N.  The ratio is sound because both populations share one counter.
+
+### What this means for the 20 fps floor
+
+Slow frames average ~55 ms and peak at ~80 ms.  Clearing 50 ms needs roughly
+10% off them; clearing the worst needs ~38%.  Combined with section N's finding
+that dropped-frame time is diffuse (top guest page 6.9%), there is no single
+hot spot to remove — the win has to come from making generated code broadly
+cheaper, which is the codegen-density target: 84% of cycles in generated code
+at ~20 host instructions per guest instruction, issue-bound at IPC 1.85.
+
+Also note section R's noise floor: interleaved A/B moves +-0.3 ms/frame with
+both arms running identical code.  Measure dip work with the FLOOR and HIST
+counters on slot 5, not with mean ms/frame, which cannot resolve it.
