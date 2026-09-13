@@ -380,6 +380,7 @@ From the heavy-frames agent, not yet measured:
 | Return-address-stack prediction | our mispredict rate is 0.10%; X3 already solves it |
 | Hardware-assisted guest MMU (Captive) | requires EL2, unavailable to an Android app |
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
+| Dynamic spin detection (auto) | detects correctly, but the benchmark has no spin worth eliding; 0.2-0.6 ms/frame worse — section R |
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
 | GPU thread stealing vCPU time by blocking | vCPU shows no wait symbols, 1.26% kernel |
 | Shrinking the JIT translation buffer (iTLB locality) | **MEASURED 2026-09-12: tb-size 256 vs 32 MB = 32.55 vs 32.55 ms/frame.** iTLB misses rose with the smaller buffer. Switchable via `debug.xemu.tb_size`, default 256. |
@@ -970,3 +971,81 @@ distrusts; the effect is accepted here because it is large (15 -> 1.4, 4.3 ->
 0), consistent across seven runs per arm, and both arms started from 51 C.
 One scene only.  And the spin PC range is still hardcoded to Halo -- dynamic
 detection is required before this generalises.
+
+## R. DYNAMIC SPIN DETECTION: works, but there is nothing for it to find (2026-09-13)
+
+Goal: make spin elision work without the hardcoded per-game range from section O,
+by detecting at runtime which blocks form a wait loop.
+
+### What was built
+
+`accel/tcg/cpu-exec.c`. Every few seconds a **probe window** opens: for 40 ms all
+blocks get `CF_NO_GOTO_TB | CF_NO_GOTO_PTR`, so every iteration reaches the
+dispatcher and becomes observable. Inside the window each block records the
+guest register hash it was last entered with, and scores +1 when re-entered in
+that same state, -1 when not. Real work cannot accumulate: a copy or transform
+loop advances a pointer every iteration, so its state never repeats.
+
+Four design corrections, each forced by a measurement:
+
+1. **Commit to a block SET, not a PC window.** Halo's wait calls a helper, so it
+   straddles two regions 0x11e000 apart (`0x1810f0`/`0x18111b` and
+   `0x63482`/`0x63492`). Any `±0x80` window covers half of it, the
+   consecutive-iteration counter reset on every call, and the elision never
+   armed — the exact "0 sleeps/frame" failure seen for three iterations.
+2. **Pick the best candidate at the end of a window, not the first to cross the
+   threshold.** First-past-the-post latched onto `0x192cb3`, a minor repeater
+   worth 200 iterations/frame, and stopped searching.
+3. **Accumulate loops across probes.** The first loop found is the one the game
+   idles in; replacing the set each probe just trades one loop for another.
+4. **Coverage bar of 8%, not 25%.** Coverage is counted in dispatcher visits,
+   but a wait loop costs *time* out of proportion to its block count.
+
+Detection itself is reliable. Across ~20 probes it identified the same 4-block
+loop at **93–99% of the probe window**, with `run ≈ visits` (essentially every
+re-entry in identical register state), and **never once fired on real work**.
+
+### Why it does not pay off
+
+The control experiment is the important result. Setting the hand-found range
+from section O on the slot-5 benchmark:
+
+| arm | vcpu ms/frame | iterations/frame | sleeps/frame |
+|---|---|---|---|
+| MANUAL `0xbb0d4-0xbb0f2` | 36.17 / 36.33 | 51 / 13 | 0 / 0 |
+| OFF | 35.45 / 35.35 | 0 | 0 |
+
+**The section-O spin is absent from this workload** — 13–51 iterations/frame, no
+sleeps, and slightly worse than off. The ≈3,800 iterations/frame and
+≈19.5 ms/frame figure came from free-running gameplay, not this benchmark, and
+must not be used as a target for it. The detector was not failing to find that
+loop; it was not there.
+
+What the detector does find is the idle loop, which runs 60–190 iterations/frame
+during the benchmark. Committing it measured **worse**, consistently:
+
+| detector state | pairs | AUTO-ON vs OFF |
+|---|---|---|
+| loop committed | 6/6 | **0.21–0.60 ms/frame worse** |
+| nothing committed | 3/3 | 0.25–0.35 "better" (noise: identical code paths) |
+
+Two costs: the loop's blocks stay unchained for the whole session, and the
+200 µs `nanosleep` is charged to the frame. Note `vcpu ms/frame` is **wall
+time**, so sleeping registers as a regression even where it saves real CPU and
+power — which is why section Q's soak, measuring sustained clock over 600 frames
+of real gameplay, reached the opposite conclusion about the manual range.
+
+The third row is the calibration that matters for everything else here: with
+both arms running identical code, interleaved A/B still showed ±0.3 ms/frame.
+**That is the noise floor of this harness.** Several deltas recorded earlier in
+this document sit at or below it.
+
+### Disposition
+
+Kept, **default off**, opt in with `debug.xemu.spin_auto=1`; probing
+self-terminates after 15 consecutive fruitless windows so the cost is one-time
+and bounded. The manual `spin_lo`/`spin_hi` override is unchanged.
+
+**Dead end for the benchmark workload.** Worth re-testing only on a workload
+where a spin is known to dominate — and any such test must use a CPU-cycle or
+utilisation metric, not wall time per frame.

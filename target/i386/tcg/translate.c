@@ -101,6 +101,35 @@ void xemu_dump_guest_code(void)
     }
 }
 
+/*
+ * Cheap hash of the guest's architectural registers, for spin detection.
+ *
+ * A spin-wait re-reads the same location with its registers unchanged; a loop
+ * doing real work advances something every iteration.  Comparing this hash
+ * across consecutive iterations separates the two without having to know what
+ * the loop is, which is what lets the detector stay game-agnostic.
+ *
+ * EIP is deliberately excluded -- it changes within the loop.
+ */
+uint64_t xemu_guest_reg_hash(void);
+uint64_t xemu_guest_reg_hash(void)
+{
+    CPUX86State *env;
+    uint64_t h = 1469598103934665603ull;
+    int i;
+
+    if (!first_cpu) {
+        return 0;
+    }
+    env = cpu_env(first_cpu);
+    for (i = 0; i < CPU_NB_REGS; i++) {
+        h = (h ^ (uint64_t)env->regs[i]) * 1099511628211ull;
+    }
+    h = (h ^ (uint64_t)env->cc_dst) * 1099511628211ull;
+    h = (h ^ (uint64_t)env->cc_src) * 1099511628211ull;
+    return h;
+}
+
 void x86_refresh_fpu_mode(void);
 void x86_refresh_fpu_mode(void)
 {
@@ -179,11 +208,28 @@ void x86_refresh_fpu_mode(void)
         if (__system_property_get("debug.xemu.spin_thresh", v4) > 0) {
             g_spin_thresh = atoi(v4) ? atoi(v4) : 64;
         }
-        if (lo != g_spin_lo || hi != g_spin_hi) {
+        /*
+         * Only a non-zero property overrides.  Writing 0 back on every
+         * refresh would wipe a range the detector had just found.
+         */
+        if (lo && (lo != g_spin_lo || hi != g_spin_hi)) {
             g_spin_lo = lo;
             g_spin_hi = hi;
             if (first_cpu) {
                 queue_tb_flush(first_cpu);
+            }
+        }
+
+        {
+            extern int g_spin_auto;
+            char av[PROP_VALUE_MAX] = { 0 };
+
+            /* Opt-in: absent property means off, matching g_spin_auto's default. */
+            g_spin_auto = __system_property_get("debug.xemu.spin_auto", av) > 0
+                          && (av[0] == '1' || av[0] == 'y' || av[0] == 't');
+            /* spin_lo=0 with auto off means "no elision at all". */
+            if (!g_spin_auto && !lo) {
+                g_spin_lo = g_spin_hi = 0;
             }
         }
     }

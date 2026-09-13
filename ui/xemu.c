@@ -1707,6 +1707,9 @@ extern const char *xemu_map_dir;
 extern void xemu_dump_guest_code(void);
 extern uint32_t g_spin_lo, g_spin_hi;
 extern unsigned long long xemu_spin_hits, xemu_spin_sleeps, xemu_spin_us_total;
+extern unsigned long long xemu_spin_probes, xemu_spin_found;
+extern int xemu_spin_best_run;
+extern int g_spin_auto;
 static unsigned long long s_spin_h0, s_spin_s0, s_spin_u0;
 extern unsigned long long xemu_rep_iters, xemu_rep_execs;
 extern unsigned long long xemu_ccop_hist[];
@@ -2143,6 +2146,11 @@ static void bench_tick(void)
           "| over 66ms (15fps): %d",
           s_run_worst_ms, s_run_worst_ms ? 1000.0 / s_run_worst_ms : 0.0,
           s_run_over50, s_run_over66);
+
+    ALOGI("bench: SPIN AUTO %s | %llu probe windows | %llu wait loops found",
+          g_spin_auto ? "on" : "off", xemu_spin_probes, xemu_spin_found);
+    ALOGI("bench: SPIN best identical-state run seen: %d (need %d)",
+          xemu_spin_best_run, 32);
 
     ALOGI("bench: SPIN range 0x%x-0x%x | %llu iterations/frame | %llu "
           "sleeps/frame | %llu us slept/frame (%.1f%% of a 33.3ms frame)",

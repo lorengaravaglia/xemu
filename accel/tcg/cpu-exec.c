@@ -205,14 +205,302 @@ uint32_t g_spin_lo, g_spin_hi;
 int g_spin_us = 200, g_spin_thresh = 64;
 unsigned long long xemu_spin_hits, xemu_spin_sleeps, xemu_spin_us_total;
 
+/*
+ * Automatic spin detection.
+ *
+ * The loop we care about is two chained blocks, so it never reaches the
+ * dispatcher and cannot be observed from here directly.  Rather than unchain
+ * everything -- which costs about 50% -- the detector opens a brief probe
+ * window every few seconds: during it all blocks return to the dispatcher, so
+ * a few thousand iterations are visible, and then chaining resumes.
+ *
+ * Inside a probe, a spin shows up as the same PC recurring with the guest's
+ * register state unchanged.  That second condition is what makes this safe to
+ * run on any game: a strlen or memcpy loop is also a tight backward branch
+ * over pure loads, but it advances a pointer every iteration, so its hash
+ * changes and it is never mistaken for a wait.
+ */
+/*
+ * Off by default.  The detector is correct -- it finds real wait loops and
+ * never fired on real work -- but on the save-state benchmark the only loop
+ * present is the one the game idles in, which runs 60-190 iterations a frame,
+ * and committing it measured 0.2-0.6 ms/frame WORSE over six A/B pairs: its
+ * blocks stay unchained for the whole session and the sleep is charged to the
+ * frame.  Enable with debug.xemu.spin_auto=1 on a workload that actually
+ * spins.
+ */
+int g_spin_auto;                     /* debug.xemu.spin_auto=1 enables */
+unsigned long long xemu_spin_probes, xemu_spin_found;
+
+/*
+ * The confirmed loop is a SET of blocks, not a PC window.  Halo's wait calls a
+ * helper, so it straddles two regions 0x11e000 apart (0x1810f0/0x18111b and
+ * 0x63482/0x63492); any window around one half excludes the other, the
+ * consecutive-iteration counter reset on every call, and the elision never
+ * armed.  Matching exact block addresses removes the guesswork.
+ */
+#define SPIN_SET_MAX 16
+/*
+ * How many consecutive probes may find nothing before the detector stops.
+ * Six was too few -- a probe only sees 40 ms, and the loop a game idles in can
+ * easily not run during the handful of windows that follow start-up, so the
+ * detector gave up before it had looked anywhere interesting.  Fifteen bounds
+ * the one-time cost at roughly two minutes of occasional probing.
+ */
+#define SPIN_GIVE_UP 15
+static vaddr spin_set[SPIN_SET_MAX];
+static int spin_set_n;
+static int spin_probes_fruitless;
+int xemu_spin_best_run;   /* longest identical-state run seen, for diagnosis */
+static int spin_probe_left;          /* dispatcher visits left in this probe */
+static int64_t spin_next_probe_ms;
+static int64_t spin_probe_end_ms;
+/*
+ * Per-block memory, not a single candidate.  A wait loop is usually several
+ * blocks -- the one in Halo alternates between two -- so "the same PC twice in
+ * a row" never holds, and the first version of this detector found nothing for
+ * exactly that reason.  Each block instead remembers the register state it was
+ * last entered with, and a run only grows when that same block is re-entered
+ * in an identical state.
+ */
+/*
+ * The probe must span a whole guest frame.  A visit budget alone was the
+ * wrong shape: 4000 unchained visits is roughly half a millisecond of wall
+ * time, while the wait loop runs at the END of a 33 ms frame, so the window
+ * almost never overlapped it and the score never climbed past 10.  Bound it
+ * by time instead, with a visit cap only as a backstop.
+ */
+#define SPIN_PROBE_VISITS   400000 /* backstop only */
+#define SPIN_PROBE_MS       40     /* must span a whole guest frame */
+#define SPIN_PROBE_EVERY_MS 8000   /* keep probing; games have several waits */
+#define SPIN_CONFIRM_RUN    32     /* re-entries in identical state to confirm */
+#define SPIN_WINDOW         0x80   /* bytes either side of the confirmed block */
+/* 16 slots was far too few: a probe sees thousands of distinct PCs and the
+ * wait loop's entries were evicted by collisions long before they could
+ * accumulate.  This is a few KB and removes the eviction problem. */
+#define SPIN_SLOTS 1024
+static struct { vaddr pc; uint64_t hash; int run; int visits; } spin_seen[SPIN_SLOTS];
+static unsigned spin_probe_visits;  /* total, to turn visits into a share */
+
+static void xemu_spin_commit(void);
+bool xemu_spin_member(vaddr pc);
+
+static void xemu_spin_probe(vaddr pc)
+{
+    extern uint64_t xemu_guest_reg_hash(void);
+    unsigned i;
+    uint64_t h;
+
+    if (!g_spin_auto || g_spin_lo) {
+        return;                      /* disabled, or overridden by property */
+    }
+    /*
+     * Probing is not free: it unchains every block for the duration, and an
+     * A/B put the recurring cost at about 1% of frame time.  A game exposes
+     * its wait loops in the first few seconds, so stop once several probes in
+     * a row have turned up nothing new and keep only the membership test.
+     */
+    if (spin_set_n >= SPIN_SET_MAX || spin_probes_fruitless >= SPIN_GIVE_UP) {
+        return;
+    }
+
+    if (spin_probe_left <= 0) {
+        int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+        if (now < spin_next_probe_ms) {
+            return;
+        }
+        spin_next_probe_ms = now + SPIN_PROBE_EVERY_MS;
+        spin_probe_end_ms = now + SPIN_PROBE_MS;
+        spin_probe_left = SPIN_PROBE_VISITS;
+        memset(spin_seen, 0, sizeof(spin_seen));
+        spin_probe_visits = 0;
+        xemu_spin_probes++;
+    }
+    if (--spin_probe_left <= 0 ||
+        qemu_clock_get_ms(QEMU_CLOCK_REALTIME) > spin_probe_end_ms) {
+        spin_probe_left = 0;
+        xemu_spin_commit();
+        return;
+    }
+
+    h = xemu_guest_reg_hash();
+    i = (unsigned)((pc >> 4) * 2654435761u) & (SPIN_SLOTS - 1);
+
+    /*
+     * Score rather than a strict run.  Requiring N identical re-entries in a
+     * row was too strict: this loop polls a counter, so the loaded value --
+     * and the flags derived from it -- change whenever the timer ticks, and
+     * the longest identical run measured was 9 against a threshold of 32.
+     *
+     * Scoring +1 when a block is re-entered in a state it was last in, and
+     * -1 when it is not, still separates the two cases cleanly.  A wait loop
+     * repeats far more often than it changes and climbs steadily; a strlen or
+     * memcpy advances a pointer every iteration, never repeats a state, and
+     * can never accumulate.
+     */
+    spin_probe_visits++;
+
+    if (spin_seen[i].pc != pc) {
+        spin_seen[i].pc = pc;
+        spin_seen[i].hash = h;
+        spin_seen[i].run = 0;
+        spin_seen[i].visits = 1;
+        return;
+    }
+    spin_seen[i].visits++;
+
+    if (spin_seen[i].hash != h) {
+        spin_seen[i].hash = h;
+        if (spin_seen[i].run > 0) {
+            spin_seen[i].run--;
+        }
+        return;
+    }
+
+    spin_seen[i].run++;
+    if (spin_seen[i].run > xemu_spin_best_run) {
+        xemu_spin_best_run = spin_seen[i].run;
+    }
+}
+
+/*
+ * Commit at the END of a probe, to the highest-scoring block rather than the
+ * first to cross the threshold.  Taking the first pick locked onto a minor
+ * repeater at 0x192cb3 -- 200 iterations a frame, no sleeps, no gain -- while
+ * the loop that actually matters was never considered, because finding one
+ * candidate stopped the search.
+ */
+static void xemu_spin_commit(void)
+{
+    unsigned covered = 0;
+    int cand[SPIN_SET_MAX], n = 0, i, j, k;
+
+    /*
+     * A block belongs to a wait loop if it is re-entered in the state it was
+     * last in on MOST of its visits (run*2 >= visits).  Real work fails that
+     * by construction: a copy or transform loop advances a pointer every
+     * iteration, so its state never repeats and its run stays at zero.
+     */
+    for (i = 0; i < SPIN_SLOTS; i++) {
+        if (spin_seen[i].run < SPIN_CONFIRM_RUN ||
+            spin_seen[i].run * 2 < spin_seen[i].visits) {
+            continue;
+        }
+        for (j = 0; j < n; j++) {
+            if (spin_seen[i].visits > spin_seen[cand[j]].visits) {
+                break;
+            }
+        }
+        if (j < SPIN_SET_MAX) {
+            for (k = (n < SPIN_SET_MAX ? n : SPIN_SET_MAX - 1); k > j; k--) {
+                cand[k] = cand[k - 1];
+            }
+            cand[j] = i;
+            if (n < SPIN_SET_MAX) {
+                n++;
+            }
+        }
+    }
+    for (j = 0; j < n; j++) {
+        covered += spin_seen[cand[j]].visits;
+    }
+
+    /*
+     * Require the set to dominate the window.  Probes that clip the edge of
+     * the loop see one of its blocks for a few hundred visits; committing to
+     * that gives a partial set which, again, never accumulates enough
+     * consecutive iterations to sleep.  Waiting for a probe that lands inside
+     * the loop costs a few seconds and yields the whole set at once.
+     */
+    if (n && spin_probe_visits) {
+        fprintf(stderr, "spin_auto: probe %llu cand=%d cover=%u%%:",
+                xemu_spin_probes, n, 100 * covered / spin_probe_visits);
+        for (j = 0; j < n; j++) {
+            fprintf(stderr, " 0x%" VADDR_PRIx "=%d/%d",
+                    spin_seen[cand[j]].pc, spin_seen[cand[j]].run,
+                    spin_seen[cand[j]].visits);
+        }
+        fprintf(stderr, "\n");
+    }
+
+    /*
+     * 8%, not 25%.  Coverage is measured in dispatcher visits, but the loop
+     * costs time: the gameplay wait is about a third of the frame's duration
+     * and only an eighth of its blocks, because the code it is waiting on
+     * executes far more instructions per block than the two the loop spins
+     * through.  A quarter-of-the-window bar rejected exactly the loop worth
+     * finding.
+     */
+    if (!n || !spin_probe_visits || covered * 100 < spin_probe_visits * 8) {
+        spin_probes_fruitless++;
+        return;
+    }
+
+    /*
+     * Accumulate.  The first loop found here is the one the game idles in,
+     * which is hot between frames but barely runs during combat; the loop that
+     * costs real time in gameplay only shows up in a later probe.  Replacing
+     * the set each time would keep trading one for the other, so add instead,
+     * and only stop probing once the set is full.
+     */
+    {
+        int added = 0;
+
+        for (j = 0; j < n && spin_set_n < SPIN_SET_MAX; j++) {
+            vaddr pc = spin_seen[cand[j]].pc;
+
+            if (xemu_spin_member(pc)) {
+                continue;
+            }
+            spin_set[spin_set_n++] = pc;
+            added++;
+        }
+        if (!added) {
+            spin_probes_fruitless++;
+            return;               /* same loop as last time; nothing new */
+        }
+        spin_probes_fruitless = 0;
+    }
+    xemu_spin_found++;
+
+    fprintf(stderr, "spin_auto: +wait loop, %d blocks, %u%% of probe (set now %d):",
+            n, 100 * covered / spin_probe_visits, spin_set_n);
+    for (j = 0; j < n; j++) {
+        fprintf(stderr, " 0x%" VADDR_PRIx "(%d)",
+                spin_seen[cand[j]].pc, spin_seen[cand[j]].visits);
+    }
+    fprintf(stderr, "\n");
+}
+
+/* Is this block part of a confirmed wait loop (or the manual range)? */
+bool xemu_spin_member(vaddr pc)
+{
+    int i;
+
+    if (g_spin_lo) {
+        return pc >= g_spin_lo && pc <= g_spin_hi;
+    }
+    if (!g_spin_auto) {
+        return false;     /* keep the learned set, but stop acting on it */
+    }
+    for (i = 0; i < spin_set_n; i++) {
+        if (spin_set[i] == pc) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void xemu_spin_maybe_sleep(vaddr pc)
 {
     static unsigned consec;
 
-    if (!g_spin_lo || pc < g_spin_lo || pc > g_spin_hi) {
+    if (!xemu_spin_member(pc)) {
         consec = 0;
         return;
     }
+
     xemu_spin_hits++;
     if (++consec < (unsigned)g_spin_thresh) {
         return;
@@ -1065,10 +1353,12 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #if defined(__ANDROID__) || defined(ANDROID)
             /* Unchain the spin range so every iteration reaches the
              * dispatcher, then sleep once it is clearly spinning. */
-            if (unlikely(g_spin_lo) &&
-                s.pc >= g_spin_lo && s.pc <= g_spin_hi) {
-                s.cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
+            if (unlikely(g_spin_lo || spin_set_n || spin_probe_left > 0)) {
+                if (spin_probe_left > 0 || xemu_spin_member(s.pc)) {
+                    s.cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
+                }
             }
+            xemu_spin_probe(s.pc);
             xemu_spin_maybe_sleep(s.pc);
 #endif
 
