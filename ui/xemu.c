@@ -1699,6 +1699,7 @@ extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
                                   unsigned long long *);
 extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
 extern unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
+extern void xemu_notdirty_top(uint64_t *page, unsigned long long *hits);
 extern void xemu_dump_guest_map(void);
 extern const char *xemu_map_dir;
 extern void xemu_dump_guest_code(void);
@@ -2381,13 +2382,24 @@ static void gl_render_frame(struct xemu_console *scon)
                         int sh = xemu_android_get_compiled_shader_count();
 
                         xemu_tlb_flush_counts(&f, &pa, &e);
-                        ALOGI("bench: SLOW FRAME %d ms | shaders +%d | "
-                              "tlb full +%llu part +%llu | notdirty +%llu | "
-                              "spin iters +%llu sleeps +%llu",
-                              ft, sh - p_sh, f - p_full, pa - p_part,
-                              xemu_notdirty_writes - p_nd,
-                              xemu_spin_hits - p_spin,
-                              xemu_spin_sleeps - p_sleep);
+                        {
+                            uint64_t tpg = 0;
+                            unsigned long long thits = 0;
+                            static unsigned long long p_smc;
+
+                            xemu_notdirty_top(&tpg, &thits);
+                            ALOGI("bench: SLOW FRAME %d ms | shaders +%d | "
+                                  "tlb full +%llu part +%llu | notdirty +%llu "
+                                  "(smc +%llu) top page 0x%llx x%llu | "
+                                  "spin iters +%llu sleeps +%llu",
+                                  ft, sh - p_sh, f - p_full, pa - p_part,
+                                  xemu_notdirty_writes - p_nd,
+                                  xemu_notdirty_smc - p_smc,
+                                  (unsigned long long)(tpg << 12), thits,
+                                  xemu_spin_hits - p_spin,
+                                  xemu_spin_sleeps - p_sleep);
+                            p_smc = xemu_notdirty_smc;
+                        }
                         p_sh = sh; p_full = f; p_part = pa;
                         p_nd = xemu_notdirty_writes;
                         p_spin = xemu_spin_hits;

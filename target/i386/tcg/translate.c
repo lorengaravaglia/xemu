@@ -189,6 +189,20 @@ void x86_refresh_fpu_mode(void)
     }
 
     {
+        extern int g_xbox_tb_overlap_test;
+        char tv[PROP_VALUE_MAX] = { 0 };
+        int want = (__system_property_get("debug.xemu.tb_overlap", tv) > 0 &&
+                    (tv[0] == '1' || tv[0] == 'y' || tv[0] == 't'));
+
+        if (want != g_xbox_tb_overlap_test) {
+            g_xbox_tb_overlap_test = want;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
+    {
         extern int g_xemu_dfe;
         char dv[PROP_VALUE_MAX] = { 0 };
         int want = !(__system_property_get("debug.xemu.dfe", dv) > 0 &&

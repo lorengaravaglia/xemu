@@ -42,6 +42,9 @@
 #endif
 #include "trace.h"
 
+int g_xbox_tb_overlap_test;          /* debug.xemu.tb_overlap=1 enables */
+unsigned long long xemu_tb_skipped_inval;
+
 /* List iterators for lists of tagged pointers in TranslationBlock. */
 #define TB_FOR_EACH_TAGGED(head, tb, n, field)                          \
     for (n = (head) & 1, tb = (TranslationBlock *)((head) & ~1);        \
@@ -1197,22 +1200,46 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
      * XXX: see if in some cases it could be faster to invalidate all the code
      */
     PAGE_FOR_EACH_TB(start, last, p, tb, n) {
-#ifndef XBOX
-        tb_page_addr_t tb_start, tb_last;
+        /*
+         * Upstream tests whether each TB actually overlaps the bytes written
+         * and skips those that do not.  The XBOX build drops that test and
+         * invalidates every TB on the page instead.
+         *
+         * That is very expensive when guest data shares a page with guest
+         * code, which measurably happens here: page 0x059a9000 takes up to
+         * 2,475 store traps in a single frame, ~90% of them reaching this
+         * function, because TLB_NOTDIRTY never clears while the page still
+         * holds translated code.  Each trap then wipes every TB on the page
+         * and they are immediately retranslated, which puts code back on the
+         * page and keeps the trap armed -- a feedback loop that shows up as
+         * 60-150 ms frames.
+         *
+         * g_xbox_tb_overlap_test restores the upstream behaviour so a store
+         * only invalidates TBs that truly contain the written address.
+         * Switchable because upstream xemu presumably dropped it for a
+         * reason, and that reason is not recorded here.
+         */
+        bool overlaps = true;
 
-        /* NOTE: this is subtle as a TB may span two physical pages */
-        tb_start = tb_page_addr0(tb);
-        tb_last = tb_start + tb->size - 1;
-        if (n == 0) {
-            tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
-        } else {
-            tb_start = tb_page_addr1(tb);
-            tb_last = tb_start + (tb_last & ~TARGET_PAGE_MASK);
+        if (g_xbox_tb_overlap_test) {
+            tb_page_addr_t tb_start, tb_last;
+
+            /* NOTE: this is subtle as a TB may span two physical pages */
+            tb_start = tb_page_addr0(tb);
+            tb_last = tb_start + tb->size - 1;
+            if (n == 0) {
+                tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
+            } else {
+                tb_start = tb_page_addr1(tb);
+                tb_last = tb_start + (tb_last & ~TARGET_PAGE_MASK);
+            }
+            overlaps = !(tb_last < start || tb_start > last);
+            if (!overlaps) {
+                xemu_tb_skipped_inval++;
+            }
         }
-        if (!(tb_last < start || tb_start > last)) {
-#else
-        {
-#endif
+
+        if (overlaps) {
             if (unlikely(current_tb == tb) &&
                 (tb_cflags(current_tb) & CF_COUNT_MASK) != 1) {
                 /*

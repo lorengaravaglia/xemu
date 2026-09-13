@@ -1383,6 +1383,51 @@ static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
  */
 unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
 
+/*
+ * Which guest pages are trapping, and how hard.
+ *
+ * notdirty_write() only clears TLB_NOTDIRTY once the page is dirty for every
+ * client.  A page that still has translated code on it stays clean for
+ * DIRTY_MEMORY_CODE, so the flag survives and EVERY store to that page traps
+ * again rather than just the first.  Data sharing a page with code therefore
+ * degrades from one trap per page to one trap per store, which is the shape
+ * of the 132k-trap frame seen in the slow-frame log.
+ *
+ * Small direct-mapped table, vCPU-thread only, no atomics.
+ */
+#define XNDP_SLOTS 64
+static struct { uint64_t page; unsigned long long hits; } xnd_pages[XNDP_SLOTS];
+
+static void xemu_notdirty_note(ram_addr_t ra)
+{
+    uint64_t pg = ra >> 12;
+    unsigned i = (unsigned)(pg * 2654435761u) & (XNDP_SLOTS - 1);
+
+    if (xnd_pages[i].page != pg) {
+        if (xnd_pages[i].hits > 1) {
+            return;             /* keep the incumbent; it is the busier one */
+        }
+        xnd_pages[i].page = pg;
+        xnd_pages[i].hits = 0;
+    }
+    xnd_pages[i].hits++;
+}
+
+void xemu_notdirty_top(uint64_t *page, unsigned long long *hits);
+void xemu_notdirty_top(uint64_t *page, unsigned long long *hits)
+{
+    int i, best = 0;
+
+    for (i = 1; i < XNDP_SLOTS; i++) {
+        if (xnd_pages[i].hits > xnd_pages[best].hits) {
+            best = i;
+        }
+    }
+    *page = xnd_pages[best].page;
+    *hits = xnd_pages[best].hits;
+    memset(xnd_pages, 0, sizeof(xnd_pages));
+}
+
 static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
                            CPUTLBEntryFull *full, uintptr_t retaddr)
 {
@@ -1390,6 +1435,7 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
 
     ram_addr_t ram_addr = mem_vaddr + full->xlat_section;
 
+    xemu_notdirty_note(ram_addr);
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
 
     if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {

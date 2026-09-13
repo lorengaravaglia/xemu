@@ -875,3 +875,55 @@ measurement.
   anything that skips iterations outright would not.
 - Needs play-testing for input latency and audio, which a throughput benchmark
   cannot see.
+
+---
+
+## P. THE NOTDIRTY SPIKE: attributed to one page, but not fixable this way (2026-09-12)
+
+Slow-frame logging (any guest frame >=60 ms reports what happened during it)
+gave a clear attribution:
+
+| | traps/frame |
+|---|---|
+| steady state | 9-13 |
+| slow frames | 3,000-5,600 |
+| **top page, every occurrence** | **0x059a9000** |
+| share reaching tb_invalidate | 80-95% |
+
+**Mechanism, confirmed:** `notdirty_write()` only clears `TLB_NOTDIRTY` once
+the page is dirty for *every* client.  This page still holds translated code,
+so it stays clean for `DIRTY_MEMORY_CODE`, the flag survives, and **every**
+store re-traps rather than just the first.  Guest data sharing a 4 KB page
+with guest code degrades from one trap per page to one trap per store, up to
+2,475 in a single frame.
+
+**Attempted fix, and it did not work.**  xemu drops upstream QEMU's per-TB
+overlap test under `#ifdef XBOX` (tb-maint.c), invalidating every TB on the
+page instead of only those containing the written bytes -- inherited from
+upstream xemu, present in hakuX and x1box too, with no recorded rationale.
+Restoring it (`debug.xemu.tb_overlap=1`, default off) was expected to make
+each trap cheap.
+
+Interleaved, 600 frames each: overlap OFF 0 and 2 slow frames at 32.57/32.85
+ms per frame; overlap ON 2 and 1 at 32.73/32.65.  **No measurable difference.**
+The trap fires either way, and the writes evidently do overlap the TBs on that
+page, so the skipped-invalidation path saves nothing.
+
+**What would actually fix it** is stopping that page being code and data at
+once -- finer-grained dirty tracking, or not keeping translations on pages
+that are written heavily.  Both are substantial, and the payoff is bounded by
+how rare these frames are.
+
+**Caution on measuring this at all:** slow frames are sporadic, 0-4 per 600.
+An earlier cross-process comparison read 32 against 19 and looked alarming;
+interleaved in one process the same comparison gives 1-3 either way.  At these
+counts almost nothing is distinguishable from noise, and any future attempt
+here needs far longer runs.
+
+### Unrelated crash seen during this work
+
+`gp_ep.c:60: scatter_gather_rw: assertion "page_entry <= max_sge" failed` --
+SIGABRT in the APU DSP scatter-gather DMA during normal play, with spin
+elision OFF, so unrelated to anything added here.  Upstream xemu code.  The
+guest asked for a page beyond the scatter-gather table and the assert is
+fatal.  Worth fixing separately; it is reachable in ordinary gameplay.
