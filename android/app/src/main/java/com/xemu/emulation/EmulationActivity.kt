@@ -8,7 +8,9 @@ import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
@@ -197,36 +199,99 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
      * A dashed line marks the 33 ms / 30 fps target.
      * Y-axis scale: 0–100 ms (bars are clamped to 100 ms).
      */
+    /**
+     * Rolling frame-time plot.
+     *
+     * Samples are intervals between NEW GUEST FRAMES, not between buffer
+     * swaps.  The render loop presents even when the guest has not finished a
+     * frame, so swap intervals are pinned to the display cadence and never
+     * rose above ~31 ms even at 20 fps; guest-frame intervals show the real
+     * cost and track the fps readout beside them.
+     */
     private inner class FrameTimeBarView(context: Context) : View(context) {
         var samples: IntArray = IntArray(0)
-        private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        private val maxMs = 100f
+        private val path = Path()
+        private val fillPath = Path()
+
         private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(160, 255, 220, 0)
+            style = Paint.Style.STROKE
+            strokeWidth = 2f
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+            color = Color.argb(235, 120, 220, 255)
+        }
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.argb(48, 120, 220, 255)
+        }
+        private val targetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(150, 255, 220, 0)
             strokeWidth = 1.5f
+            pathEffect = DashPathEffect(floatArrayOf(6f, 6f), 0f)
+        }
+        private val overPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 2f
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+            color = Color.argb(235, 255, 110, 110)
         }
 
+        private fun yFor(ms: Int): Float =
+            height - (ms.coerceIn(0, maxMs.toInt()) / maxMs * height)
+
         override fun onDraw(canvas: Canvas) {
-            if (samples.isEmpty()) return
             val n = samples.size
-            val barW = width.toFloat() / n
-            val maxMs = 100f
-            for (i in samples.indices) {
-                val ms = samples[i].coerceAtLeast(0)
-                barPaint.color = when {
-                    ms <= 16 -> Color.argb(200, 80, 200, 80)
-                    ms <= 33 -> Color.argb(200, 220, 200, 60)
-                    else     -> Color.argb(200, 220, 80, 80)
-                }
-                val barH = (ms.coerceAtMost(100) / maxMs * height)
-                canvas.drawRect(
-                    i * barW + 0.5f, height - barH,
-                    (i + 1) * barW - 0.5f, height.toFloat(),
-                    barPaint
-                )
+            if (n < 2) return
+            // Each sample occupies a slot and is held flat across it: a frame
+            // has a duration, so a step is the honest shape.  Interpolating
+            // between samples would draw times that never occurred.
+            val dx = width.toFloat() / n
+
+            // Filled area under the staircase.
+            fillPath.reset()
+            fillPath.moveTo(0f, height.toFloat())
+            for (i in 0 until n) {
+                val y = yFor(samples[i])
+                fillPath.lineTo(i * dx, y)
+                fillPath.lineTo((i + 1) * dx, y)
             }
-            // 33 ms target line (30 fps)
-            val targetY = height - (33f / maxMs * height)
-            canvas.drawLine(0f, targetY, width.toFloat(), targetY, linePaint)
+            fillPath.lineTo(width.toFloat(), height.toFloat())
+            fillPath.close()
+            canvas.drawPath(fillPath, fillPaint)
+
+            // The 33.3 ms budget.
+            val targetY = yFor(33)
+            canvas.drawLine(0f, targetY, width.toFloat(), targetY, targetPaint)
+
+            /*
+             * Draw per segment rather than per run.  Two things were wrong
+             * with run-splitting: the riser into a run was drawn in the
+             * PREVIOUS run's colour, so the rising edge into a late frame
+             * looked on-budget; and with a plain `ms > 33` test a steady
+             * 33.3 ms frame rounds to 33 or 34 alternately and the trace
+             * flickered red/blue while nothing was actually wrong.
+             *
+             * Hysteresis fixes the second: a frame only turns red above
+             * 36 ms (~8% late) and only returns to blue at or below 33 ms,
+             * so the boundary cannot oscillate.  The riser always takes the
+             * colour of the sample it is arriving at.
+             */
+            var late = false
+            for (k in 0 until n) {
+                val ms = samples[k]
+                late = if (late) ms > 33 else ms > 36
+                val paint = if (late) overPaint else linePaint
+                val y = yFor(ms)
+
+                if (k > 0) {
+                    // Riser into this sample, in THIS sample's colour.
+                    canvas.drawLine(k * dx, yFor(samples[k - 1]), k * dx, y, paint)
+                }
+                canvas.drawLine(k * dx, y, (k + 1) * dx, y, paint)
+            }
         }
     }
 
