@@ -1482,3 +1482,54 @@ Note also **`mb` is 3.38% of the footprint** (215k barriers, 860 KB).
 Suppressing barriers was measured at zero for *time* (section D) and is still a
 dead end for time — but it is not free in bytes, so it is worth re-testing if
 and only if a footprint campaign is underway.
+
+## Y. STALL ATTRIBUTION BY SIDE: footprint is the SECOND lever, not the first (2026-09-13)
+
+Section X concluded that code footprint is the lever and pointed at
+out-of-lining guest memory access.  Before building that, the stall budget was
+decomposed by side, because the two stall counters had not been reconciled
+against the miss counts.  **The check changed the plan.**
+
+Slot 5, 400 frames, 108.8 Mcyc/frame:
+
+| | measured | predicted from misses |
+|---|---|---|
+| **frontend stall** | 19.3 Mcyc (**20.8%**) | 3,323,094 L1I refills/frame, ~5.8 cyc effective each |
+| **backend stall** | 50.6 Mcyc (**54.4%**) | 416,127 LL read misses x ~110 cyc = **45.8 Mcyc** |
+
+75% of all cycles are stalled.  The backend figure is explained almost exactly
+by last-level misses, and the frontend figure by L1I refills (naive costing at
+12 cyc/refill gives 39.9 Mcyc against 19.3 measured, so they overlap and
+prefetch down to ~5.8 cyc effective).
+
+### Why the 54% is data, not code
+
+An instruction fetch that misses stalls the **frontend**, whatever cache level
+finally serves it.  If a large share of the 416k DRAM trips per frame were code,
+frontend stall would have to be far larger than the 19.3 Mcyc measured — 300k
+code fetches to DRAM would alone be 33 Mcyc.  It is not.  So the last-level
+misses are overwhelmingly **guest data**, and they own the 54%.
+
+### What this means for the footprint campaign
+
+Code footprint attacks the **frontend stall only: a 20.8% ceiling.**  The
+out-of-lining idea from section X would cut ~25% of footprint, which if L1I
+refills fall proportionally is ~25% of 20.8% = **~5% of frame time**, roughly
+1.7 ms/frame.  That is well clear of the +-0.3 ms noise floor and is worth
+building — but it is not the 35%-of-footprint headline from section X, and it
+must not be sold as one.
+
+The larger prize is the **54% backend stall: 416k last-level misses/frame,
+26 MB/frame of DRAM traffic on the vCPU thread alone** at 64 bytes a line.  That
+is the thing to understand next.  Whether it is reducible is open: if it is
+genuinely Halo's own working set then it is not ours to fix (which is what
+section A claimed), but 26 MB/frame is large enough to ask whether emulator
+structures — the 22-way softmmu TLB array, qht/TB lookup, the env block — are
+contributing, and that has never been measured.
+
+### Instrumentation note
+
+`bench: SIDES` reports the split.  **ARM event 0x28 (L2I_CACHE_REFILL) reads 0
+on this PMU** — it is unavailable, not genuinely zero, so the instruction-side
+L2 refill share could not be measured directly; the argument above is made from
+the frontend-stall ceiling instead.  Do not read that 0 as data.

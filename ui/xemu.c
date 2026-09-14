@@ -1411,6 +1411,8 @@ static int bench_l2r_fd  = -1;   /* ARM L2D_CACHE_REFILL (raw 0x17) */
 static int bench_l1irf_fd = -1;  /* ARM L1I_CACHE_REFILL (raw 0x01) */
 static int bench_stallf_fd = -1; /* ARM STALL_FRONTEND (raw 0x23) */
 static int bench_stallb_fd = -1; /* ARM STALL_BACKEND  (raw 0x24) */
+static int bench_l2irf_fd = -1;  /* ARM L2I_CACHE_REFILL (raw 0x28) */
+static int bench_llmr_fd  = -1;  /* ARM LL_CACHE_MISS_RD (raw 0x37) */
 static int bench_br_fd  = -1;    /* host branch instructions */
 static int bench_brm_fd = -1;    /* host branch mispredicts */
 
@@ -1671,7 +1673,18 @@ core_counters:
     bench_stallf_fd = bench_open_raw(0x23);
     bench_stallb_fd = bench_open_raw(0x24);
     if (!bench_pmu_few()) {
-        bench_l2r_fd = bench_open_raw(0x17);   /* L2D_CACHE_REFILL */
+        bench_l2r_fd = bench_open_raw(0x17);   /* L2D_CACHE_REFILL, unified */
+        /*
+         * Splitting the miss streams by side is what decides the next move.
+         * An L1I miss stalls the FRONTEND; a data miss stalls the BACKEND.
+         * Our stalls are 52% backend against 14% frontend, so if code misses
+         * are mostly caught by L2 then shrinking the code footprint can only
+         * ever attack the 14%, and the 52% is guest data.  0x28 is the
+         * instruction-side L2 refill, 0x37 the architected last-level read
+         * miss.
+         */
+        bench_l2irf_fd = bench_open_raw(0x28);  /* L2I_CACHE_REFILL */
+        bench_llmr_fd  = bench_open_raw(0x37);  /* LL_CACHE_MISS_RD */
     }
 }
 
@@ -1841,6 +1854,7 @@ static uint64_t s_bench_start_dwalk, s_bench_start_iwalk;
 static uint64_t s_bench_start_l1i, s_bench_start_l1irf, s_bench_start_l2r;
 static uint64_t s_bench_start_stallf, s_bench_start_stallb;
 static uint64_t s_bench_start_br, s_bench_start_brm;
+static uint64_t s_bench_start_l2irf, s_bench_start_llmr;
 static uint64_t s_bench_prev_hinsn_base;
 static unsigned long long s_bench_start_rep_i, s_bench_start_rep_e;
 static unsigned long long s_bench_start_nd, s_bench_start_ndsmc;
@@ -1954,6 +1968,8 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_l1i   = bench_read_fd(bench_l1i_fd);
     s_bench_start_l1irf = bench_read_fd(bench_l1irf_fd);
     s_bench_start_l2r   = bench_read_fd(bench_l2r_fd);
+    s_bench_start_l2irf = bench_read_fd(bench_l2irf_fd);
+    s_bench_start_llmr = bench_read_fd(bench_llmr_fd);
     s_bench_start_br = bench_read_fd(bench_br_fd);
     s_bench_start_brm = bench_read_fd(bench_brm_fd);
     s_bench_start_stallf = bench_read_fd(bench_stallf_fd);
@@ -2259,7 +2275,44 @@ static void bench_tick(void)
                 }
             }
         }
-        ALOGI("bench: CODE BYTES total %.1f MB emitted since boot", 
+        /*
+     * Stall attribution by side.  The two stall counters say how much time is
+     * lost and where in the pipeline; these miss counters say what is causing
+     * it.  Costing them against the measured stalls is the check on whether a
+     * code-footprint campaign can pay for itself at all.
+     */
+    {
+        uint64_t l1irf = bench_read_fd(bench_l1irf_fd) - s_bench_start_l1irf;
+        uint64_t l2irf = bench_read_fd(bench_l2irf_fd) - s_bench_start_l2irf;
+        uint64_t l2rf = bench_read_fd(bench_l2r_fd) - s_bench_start_l2r;
+        uint64_t llmr = bench_read_fd(bench_llmr_fd) - s_bench_start_llmr;
+        uint64_t sf = bench_read_fd(bench_stallf_fd) - s_bench_start_stallf;
+        uint64_t sb = bench_read_fd(bench_stallb_fd) - s_bench_start_stallb;
+        double n = (double)s_bench_frames_total;
+
+        if (l1irf || l2rf) {
+            ALOGI("bench: SIDES/frame | L1I-refill %.0f (L2I-refill %.0f, "
+                  "%.1f%% escape L2) | L2-refill total %.0f | LL-read-miss "
+                  "%.0f",
+                  l1irf / n, l2irf / n,
+                  l1irf ? 100.0 * (double)l2irf / (double)l1irf : 0.0,
+                  l2rf / n, llmr / n);
+            /*
+             * Cost the two streams: an L1I miss caught by L2 is ~12 cycles of
+             * frontend starvation, a last-level miss is a ~110 cycle DRAM trip
+             * that stalls the backend.
+             */
+            ALOGI("bench: SIDES cost/frame | code: L1I in L2 %.1f Mcyc + L2I "
+                  "to DRAM %.1f Mcyc | data+code LL %.1f Mcyc | MEASURED "
+                  "frontend %.1f Mcyc, backend %.1f Mcyc",
+                  (l1irf - l2irf) * 12.0 / n / 1e6,
+                  l2irf * 110.0 / n / 1e6,
+                  llmr * 110.0 / n / 1e6,
+                  sf / n / 1e6, sb / n / 1e6);
+        }
+    }
+
+    ALOGI("bench: CODE BYTES total %.1f MB emitted since boot", 
               tot / (1024.0 * 1024.0));
         for (j = 0; j < n; j++) {
             int o = top[j];
