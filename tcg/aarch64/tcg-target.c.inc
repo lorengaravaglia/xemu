@@ -1954,6 +1954,7 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
  */
 extern int g_ldst_pad_bytes;
 extern int g_reserve_x15;
+extern int g_ldst_stub;
 
 static void xemu_ldst_pad(TCGContext *s)
 {
@@ -1969,11 +1970,237 @@ static void xemu_ldst_pad(TCGContext *s)
 }
 #endif
 
+
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * Out-of-lined guest memory access.
+ *
+ * The softmmu fast path is 8-9 instructions emitted at every access site, and
+ * section X measured qemu_ld + qemu_st at 35.2% of all generated code.  That
+ * matters because the emulator is frontend-stalled on instruction fetch: the
+ * slope in section AA is ~29,100 L1I misses per byte per access, so removing
+ * ~24 bytes per site predicts roughly -21% L1I misses and -3.8% frame time.
+ *
+ * The trade only makes sense because issue is nearly free here (0.133 cycles
+ * per added instruction, section AA) while fetched bytes are not.  A call plus
+ * a shared stub executes MORE instructions than the inline sequence; what it
+ * saves is unique bytes at each of the thousands of sites, collapsing them
+ * onto one hot line that stays resident.
+ *
+ * Register use is unconstrained because qemu_ld and qemu_st already carry
+ * TCG_OPF_CALL_CLOBBER (tcg-opc.h), so TCG keeps nothing live in a
+ * call-clobbered register across the access.  The stub may therefore use
+ * X0-X17 freely.  X30 is TCG_REG_TMP2, reserved, and carries the return
+ * address -- which lands inside the calling block, so cpu_restore_state still
+ * resolves it to the faulting guest instruction on the slow path.
+ *
+ * Convention: address in X16, loaded result out in X16, store value in X17,
+ * MemOpIdx in X3.
+ *
+ * oi is passed rather than baked because MemOp carries atomicity bits above
+ * bit 8 (MO_ATOM_*), so the values the frontend emits are not the bare
+ * size|MO_LE a stub could assume -- baking it rejected 92% of sites.  It is
+ * one MOVZ at the call site, since make_memop_idx packs into 16 bits, and it
+ * makes one stub correct for every atomicity at a given size.  The fast path
+ * does not need it: like the inline sequence, it issues a plain load or store
+ * and leaves atomicity to the helper on the slow path.
+ */
+/*
+ * What MemOp values does the frontend actually emit?  A stub bakes one, so
+ * the call site can only use it when the site's MemOp matches exactly --
+ * atomicity and alignment bits included.  Guessing which combinations occur
+ * would either silently disable the stubs or, worse, use one with the wrong
+ * atomicity, so count them and look.
+ */
+unsigned long long xemu_ldst_opc_hist[2][256];
+unsigned long long xemu_ldst_stub_used, xemu_ldst_stub_missed;
+/* why a site fell back: 0 mmuidx, 1 bswap/sign, 2 amask, 3 no stub,
+ * 4 out of BL range, 5 MemOp mismatch */
+unsigned long long xemu_ldst_reject[6];
+unsigned long long xemu_ldst_mmuidx_seen[16];
+unsigned long long xemu_ldst_badop[256];
+unsigned long long xemu_ldst_expect;
+
+#define XEMU_STUB_MMU_MAX 8
+static tcg_insn_unit *xemu_ldst_stub[2][XEMU_STUB_MMU_MAX][4];
+
+static void xemu_emit_one_ldst_stub(TCGContext *s, bool is_ld,
+                                    unsigned mem_index, MemOp size)
+{
+    const TCGReg ADDR = TCG_REG_X16;   /* in: guest address; out: value */
+    const TCGReg VAL  = TCG_REG_X17;   /* in: value to store */
+    const TCGReg OI   = TCG_REG_X3;    /* in: MemOpIdx, preserved by fast path */
+    TCGType addr_type = s->addr_type;
+    MemOp opc = size | (is_ld ? MO_LE : MO_LE);
+    unsigned s_mask = (1u << size) - 1;
+    uint64_t compare_mask;
+    tcg_insn_unit *slow_br;
+    HostAddress h = { 0 };
+
+    xemu_ldst_stub[is_ld][mem_index][size] = s->code_ptr;
+
+    /* Load CPUTLBDescFast.{mask,table}. */
+    tcg_out_insn(s, 3314, LDP, TCG_REG_X0, TCG_REG_X1, TCG_AREG0,
+                 tlb_mask_table_ofs(s, mem_index), 1, 0);
+    /* index = mask & (addr >> (PAGE_BITS - ENTRY_BITS)) */
+    tcg_out_insn(s, 3502S, AND_LSR, TCG_TYPE_I64, TCG_REG_X0, TCG_REG_X0,
+                 ADDR, TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+    /* entry = table + index */
+    tcg_out_insn(s, 3502, ADD, 1, TCG_REG_X1, TCG_REG_X1, TCG_REG_X0);
+    /* comparator */
+    tcg_out_ld(s, addr_type, TCG_REG_X0, TCG_REG_X1,
+               is_ld ? offsetof(CPUTLBEntry, addr_read)
+                     : offsetof(CPUTLBEntry, addr_write));
+
+    /*
+     * Check the last byte of the access, so a page crossing is caught.  The
+     * stub is built for unaligned-permitted accesses (a_mask 0), which is what
+     * x86 emits for the overwhelming majority; anything needing alignment bits
+     * in the comparison falls back to the inline path at the call site.
+     */
+    if (s_mask) {
+        tcg_out_insn(s, 3401, ADDI, addr_type, TCG_REG_X2, ADDR, s_mask);
+    } else {
+        tcg_out_mov(s, addr_type, TCG_REG_X2, ADDR);
+    }
+    compare_mask = (uint64_t)TARGET_PAGE_MASK;
+    tcg_out_logicali(s, I3404_ANDI, addr_type, TCG_REG_X2, TCG_REG_X2,
+                     compare_mask);
+    tcg_out_cmp(s, addr_type, TCG_COND_NE, TCG_REG_X0, TCG_REG_X2, 0);
+
+    slow_br = s->code_ptr;
+    tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
+
+    /* Fast path: addend, then the access itself. */
+    tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_X1, TCG_REG_X1,
+               offsetof(CPUTLBEntry, addend));
+    h.base = TCG_REG_X1;
+    h.index = ADDR;
+    h.index_ext = addr_type;
+    if (is_ld) {
+        tcg_out_qemu_ld_direct(s, opc, TCG_TYPE_I64, ADDR, h);
+    } else {
+        tcg_out_qemu_st_direct(s, opc, VAL, h);
+    }
+    tcg_out_insn(s, 3207, RET, TCG_REG_LR);
+
+    /* Slow path: hand off to the usual helper. */
+    reloc_pc19(slow_br, tcg_splitwx_to_rx(s->code_ptr));
+    tcg_out_insn(s, 3314, STP, TCG_REG_LR, TCG_REG_LR, TCG_REG_SP, -16, 1, 1);
+    if (is_ld) {
+        /* helper_ld*_mmu(env, addr, oi, retaddr): oi arrives in X3. */
+        tcg_out_mov(s, TCG_TYPE_I32, TCG_REG_X2, OI);
+        tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X3, TCG_REG_LR);
+        tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, ADDR);
+        tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
+        tcg_out_call_int(s, qemu_ld_helpers[size]);
+        tcg_out_mov(s, TCG_TYPE_I64, ADDR, TCG_REG_X0);
+    } else {
+        /* helper_st*_mmu(env, addr, val, oi, retaddr): oi already in X3. */
+        tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X4, TCG_REG_LR);
+        tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X2, VAL);
+        tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, ADDR);
+        tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
+        tcg_out_call_int(s, qemu_st_helpers[size]);
+    }
+    /*
+     * Restore into (LR, X0), NOT (LR, TMP0): TMP0 is X16, which by this point
+     * holds the value just loaded, and pairing it here would overwrite the
+     * result with stack garbage on every slow-path load.
+     */
+    tcg_out_insn(s, 3314, LDP, TCG_REG_LR, TCG_REG_X0, TCG_REG_SP, 16, 0, 1);
+    tcg_out_insn(s, 3207, RET, TCG_REG_LR);
+}
+
+static void xemu_emit_ldst_stubs(TCGContext *s)
+{
+    unsigned mi;
+    int size;
+
+    if (!tcg_use_softmmu) {
+        return;
+    }
+    for (mi = 0; mi < XEMU_STUB_MMU_MAX; mi++) {
+        for (size = MO_8; size <= MO_64; size++) {
+            xemu_emit_one_ldst_stub(s, true, mi, size);
+            xemu_emit_one_ldst_stub(s, false, mi, size);
+        }
+    }
+}
+
+/*
+ * Can this access use a stub?  Anything unusual -- alignment bits in the
+ * comparison, big endian, a sign-extending load, an mmu index past the table,
+ * or a stub too far away for BL's +-128 MB -- keeps the inline sequence.
+ */
+static tcg_insn_unit *xemu_ldst_stub_for(TCGContext *s, MemOpIdx oi,
+                                         bool is_ld)
+{
+    MemOp opc = get_memop(oi);
+    unsigned mem_index = get_mmuidx(oi);
+    MemOp size = opc & MO_SIZE;
+    tcg_insn_unit *stub;
+    ptrdiff_t off;
+
+    xemu_ldst_opc_hist[is_ld][opc & 0xff]++;
+
+    if (!g_ldst_stub || !tcg_use_softmmu) {
+        return NULL;
+    }
+    if (mem_index < 16) {
+        xemu_ldst_mmuidx_seen[mem_index]++;
+    }
+    if (mem_index >= XEMU_STUB_MMU_MAX) {
+        xemu_ldst_reject[0]++;
+        xemu_ldst_stub_missed++;
+        return NULL;
+    }
+    if ((opc & MO_BSWAP) || (is_ld && (opc & MO_SIGN))) {
+        xemu_ldst_reject[1]++;
+        xemu_ldst_stub_missed++;
+        return NULL;
+    }
+    if (opc & MO_AMASK) {
+        xemu_ldst_reject[2]++;
+        xemu_ldst_stub_missed++;
+        return NULL;      /* alignment participates in the compare */
+    }
+    stub = xemu_ldst_stub[is_ld][mem_index][size];
+    if (!stub) {
+        xemu_ldst_reject[3]++;
+        xemu_ldst_stub_missed++;
+        return NULL;
+    }
+    off = tcg_pcrel_diff(s, tcg_splitwx_to_rx(stub)) >> 2;
+    if (off != sextract64(off, 0, 26)) {
+        xemu_ldst_reject[4]++;
+        xemu_ldst_stub_missed++;
+        return NULL;      /* out of BL range */
+    }
+    xemu_ldst_stub_used++;
+    return stub;
+}
+#endif
+
 static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
                          TCGReg addr_reg, MemOpIdx oi)
 {
     TCGLabelQemuLdst *ldst;
     HostAddress h;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        tcg_insn_unit *stub = xemu_ldst_stub_for(s, oi, true);
+
+        if (stub) {
+            tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X16, addr_reg);
+            tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, oi);
+            tcg_out_call_int(s, tcg_splitwx_to_rx(stub));
+            tcg_out_mov(s, data_type, data_reg, TCG_REG_X16);
+            return;
+        }
+    }
+#endif
 
     ldst = prepare_host_addr(s, &h, addr_reg, oi, true);
     tcg_out_qemu_ld_direct(s, get_memop(oi), data_type, data_reg, h);
@@ -2000,6 +2227,20 @@ static void tgen_qemu_st(TCGContext *s, TCGType data_type, TCGReg data_reg,
 {
     TCGLabelQemuLdst *ldst;
     HostAddress h;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        tcg_insn_unit *stub = xemu_ldst_stub_for(s, oi, false);
+
+        if (stub) {
+            tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X17, data_reg);
+            tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X16, addr_reg);
+            tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, oi);
+            tcg_out_call_int(s, tcg_splitwx_to_rx(stub));
+            return;
+        }
+    }
+#endif
 
     ldst = prepare_host_addr(s, &h, addr_reg, oi, false);
     tcg_out_qemu_st_direct(s, get_memop(oi), data_reg, h);
@@ -4030,6 +4271,13 @@ static void tcg_target_qemu_prologue(TCGContext *s)
     tcg_out_insn(s, 3314, LDP, TCG_REG_FP, TCG_REG_LR,
                  TCG_REG_SP, PUSH_SIZE, 0, 1);
     tcg_out_insn(s, 3207, RET, TCG_REG_LR);
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Shared memory-access stubs live just past the epilogue, so every block
+     * generated afterwards is within BL range of them for as long as the code
+     * buffer stays under 128 MB ahead; the call site checks and falls back. */
+    xemu_emit_ldst_stubs(s);
+#endif
 }
 
 #if defined(__ANDROID__) || defined(ANDROID)

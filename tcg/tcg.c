@@ -145,6 +145,13 @@ unsigned long long xemu_op_bytes[XEMU_TCG_NB_OPC];
 int g_tb_pad_bytes;   /* debug.xemu.tb_pad, measurement only */
 int g_ldst_pad_bytes; /* debug.xemu.ldst_pad, measurement only */
 int g_reserve_x15;    /* debug.xemu.reserve_x15, stub prerequisite */
+/*
+ * Out-of-lined guest memory access.  Off by default: it does exactly what it
+ * was designed to do -- 23% less generated code, 19.5% fewer L1I misses -- but
+ * the instructions it adds cost as much as the fetch it saves, so the net is
+ * zero.  See section AC.  Enable with debug.xemu.ldst_stub=1.
+ */
+int g_ldst_stub;
 unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];
 const char *xemu_tcg_op_name(unsigned opc)
 {

@@ -2312,6 +2312,88 @@ static void bench_tick(void)
         }
     }
 
+    {
+        extern unsigned long long xemu_ldst_opc_hist[2][256];
+        extern unsigned long long xemu_ldst_stub_used, xemu_ldst_stub_missed;
+        int d, i, j, top[6], n = 0;
+
+        for (d = 0; d < 2; d++) {
+            n = 0;
+            for (i = 0; i < 256; i++) {
+                if (!xemu_ldst_opc_hist[d][i]) {
+                    continue;
+                }
+                for (j = 0; j < n; j++) {
+                    if (xemu_ldst_opc_hist[d][i] >
+                        xemu_ldst_opc_hist[d][top[j]]) {
+                        break;
+                    }
+                }
+                if (j < 6) {
+                    int k;
+
+                    for (k = (n < 6 ? n : 5); k > j; k--) {
+                        top[k] = top[k - 1];
+                    }
+                    top[j] = i;
+                    if (n < 6) {
+                        n++;
+                    }
+                }
+            }
+            {
+                char line[256];
+                int off = 0;
+
+                for (j = 0; j < n; j++) {
+                    off += snprintf(line + off, sizeof(line) - off,
+                                    " 0x%02x=%llu", top[j],
+                                    xemu_ldst_opc_hist[d][top[j]]);
+                }
+                ALOGI("bench: LDST MemOp %s:%s", d ? "loads" : "stores",
+                      n ? line : " (none)");
+            }
+        }
+        {
+            extern unsigned long long xemu_ldst_reject[6];
+            extern unsigned long long xemu_ldst_mmuidx_seen[16];
+            static const char *why[6] = { "mmuidx>=8", "bswap/sign", "amask",
+                                          "no-stub", "BL-range", "MemOp" };
+            char line[256], mi[256];
+            int off = 0, moff = 0, k;
+
+            for (k = 0; k < 6; k++) {
+                off += snprintf(line + off, sizeof(line) - off, " %s=%llu",
+                                why[k], xemu_ldst_reject[k]);
+            }
+            for (k = 0; k < 16; k++) {
+                if (xemu_ldst_mmuidx_seen[k]) {
+                    moff += snprintf(mi + moff, sizeof(mi) - moff,
+                                     " %d:%llu", k, xemu_ldst_mmuidx_seen[k]);
+                }
+            }
+            ALOGI("bench: LDST STUB used %llu, fell back %llu |%s",
+                  xemu_ldst_stub_used, xemu_ldst_stub_missed, line);
+            ALOGI("bench: LDST mmu_idx seen:%s", moff ? mi : " none");
+            {
+                extern unsigned long long xemu_ldst_badop[256];
+                extern unsigned long long xemu_ldst_expect;
+                char bl[256];
+                int boff = 0;
+
+                for (k = 0; k < 256; k++) {
+                    if (xemu_ldst_badop[k] && boff < 200) {
+                        boff += snprintf(bl + boff, sizeof(bl) - boff,
+                                         " 0x%02x=%llu", k,
+                                         xemu_ldst_badop[k]);
+                    }
+                }
+                ALOGI("bench: LDST rejected MemOps:%s (last expected 0x%llx)",
+                      boff ? bl : " none", xemu_ldst_expect);
+            }
+        }
+    }
+
     ALOGI("bench: CODE BYTES total %.1f MB emitted since boot", 
               tot / (1024.0 * 1024.0));
         for (j = 0; j < n; j++) {

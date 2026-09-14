@@ -387,6 +387,7 @@ From the heavy-frames agent, not yet measured:
 | Return-address-stack prediction | our mispredict rate is 0.10%; X3 already solves it |
 | Hardware-assisted guest MMU (Captive) | requires EL2, unavailable to an Android app |
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
+| Out-of-lining memory access as built | -23% code, -19.5% L1I, but +15% instructions cancels it — section AC |
 | Eliminating CC helper calls | 97% removed, 1.1% fewer host insns, ZERO cycles saved — section W |
 | Trusting absolute PMU figures from before section U | counters were multiplexed to 9-29%; understated 3-11x |
 | Dynamic spin detection (auto) | detects correctly, but the benchmark has no spin worth eliding; 0.2-0.6 ms/frame worse — section R |
@@ -1722,3 +1723,79 @@ attributed first to the reservation and then to an ordering bug between
 in standby, and `tcg_reg_alloc_start` does not snapshot `reserved_regs` — the
 allocator reads it live, after both hooks.  The toggle was moved earlier anyway
 because it reads more clearly, but it corrected no defect.
+
+## AC. OUT-OF-LINED MEMORY ACCESS: mechanism confirmed, net zero (2026-09-13)
+
+Built.  Shared per-(is_ld, mmu_idx, size) stubs emitted after the prologue; the
+call site becomes `mov x16, addr` / `movz x3, oi` / `bl stub` / `mov data, x16`.
+`debug.xemu.ldst_stub=1`.  92.5% of accesses use it (the rest are sign-extended
+loads or carry alignment bits and keep the inline path).
+
+### Three things worth knowing for any future attempt
+
+**`qemu_ld`/`qemu_st` already carry `TCG_OPF_CALL_CLOBBER`**, so TCG keeps
+nothing live in a call-clobbered register across an access and the stub may use
+X0-X17 freely.  No register needed reserving after all — the X15 experiment in
+section AB was answering a question that did not arise.
+
+**MemOp carries atomicity bits above bit 8.**  Baking `oi` into the stub and
+requiring the site to match rejected **92% of sites**, and the diagnostic hid it
+because the histogram masked with 0xff, printing `0x02` for what was really
+`0x02 | MO_ATOM_*<<8`.  Passing `oi` in X3 (one MOVZ; `make_memop_idx` packs
+into 16 bits) makes one stub correct for every atomicity at a given size.
+
+**Restoring the saved link register must not pair with TMP0**, which is X16 and
+holds the load result; that would corrupt every slow-path load.
+
+### It does what it was designed to do
+
+Eight runs, both orderings, slot 5:
+
+| | stub off | stub on | delta |
+|---|---|---|---|
+| code size | 22.96 MB | 17.67 MB | **-23%** |
+| **L1I miss/frame** | 3,280k | 2,639k | **-19.5%** |
+| frontend stall | 20.15% | 19.45% | -0.7 pp |
+| host insns/frame | 173.6 M | 200.0 M | **+15.2%** |
+| cycles/frame | 106.70 M | 106.48 M | -0.2% |
+| vcpu | 36.84 ms | 37.48 ms | +0.64 |
+
+**The predicted mechanism is confirmed: -19.5% L1I misses against -21%
+predicted.**  The net is nevertheless zero, and the two effects cancel almost
+exactly:
+
+- fetch saved: 641k fewer misses x ~5.8 cyc = **-3.7 Mcyc**
+- execute added: +26.4M instructions x 0.133 cyc = **+3.5 Mcyc**
+
+### Why the section AA prediction was wrong
+
+It priced the bytes removed and never priced the instructions added.  The stub
+path executes ~15 instructions per access against ~10 inline — the two
+call-site moves, the MOVZ, the BL and the RET — which is +4.8 per access over
+5.5M accesses a frame.  Section W had established that instructions are nearly
+free, and that was read as *free*; at 0.133 cycles each they are cheap, but
+26 million of them are not.
+
+**The lesson generalises:** a footprint change must be priced on *both* sides,
+bytes removed and instructions added, using the two coefficients measured in
+section AA (~29,100 L1I misses per byte per access; 0.133 cycles per
+instruction).  Either alone gives the wrong answer.
+
+### Is it salvageable
+
+The added instructions are three register moves that could be removed by
+constraining the qemu_ld/st operands to fixed registers in the TCG constraint
+set, so the allocator places the address in X16 and the result there directly,
+and by keying stubs on the full MemOp so `oi` can be baked again:
+
+| removed | instructions | cycles |
+|---|---|---|
+| `mov x16, addr` | -5.5M | -0.7 Mcyc |
+| `mov data, x16` | -5.5M | -0.7 Mcyc |
+| `movz x3, oi` | -5.5M | -0.7 Mcyc |
+
+All three would turn the wash into about **-2.3 Mcyc, ~2% of frame time**.
+Worth doing only if 2% is worth a constraint change that may itself cost moves
+elsewhere — the allocator will insert its own when it cannot satisfy a fixed
+register.  **Kept, default off**, so the measurement stands and the code is
+there if that is attempted.

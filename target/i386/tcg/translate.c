@@ -223,6 +223,20 @@ void x86_refresh_fpu_mode(void)
         }
 
         {
+            extern int g_ldst_stub;
+            char sv[PROP_VALUE_MAX] = { 0 };
+            int wants = __system_property_get("debug.xemu.ldst_stub", sv) > 0
+                        && (sv[0] == '1' || sv[0] == 'y' || sv[0] == 't');
+
+            if (wants != g_ldst_stub) {
+                g_ldst_stub = wants;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
             extern int g_reserve_x15;
             char rv[PROP_VALUE_MAX] = { 0 };
             int wantr = __system_property_get("debug.xemu.reserve_x15", rv) > 0
