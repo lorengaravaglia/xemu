@@ -221,6 +221,20 @@ void x86_refresh_fpu_mode(void)
         }
 
         {
+            extern int g_nochain;
+            char nv[PROP_VALUE_MAX] = { 0 };
+            int want = __system_property_get("debug.xemu.nochain", nv) > 0 &&
+                       (nv[0] == '1' || nv[0] == 'y' || nv[0] == 't');
+
+            if (want != g_nochain) {
+                g_nochain = want;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
             extern int g_spin_auto;
             char av[PROP_VALUE_MAX] = { 0 };
 

@@ -230,6 +230,17 @@ unsigned long long xemu_spin_hits, xemu_spin_sleeps, xemu_spin_us_total;
  * spins.
  */
 int g_spin_auto;                     /* debug.xemu.spin_auto=1 enables */
+
+/*
+ * debug.xemu.nochain=1 translates everything unchained, so every block returns
+ * to the dispatcher.  This exists to make xemu_guest_insn_count exact: that
+ * counter is incremented after tb_add_jump, so chained blocks never reach it
+ * and it normally reports only chain breaks (~300x low).  A nochain run is the
+ * only way to get a true guest-instruction count, which is what turns host
+ * instructions per guest instruction into a real number rather than an
+ * estimate.  It is a measurement mode, not an optimisation -- it costs ~50%.
+ */
+int g_nochain;
 unsigned long long xemu_spin_probes, xemu_spin_found;
 
 /*
@@ -1353,7 +1364,10 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #if defined(__ANDROID__) || defined(ANDROID)
             /* Unchain the spin range so every iteration reaches the
              * dispatcher, then sleep once it is clearly spinning. */
-            if (unlikely(g_spin_lo || spin_set_n || spin_probe_left > 0)) {
+            if (unlikely(g_nochain)) {
+                s.cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
+            } else if (unlikely(g_spin_lo || spin_set_n ||
+                                spin_probe_left > 0)) {
                 if (spin_probe_left > 0 || xemu_spin_member(s.pc)) {
                     s.cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
                 }

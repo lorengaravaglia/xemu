@@ -22,12 +22,12 @@ inline branch cache (-3.5%), targeted jump-cache invalidation (-2.6%).
 | Within JIT: branches/exits | 3.1% |
 | Within JIT: helper calls | 2.7% |
 | Top helpers | cc_compute_all 31%, lookup_tb_ptr 14%, qht_lookup 8% |
-| Host IPC | 1.80-1.85 |
+| Host IPC | **1.67-1.70** (was 1.80-1.85; section V) |
 | Branch mispredicts | 0.10% of instructions |
-| Cache misses | 0.13% (~213k/frame, ~23% of frame at ~100cyc) |
-| Guest instructions/frame | ~4.4-6M |
+| Cache misses | **L1D 216k + last-level 281-286k/frame; LL alone ~32% of frame** (section V) |
+| Guest instructions/frame | **3.56M** (exact, nochain; section V) |
 | Emitted per guest instruction | 82 bytes / 20.5 host instructions |
-| Executed per guest instruction | ~33 host instructions |
+| Executed per guest instruction | **45 host instructions** (was ~33; section V) |
 | Average TB | 6.5 guest instructions / 533 bytes |
 | softmmu TLB | 256 entries, 0.06% miss rate |
 
@@ -54,6 +54,13 @@ behaviour.
 **Operational rule:** removing instructions from the high-IPC bulk pays ~1:1;
 removing them from the load sequence pays ZERO. Proven twice (barriers,
 fastmem).
+
+> **CORRECTED (section V).** The two A/B results stand, but the model above is
+> circular: IPC is defined as instructions/cycles, so instructions/IPC = cycles
+> closes for any workload regardless of its stall content, and it cannot show
+> there is "no hidden stall term". Re-measured, it closes around a 56% backend
+> stall. The right reading is that we are stalled fetching generated code and
+> neither change shrank the footprint.
 
 ---
 
@@ -1281,3 +1288,66 @@ shrinks the footprint without removing instructions may still pay.
 
 Re-measure any earlier microarchitectural claim before building on it.  Every
 absolute PMU number recorded before this section is understated by 3-11x.
+
+## V. RE-MEASUREMENT OF SECTION A WITH TRUSTWORTHY COUNTERS (2026-09-13)
+
+Every section-A fact that a hardware counter can move, re-measured on slot 2,
+600 frames, after the section-U fix.  Sampling-derived facts (the 84% in
+generated code, the within-JIT breakdown, the thread split) come from
+simpleperf *proportions* and are immune to multiplexing — they are unaffected
+and were not re-run.
+
+| fact | recorded | re-measured | verdict |
+|---|---|---|---|
+| Host IPC | 1.80-1.85 | **1.67-1.70** | slightly lower |
+| Branch mispredicts | 0.10% of insns | **0.098%** | **confirmed** |
+| Guest instructions/frame | 4.4-6 M | **3.56 M** (exact) | lower |
+| Executed host insns / guest insn | ~33 | **45** | **37% higher** |
+| Cache misses | ~213k/frame, ~23% of frame | L1D 216k + **LL 281-286k**, LL alone 32% | understated |
+| Stall structure | "not stall-bound", 78% issuing | **56-59% backend, 13-14% frontend** | **refuted** |
+| Cycles/frame | (implied ~37 M) | **95.7 M** | 2.6x |
+
+### Getting an exact guest-instruction count
+
+`xemu_guest_insn_count` sits after `tb_add_jump`, so chained blocks never reach
+it and it reports only chain breaks — 17k/frame against a true 3.56M/frame, a
+210x undercount.  New `debug.xemu.nochain=1` translates everything unchained so
+the counter is exact.  It costs ~10% (36.00 vs 32.67 ms/frame) and is a
+measurement mode only.
+
+Host-per-guest is then the chained host count over the nochain guest count,
+which is legitimate because the benchmark advances a fixed 600 guest frames
+from a fixed state: 161.6M / 3.56M = **45 host instructions per guest
+instruction**, against ~33 recorded.
+
+Incidentally, **nochain IPC is 2.26 against chained 1.69.**  Unchained code
+runs *better* per cycle despite doing more work, which is another sign that the
+chained generated code's own footprint is what hurts.
+
+### The fastmem model was circular
+
+Section A argued: *"164M instructions / IPC 1.85 = 88.6M cycles = ~31.6ms vs
+~32.5ms measured: the model closes with no hidden stall term."*
+
+Re-measured, it closes just as well — 160M / 1.67 = 95.7 Mcyc = 32.7 ms against
+32.67 ms measured — but it now closes around a **56% backend stall**.  That
+exposes the reasoning: IPC is *defined* as instructions/cycles, so
+instructions/IPC = cycles is a tautology and closes for any workload whatever
+its stall content.  It never had the power to rule out a stall term.
+
+The empirical results it was used to explain — barriers and fastmem both
+measuring zero — were wall-clock A/Bs and stand on their own.  The
+**explanation** was wrong: it is not that "translation is already free and the
+residue is the guest's own cache behaviour", it is that we are stalled on
+fetching generated code, and neither change reduced the footprint.
+
+### Standing conclusions after this pass
+
+- **Memory-stalled, instruction side dominant.**  56-59% backend stall, L1I
+  misses outnumbering L1D 8.9:1.
+- **Branch prediction is genuinely a non-issue** (0.098%), so the
+  return-address-stack dead end stays dead.  Frontend stalls are 13-14% and are
+  I-cache, not misprediction.
+- **45 host instructions per guest instruction** is the headline number for
+  codegen density, worse than the ~33 previously believed.
+- Guest workload is **3.56M guest instructions/frame** at 30 fps.

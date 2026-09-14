@@ -1411,6 +1411,8 @@ static int bench_l2r_fd  = -1;   /* ARM L2D_CACHE_REFILL (raw 0x17) */
 static int bench_l1irf_fd = -1;  /* ARM L1I_CACHE_REFILL (raw 0x01) */
 static int bench_stallf_fd = -1; /* ARM STALL_FRONTEND (raw 0x23) */
 static int bench_stallb_fd = -1; /* ARM STALL_BACKEND  (raw 0x24) */
+static int bench_br_fd  = -1;    /* host branch instructions */
+static int bench_brm_fd = -1;    /* host branch mispredicts */
 
 /*
  * A dTLB *refill* is not a page-table walk: most are satisfied by the
@@ -1476,6 +1478,19 @@ static int bench_open_raw(uint64_t config)
 
     memset(&pe, 0, sizeof(pe));
     pe.type = PERF_TYPE_RAW;
+    pe.size = sizeof(pe);
+    pe.config = config;
+    pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
+    return (int)syscall(__NR_perf_event_open, &pe, xemu_vcpu_tid, -1, -1, 0);
+}
+
+static int bench_open_hw(uint64_t config)
+{
+    struct perf_event_attr pe;
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_HARDWARE;
     pe.size = sizeof(pe);
     pe.config = config;
     pe.exclude_hv = 1;
@@ -1637,6 +1652,22 @@ core_counters:
                             PERF_COUNT_HW_CACHE_OP_READ,
                             PERF_COUNT_HW_CACHE_RESULT_MISS));
     }
+    if (!bench_pmu_few()) {
+        /*
+         * Re-measuring the recorded 0.10% mispredict rate, which was used to
+         * rule out return-address-stack work.  It is a ratio of two counters,
+         * so multiplexing only distorts it if the two were scheduled for
+         * different fractions -- which is exactly what needs checking.
+         */
+        /*
+         * Raw ARM events, not PERF_TYPE_HARDWARE: the generic branch events
+         * are not mapped on this PMU and read back zero.  0x21 BR_RETIRED and
+         * 0x22 BR_MIS_PRED_RETIRED are architected, like the stall counters
+         * above that do work.
+         */
+        bench_br_fd = bench_open_raw(0x21);    /* BR_RETIRED */
+        bench_brm_fd = bench_open_raw(0x22);   /* BR_MIS_PRED_RETIRED */
+    }
     bench_stallf_fd = bench_open_raw(0x23);
     bench_stallb_fd = bench_open_raw(0x24);
     if (!bench_pmu_few()) {
@@ -1706,6 +1737,7 @@ static double bench_cpu_temp_c(void)
  */
 extern unsigned long long xemu_tb_exec_count;
 extern unsigned long long xemu_guest_insn_count;
+extern int g_nochain;
 
 /* CPU time consumed by the vCPU thread, in milliseconds. */
 static double bench_vcpu_cpu_ms(void)
@@ -1808,6 +1840,8 @@ static uint64_t s_bench_start_ll, s_bench_start_l1dw;
 static uint64_t s_bench_start_dwalk, s_bench_start_iwalk;
 static uint64_t s_bench_start_l1i, s_bench_start_l1irf, s_bench_start_l2r;
 static uint64_t s_bench_start_stallf, s_bench_start_stallb;
+static uint64_t s_bench_start_br, s_bench_start_brm;
+static uint64_t s_bench_prev_hinsn_base;
 static unsigned long long s_bench_start_rep_i, s_bench_start_rep_e;
 static unsigned long long s_bench_start_nd, s_bench_start_ndsmc;
 static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
@@ -1896,6 +1930,7 @@ void xemu_android_benchmark_start(int frames)
     s_bench_worst_cycles = 0;
     s_bench_prev_insn = xemu_guest_insn_count;
     s_bench_prev_hinsn = bench_read_insns();
+    s_bench_prev_hinsn_base = s_bench_prev_hinsn;
     s_bench_prev_mmio = xemu_mmio_reads + xemu_mmio_writes;
     {
         int i, nb = xemu_ccop_nb < XEMU_CC_OP_MAX ?
@@ -1919,6 +1954,8 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_l1i   = bench_read_fd(bench_l1i_fd);
     s_bench_start_l1irf = bench_read_fd(bench_l1irf_fd);
     s_bench_start_l2r   = bench_read_fd(bench_l2r_fd);
+    s_bench_start_br = bench_read_fd(bench_br_fd);
+    s_bench_start_brm = bench_read_fd(bench_brm_fd);
     s_bench_start_stallf = bench_read_fd(bench_stallf_fd);
     s_bench_start_stallb = bench_read_fd(bench_stallb_fd);
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
@@ -2405,6 +2442,40 @@ static void bench_tick(void)
               100.0 * s_bench_mux_worst,
               s_bench_mux_worst < 0.95 ?
                   " (counts scaled up to compensate)" : "");
+
+        /*
+         * Re-measurement of the section-A facts that a hardware counter can
+         * move.  Recorded values were IPC 1.80-1.85, ~33 executed host
+         * instructions per guest instruction, and a 0.10% mispredict rate --
+         * all computed while the counters were being scheduled 9-29% of the
+         * time.  Ratios of two counters survive multiplexing only when both
+         * got the same share, which is not guaranteed, so print them together
+         * with the inputs so the arithmetic is checkable.
+         */
+        {
+            uint64_t hi = bench_read_insns() - s_bench_prev_hinsn_base;
+            uint64_t gi = xemu_guest_insn_count - s_bench_start_insn;
+            uint64_t br = bench_read_fd(bench_br_fd) - s_bench_start_br;
+            uint64_t brm = bench_read_fd(bench_brm_fd) - s_bench_start_brm;
+
+            ALOGI("bench: RECHECK host-insn %llu (%llu/frame) | guest-insn "
+                  "%llu (%llu/frame%s) | IPC %.2f",
+                  (unsigned long long)hi,
+                  (unsigned long long)(hi / s_bench_frames_total),
+                  (unsigned long long)gi,
+                  (unsigned long long)(gi / s_bench_frames_total),
+                  g_nochain ? ", EXACT" : ", chain-breaks only -- run "
+                              "debug.xemu.nochain=1 for a true count",
+                  cyc ? (double)hi / (double)cyc : 0.0);
+            {
+                ALOGI("bench: RECHECK branches %llu/frame | mispredicts "
+                      "%llu/frame | rate %.3f%% of branches, %.3f%% of insns",
+                      (unsigned long long)(br / s_bench_frames_total),
+                      (unsigned long long)(brm / s_bench_frames_total),
+                      br ? 100.0 * (double)brm / (double)br : 0.0,
+                      hi ? 100.0 * (double)brm / (double)hi : 0.0);
+            }
+        }
 
         ALOGI("bench: per-frame vs 33.3ms budget | <80%%=%d 80-100%%=%d "
               "100-120%%=%d 120-150%%=%d 150-200%%=%d >200%%=%d | worst %.0f%%",
