@@ -1953,6 +1953,7 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
  * told apart.
  */
 extern int g_ldst_pad_bytes;
+extern int g_reserve_x15;
 
 static void xemu_ldst_pad(TCGContext *s)
 {
@@ -4030,6 +4031,27 @@ static void tcg_target_qemu_prologue(TCGContext *s)
                  TCG_REG_SP, PUSH_SIZE, 0, 1);
     tcg_out_insn(s, 3207, RET, TCG_REG_LR);
 }
+
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * debug.xemu.reserve_x15=1 takes X15 out of the allocatable set, to price the
+ * register pressure an out-of-lined memory access stub would need.
+ *
+ * This MUST run before tcg_reg_alloc_start(), which snapshots reserved_regs
+ * into the allocator's free-register state.  Toggling it afterwards (from
+ * tcg_out_tb_start, where it was first put) leaves the two disagreeing: the
+ * allocator hands out X15 while the constraint logic believes it is reserved,
+ * and the emulator wedges with no output at all.
+ */
+static void xemu_update_reserved_regs(TCGContext *s)
+{
+    if (unlikely(g_reserve_x15)) {
+        tcg_regset_set_reg(s->reserved_regs, TCG_REG_X15);
+    } else {
+        tcg_regset_reset_reg(s->reserved_regs, TCG_REG_X15);
+    }
+}
+#endif
 
 static void tcg_out_tb_start(TCGContext *s)
 {

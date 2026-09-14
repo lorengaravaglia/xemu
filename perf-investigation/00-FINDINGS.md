@@ -1666,3 +1666,59 @@ counter first, before wall time.
 
 Risks unchanged: fixed input/output registers may force moves that eat the 8
 bytes of saving, and the call/return pair must stay predicted.
+
+## AB. BACKEND CHANGE, GROUNDWORK (2026-09-13)
+
+Starting the out-of-lining priced in section AA.  Two prerequisites settled
+before writing the stub.
+
+### X30 is already a TCG temp
+
+`TCG_REG_TMP2` is **X30, the link register**, and it is in `reserved_regs`.  A
+`BL` into a shared stub therefore clobbers a register TCG already treats as
+scratch, so **no spills are needed to preserve the return address** — the
+largest risk flagged in section X is not there.
+
+### Reserving a scratch register is free
+
+The stub's fast path needs about four live values (address, TLB entry pointer,
+comparator, masked address) and only X16/X17 are free once X30 holds the return
+address.  So it needs one more, which means taking a register out of the
+allocatable set — and that costs register pressure everywhere, which shows up
+as spills: more code, the exact thing the change exists to remove.
+
+`debug.xemu.reserve_x15=1` prices it.  Slot 5, 400 frames, first run discarded
+as warm-up:
+
+| X15 reserved | code | L1I miss/frame | Mcyc/frame | vcpu ms |
+|---|---|---|---|---|
+| 1 | 22.83 MB | 3,304,564 | 106.84 | 36.33 |
+| 0 | 22.82 MB | 3,317,252 | 106.79 | 36.35 |
+| 1 | 22.81 MB | 3,310,181 | 106.81 | 36.33 |
+
+**Identical on every counter.**  25 allocatable GPRs is enough slack that giving
+one up is invisible, so the stub may use a reserved scratch and does not need
+the fallback design (saving the return address to an env slot to free X30).
+
+### Design settled
+
+- address in X16, result in X16, X17 + X15 as stub scratch, X30 holds the
+  return address and is passed to the slow-path helper as `retaddr` — which
+  lands inside the calling block, so `cpu_restore_state` still maps it to the
+  right guest PC.
+- one stub per (is_ld, size, mem_index) with `oi` baked in, so the call site is
+  just `mov x16, addr` / `bl stub` / `mov data, x16` — about 12 bytes against
+  the current 36-40.
+- the stub is a single hot location, so its own instruction fetch is nearly
+  free, and section AA measured issue cost at 0.133 cycles per instruction —
+  extra instructions inside the stub are cheap, extra bytes at each call site
+  are not.
+
+### Correction
+
+An earlier run in this session appeared to hang with X15 reserved and was
+attributed first to the reservation and then to an ordering bug between
+`tcg_out_tb_start` and `tcg_reg_alloc_start`.  Neither was true: the device was
+in standby, and `tcg_reg_alloc_start` does not snapshot `reserved_regs` — the
+allocator reads it live, after both hooks.  The toggle was moved earlier anyway
+because it reads more clearly, but it corrected no defect.

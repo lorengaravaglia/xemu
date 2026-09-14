@@ -144,6 +144,7 @@ static void tcg_out_set_borrow(TCGContext *s);
 unsigned long long xemu_op_bytes[XEMU_TCG_NB_OPC];
 int g_tb_pad_bytes;   /* debug.xemu.tb_pad, measurement only */
 int g_ldst_pad_bytes; /* debug.xemu.ldst_pad, measurement only */
+int g_reserve_x15;    /* debug.xemu.reserve_x15, stub prerequisite */
 unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];
 const char *xemu_tcg_op_name(unsigned opc)
 {
@@ -7261,6 +7262,9 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     tb->jmp_insn_offset[0] = TB_JMP_OFFSET_INVALID;
     tb->jmp_insn_offset[1] = TB_JMP_OFFSET_INVALID;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    xemu_update_reserved_regs(s);
+#endif
     tcg_reg_alloc_start(s);
 
     /*
