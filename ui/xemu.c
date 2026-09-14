@@ -1420,6 +1420,56 @@ static int bench_stallb_fd = -1; /* ARM STALL_BACKEND  (raw 0x24) */
  * the DRAM traffic -- which is exactly what 2 MB pages would remove.  These
  * are architected Armv8 PMU events, so they are read raw.
  */
+/*
+ * Multiplexing correction.
+ *
+ * This benchmark opens 15+ counters on a PMU with about 6 programmable slots,
+ * so the kernel time-slices them and each one only counts for a fraction of
+ * the window.  Read raw, every figure came back scaled down by that fraction:
+ * the cycle counter reported an "effective 1.13 GHz" for a thread measured
+ * from outside to be saturating a core held at 3187 MHz.
+ *
+ * PERF_FORMAT_TOTAL_TIME_ENABLED/RUNNING makes the kernel report the window it
+ * wanted to count over and the window it actually got, which is exactly the
+ * factor needed to scale the value back.  Every open site sets it and every
+ * read goes through bench_scale() below.
+ */
+#define BENCH_READ_FORMAT \
+    (PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING)
+
+/* Worst (smallest) running/enabled seen, so the summary can report how heavily
+ * the counters were multiplexed rather than hiding the correction. */
+static double s_bench_mux_worst = 1.0;
+
+static bool bench_pmu_few(void)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+
+    return __system_property_get("debug.xemu.pmu_few", v) > 0 &&
+           (v[0] == '1' || v[0] == 'y' || v[0] == 't');
+}
+
+static uint64_t bench_scale(int fd)
+{
+    uint64_t buf[3] = { 0, 0, 0 };   /* value, time_enabled, time_running */
+    double frac;
+
+    if (fd < 0 || read(fd, buf, sizeof(buf)) != (ssize_t)sizeof(buf)) {
+        return 0;
+    }
+    if (buf[2] == 0) {
+        return 0;                    /* never scheduled; no information */
+    }
+    frac = (double)buf[2] / (double)buf[1];
+    if (frac < s_bench_mux_worst) {
+        s_bench_mux_worst = frac;
+    }
+    if (buf[1] == buf[2]) {
+        return buf[0];               /* had the PMU to itself */
+    }
+    return (uint64_t)((double)buf[0] / frac);
+}
+
 static int bench_open_raw(uint64_t config)
 {
     struct perf_event_attr pe;
@@ -1429,6 +1479,7 @@ static int bench_open_raw(uint64_t config)
     pe.size = sizeof(pe);
     pe.config = config;
     pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
     return (int)syscall(__NR_perf_event_open, &pe, xemu_vcpu_tid, -1, -1, 0);
 }
 
@@ -1444,17 +1495,13 @@ static int bench_open_cache_counter(uint64_t config)
     pe.size = sizeof(pe);
     pe.config = config;
     pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
     return (int)syscall(__NR_perf_event_open, &pe, xemu_vcpu_tid, -1, -1, 0);
 }
 
 static uint64_t bench_read_fd(int fd)
 {
-    uint64_t v = 0;
-
-    if (fd >= 0 && read(fd, &v, sizeof(v)) != sizeof(v)) {
-        v = 0;
-    }
-    return v;
+    return bench_scale(fd);
 }
 
 /*
@@ -1465,12 +1512,7 @@ static uint64_t bench_read_fd(int fd)
  */
 static uint64_t bench_read_insns(void)
 {
-    uint64_t v = 0;
-
-    if (bench_insn_fd >= 0 && read(bench_insn_fd, &v, sizeof(v)) != sizeof(v)) {
-        v = 0;
-    }
-    return v;
+    return bench_scale(bench_insn_fd);
 }
 
 static void bench_open_cycles(void)
@@ -1487,6 +1529,7 @@ static void bench_open_cycles(void)
     pe.config = PERF_COUNT_HW_CPU_CYCLES;
     pe.inherit = 0;
     pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
 
     /* Self-monitoring one of our own threads, which perf_event_paranoid=1
      * permits; cross-process would need the shell helper. */
@@ -1502,6 +1545,7 @@ static void bench_open_cycles(void)
     pe.size = sizeof(pe);
     pe.config = PERF_COUNT_HW_INSTRUCTIONS;
     pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
     bench_insn_fd = (int)syscall(__NR_perf_event_open, &pe,
                                  xemu_vcpu_tid, -1, -1, 0);
 
@@ -1517,6 +1561,19 @@ static void bench_open_cycles(void)
         BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_DTLB,
                         PERF_COUNT_HW_CACHE_OP_READ,
                         PERF_COUNT_HW_CACHE_RESULT_MISS));
+    /*
+     * Everything from here to the stall counters is optional.  Scaling a
+     * counter that only ran 9% of the window is right on average but noisy,
+     * and these numbers now decide strategy, so debug.xemu.pmu_few=1 opens
+     * only the six that matter -- cycles, instructions, L1I-miss, LL-miss and
+     * the two stall counters -- which fits the PMU's programmable slots and
+     * makes them exact.  Cross-check the scaled full set against it before
+     * trusting a number.
+     */
+    if (bench_pmu_few()) {
+        goto core_counters;
+    }
+
     bench_itlb_fd = bench_open_cache_counter(
         BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_ITLB,
                         PERF_COUNT_HW_CACHE_OP_READ,
@@ -1567,19 +1624,29 @@ static void bench_open_cycles(void)
      * waiting on memory.  Which one dominates decides whether the lever is
      * code layout or the dependency structure of the generated code.
      */
+core_counters:
+    if (bench_pmu_few()) {
+        /* L1I misses and last-level misses are the two that carry the
+         * memory story; keep them even in the reduced set. */
+        bench_l1i_fd = bench_open_cache_counter(
+            BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1I,
+                            PERF_COUNT_HW_CACHE_OP_READ,
+                            PERF_COUNT_HW_CACHE_RESULT_MISS));
+        bench_ll_fd = bench_open_cache_counter(
+            BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_LL,
+                            PERF_COUNT_HW_CACHE_OP_READ,
+                            PERF_COUNT_HW_CACHE_RESULT_MISS));
+    }
     bench_stallf_fd = bench_open_raw(0x23);
     bench_stallb_fd = bench_open_raw(0x24);
-    bench_l2r_fd   = bench_open_raw(0x17);   /* L2D_CACHE_REFILL */
+    if (!bench_pmu_few()) {
+        bench_l2r_fd = bench_open_raw(0x17);   /* L2D_CACHE_REFILL */
+    }
 }
 
 static uint64_t bench_read_cycles(void)
 {
-    uint64_t v = 0;
-
-    if (bench_cycles_fd >= 0 && read(bench_cycles_fd, &v, sizeof(v)) != sizeof(v)) {
-        v = 0;
-    }
-    return v;
+    return bench_scale(bench_cycles_fd);
 }
 
 /* Hottest CPU die sensor, in degrees C.  The battery sensor lags by ~25 C and
@@ -2322,12 +2389,22 @@ static void bench_tick(void)
     {
         uint64_t cyc = bench_read_cycles() - s_bench_start_cycles;
 
+        /*
+         * Effective GHz is the validation for the multiplexing correction, not
+         * just a readout: the vCPU thread saturates a core whose frequency can
+         * be read from outside, so this number has a known right answer.  If
+         * it lands near the measured core clock the scaling is working; if it
+         * comes back near 1.1 GHz again the counters are still being read raw.
+         */
         ALOGI("bench: cycles %llu (%llu per frame) | effective %.2f GHz | "
-              "cpu %.1f C",
+              "cpu %.1f C | pmu scheduled %.0f%% of the time%s",
               (unsigned long long)cyc,
               (unsigned long long)(cyc / s_bench_frames_total),
               cpu_ms > 0 ? cyc / (cpu_ms * 1e6) : 0.0,
-              bench_cpu_temp_c());
+              bench_cpu_temp_c(),
+              100.0 * s_bench_mux_worst,
+              s_bench_mux_worst < 0.95 ?
+                  " (counts scaled up to compensate)" : "");
 
         ALOGI("bench: per-frame vs 33.3ms budget | <80%%=%d 80-100%%=%d "
               "100-120%%=%d 120-150%%=%d 150-200%%=%d >200%%=%d | worst %.0f%%",

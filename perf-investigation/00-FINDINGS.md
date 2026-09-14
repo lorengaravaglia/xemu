@@ -380,6 +380,7 @@ From the heavy-frames agent, not yet measured:
 | Return-address-stack prediction | our mispredict rate is 0.10%; X3 already solves it |
 | Hardware-assisted guest MMU (Captive) | requires EL2, unavailable to an Android app |
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
+| Trusting absolute PMU figures from before section U | counters were multiplexed to 9-29%; understated 3-11x |
 | Dynamic spin detection (auto) | detects correctly, but the benchmark has no spin worth eliding; 0.2-0.6 ms/frame worse — section R |
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
 | GPU thread stealing vCPU time by blocking | vCPU shows no wait symbols, 1.26% kernel |
@@ -1203,3 +1204,80 @@ cores hold maximum frequency at 87 C.
 - REP-STRING 67635 iterations/frame across only 3150 instructions (~21 per).
 - MMIO 708 reads + 695 writes/frame, each leaving generated code and taking the
   BQL plus a device lock.
+
+## U. THE PMU WAS UNDER-READING BY 3x, AND IT CHANGES THE ANSWER (2026-09-13)
+
+### The fix
+
+Every counter is opened with `PERF_FORMAT_TOTAL_TIME_ENABLED |
+PERF_FORMAT_TOTAL_TIME_RUNNING` and read through `bench_scale()`, which scales
+by the fraction of the window the kernel actually scheduled it for.  The
+summary now prints that fraction.  `debug.xemu.pmu_few=1` opens only six
+counters as a cross-check.
+
+### Validation
+
+`effective GHz` has a known right answer — the vCPU thread saturates a core
+whose clock is readable from outside — which makes it a test rather than a
+readout:
+
+| | before | after | hardware |
+|---|---|---|---|
+| effective clock | 1.13 GHz | **2.93 GHz** | 2803 / 3187 MHz |
+
+Three independent confirmations:
+1. 95.6 Mcyc/frame at 32.65 ms/frame is exactly 2.93 GHz, and the 33.3 ms
+   budget is 98 Mcyc — the frame now sits just under budget, as fps says.
+2. The cycle-derived budget buckets (`80-100% = 502`) now agree with the
+   wall-time `HIST` (`33-36 ms: 546`).  They contradicted each other before.
+3. Reduced vs full counter set agree within 1-2% on every metric (see below),
+   so the scaling is accurate and not merely unbiased.
+
+The counters were being scheduled only **9-29% of the time**.  Correction
+factors of 3-11x, applied to every absolute PMU figure this project has
+recorded.
+
+### The corrected picture
+
+| metric | reduced set | full set (scaled) |
+|---|---|---|
+| effective clock | 2.93 GHz | 2.93 GHz |
+| cycles/frame | 95.9 M | 95.5 M |
+| **backend stall** | **59.6%** | **59.3%** |
+| frontend stall | 12.6% | 12.7% |
+| L1I miss/frame | 1,905,567 | 1,927,193 |
+| last-level miss/frame | 286,167 | 280,909 |
+| L1D read miss/frame | (not opened) | 216,153 |
+
+### This refutes "issue-bound, not stall-bound"
+
+Section C concluded the emulator was **issue-bound at low ILP** — "78% issuing
+at 2.2 of 6-wide", "not stall-bound" — and that conclusion is why six
+work-removal experiments were expected to measure zero.  It was computed from
+multiplexed counters.
+
+Corrected: **59.3% of cycles are backend stalls and 12.7% frontend stalls.
+Only ~28% of cycles issue at all.**  The emulator is memory-stalled, not
+issue-limited.
+
+The stall budget reconciles with the miss counts:
+- last-level: 281k/frame x ~110 cyc = 31 Mcyc = **32% of the frame**
+- L1I served by L2: ~1.9M/frame, of which only 573k reach L2 refill, so
+  ~1.35M x ~12 cyc = 16 Mcyc = **17% of the frame**
+
+~49% against a measured 59.3% backend stall — the right order, and the
+remainder is ordinary dependency stalling.
+
+**Instruction-side misses outnumber data-side 8.9 to 1** (1.92M vs 216k).  The
+dominant memory cost in this emulator is fetching its own generated code.
+
+### What this means
+
+Codegen density remains the target, but for a different reason than recorded:
+not "fewer issue slots" but **fewer bytes of generated code, so it fits in
+cache**.  That reframes what counts as a win — a change that removes host
+instructions without shrinking the footprint may do nothing, and one that
+shrinks the footprint without removing instructions may still pay.
+
+Re-measure any earlier microarchitectural claim before building on it.  Every
+absolute PMU number recorded before this section is understated by 3-11x.
