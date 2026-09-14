@@ -1533,3 +1533,66 @@ contributing, and that has never been measured.
 on this PMU** — it is unavailable, not genuinely zero, so the instruction-side
 L2 refill share could not be measured directly; the argument above is made from
 the frontend-stall ceiling instead.  Do not read that 0 as data.
+
+## Z. THE 54% IS THE GUEST'S OWN DATA, AND IT IS CLOSED (2026-09-13)
+
+Section Y left the backend stall — 54% of all cycles, 416k last-level misses
+and ~20 MB/frame of DRAM traffic on the vCPU thread — unattributed, with two
+candidates: the guest's own working set, or the NV2A thread evicting the vCPU
+from shared L3.
+
+### Emulator structures are ruled out by size
+
+The softmmu TLB is the only emulator structure on the hot access path: 22 mmu
+indexes x 256 entries x 32 bytes is ~180 KB, which is L2-resident on a core
+with 1 MB of L2.  A 180 KB array cannot generate 318k DRAM misses per frame no
+matter how often it is read.  Same argument disposes of the env block (a few
+KB) and the TB jump cache.  qht and TB lookup are touched only on chain breaks,
+~10k/frame, three orders of magnitude too few.
+
+### L3 contention from the GPU: directly tested, and it is not there
+
+`debug.xemu.surface_scale` changes NV2A pixel work without touching guest
+behaviour — the benchmark still advances a fixed 400 guest frames from slot 5,
+confirmed by `reentry_insns` holding at 7.40-7.46M across arms.  Bracketed
+1x -> 2x -> 1x so drift is visible:
+
+| scale | LL-miss/frame | L1D-miss | L1I-miss | backend | vcpu ms |
+|---|---|---|---|---|---|
+| 1x | 399,362 | 308,513 | 3,327,807 | 55.1% | 36.77 |
+| **2x** (4x pixels) | **418,982** | 316,438 | 3,388,131 | 54.8% | 37.25 |
+| 1x | 409,041 | 307,494 | 3,338,948 | 54.8% | 36.75 |
+
+The 1x repeats bracket the 2x run and differ from each other by 2.4%, so
+**quadrupling GPU pixel work moves vCPU last-level misses by at most a few
+percent, inside the run-to-run spread**, and backend stall % is flat.
+Extrapolating generously, removing *all* GPU traffic would reclaim ~2-5% of
+416k misses = 1-2 Mcyc = 1-2% of the frame.
+
+This supersedes the section D entry that killed the same hypothesis from IPC
+flatness.  That argument depended on "heavy frames have more GPU work", which
+was never verified; this is a direct causal test with the guest workload pinned.
+
+### Conclusion: the data side is not ours
+
+The 54% backend stall is **Halo's own memory access pattern** — ~20 MB/frame
+streamed from a 64 MB guest, which for a game pushing geometry, textures and
+audio through unified RAM at 30 fps is ordinary.  Section A's assumption was
+right, now for a measured reason rather than a circular model.
+
+Nothing we control reduces it.  Huge pages would cut the 8.8k page walks/frame,
+which is not where the time is, and THP is "never" on this device and needs
+root anyway.
+
+### So the remaining budget is
+
+| | share of cycles | addressable |
+|---|---|---|
+| backend stall (guest data DRAM) | 54% | **no** |
+| frontend stall (code fetch) | 21% | **yes — this is the target** |
+| issuing | ~25% | partly, but instructions are free in the stall shadow (section W) |
+
+**The footprint campaign is the best remaining lever, and the ~5% of frame time
+estimate from section Y stands as the realistic prize.**  It is also now the
+*only* open lever of any size, which is worth knowing before committing to a
+TCG backend change.
