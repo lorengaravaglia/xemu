@@ -142,6 +142,8 @@ static void tcg_out_set_borrow(TCGContext *s);
 #if defined(__ANDROID__) || defined(ANDROID)
 #define XEMU_TCG_NB_OPC 512
 unsigned long long xemu_op_bytes[XEMU_TCG_NB_OPC];
+int g_tb_pad_bytes;   /* debug.xemu.tb_pad, measurement only */
+int g_ldst_pad_bytes; /* debug.xemu.ldst_pad, measurement only */
 unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];
 const char *xemu_tcg_op_name(unsigned opc)
 {
@@ -7402,6 +7404,34 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     if (i < 0) {
         return i;
     }
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    /*
+     * debug.xemu.tb_pad=N appends N bytes of NOPs to every block.
+     *
+     * A measurement knob, not an optimisation.  The plan to out-of-line guest
+     * memory access rests on the claim that emitted bytes drive the 3.3M L1I
+     * refills a frame and therefore the 21% frontend stall.  Shrinking the code
+     * to test that is days of backend work; inflating it is a few lines, and
+     * the slope is the same quantity.  The padding sits after the block's last
+     * instruction so it is never executed -- it only spreads the hot blocks
+     * further apart in the buffer, which is exactly the variable of interest,
+     * with no change to what runs.
+     */
+    if (unlikely(g_tb_pad_bytes)) {
+        int pad = g_tb_pad_bytes / 4;
+        int k;
+
+        for (k = 0; k < pad; k++) {
+            if ((void *)s->code_ptr >= s->code_gen_highwater) {
+                break;
+            }
+            tcg_out_nop_fill(s->code_ptr, 1);
+            s->code_ptr++;
+        }
+    }
+#endif
+
     if (!tcg_resolve_relocs(s)) {
         return -2;
     }

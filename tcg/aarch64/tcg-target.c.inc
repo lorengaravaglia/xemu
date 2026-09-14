@@ -1938,6 +1938,36 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
     }
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * debug.xemu.ldst_pad=N emits N bytes of NOPs into the *executed* guest
+ * memory-access sequence.  Measurement only.
+ *
+ * Padding whole blocks (debug.xemu.tb_pad) changed the emitted size by 7.6%
+ * and moved nothing, because those bytes are never fetched: L1I misses track
+ * the code that actually runs, not the code that exists.  The out-of-lining
+ * plan would shorten this sequence, so the way to price it is to lengthen this
+ * sequence and read the slope.  The NOPs do consume issue slots, which is the
+ * confound to keep in mind -- but at IPC 1.7 on a 6-wide core there is room,
+ * and the added instruction count is known exactly, so the two effects can be
+ * told apart.
+ */
+extern int g_ldst_pad_bytes;
+
+static void xemu_ldst_pad(TCGContext *s)
+{
+    int k, n = g_ldst_pad_bytes / 4;
+
+    for (k = 0; k < n; k++) {
+        if ((void *)s->code_ptr >= s->code_gen_highwater) {
+            return;
+        }
+        tcg_out_nop_fill(s->code_ptr, 1);
+        s->code_ptr++;
+    }
+}
+#endif
+
 static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
                          TCGReg addr_reg, MemOpIdx oi)
 {
@@ -1946,6 +1976,11 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
 
     ldst = prepare_host_addr(s, &h, addr_reg, oi, true);
     tcg_out_qemu_ld_direct(s, get_memop(oi), data_type, data_reg, h);
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (unlikely(g_ldst_pad_bytes)) {
+        xemu_ldst_pad(s);
+    }
+#endif
 
     if (ldst) {
         ldst->type = data_type;
@@ -1967,6 +2002,11 @@ static void tgen_qemu_st(TCGContext *s, TCGType data_type, TCGReg data_reg,
 
     ldst = prepare_host_addr(s, &h, addr_reg, oi, false);
     tcg_out_qemu_st_direct(s, get_memop(oi), data_reg, h);
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (unlikely(g_ldst_pad_bytes)) {
+        xemu_ldst_pad(s);
+    }
+#endif
 
     if (ldst) {
         ldst->type = data_type;

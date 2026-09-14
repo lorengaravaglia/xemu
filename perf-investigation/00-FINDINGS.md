@@ -1596,3 +1596,73 @@ root anyway.
 estimate from section Y stands as the realistic prize.**  It is also now the
 *only* open lever of any size, which is worth knowing before committing to a
 TCG backend change.
+
+## AA. PRICING THE OUT-OF-LINING BEFORE BUILDING IT (2026-09-13)
+
+Out-of-lining guest memory access is days of backend work resting on a claim
+about bytes.  Rather than build it and find out, the slope was measured by
+going the other way: make the sequence longer and read what happens.
+
+### First attempt aimed at the wrong quantity
+
+`debug.xemu.tb_pad=N` appends N never-executed NOPs to every block.  At N=64
+the emitted code grew 7.6% (22.99 -> 24.73 MB) and **nothing moved** — L1I
+misses 3.27M/3.36M against bracketing 0-runs of 3.27M and 3.37M, frontend stall
+flat at ~20%.
+
+Because those bytes are never fetched.  **L1I misses track the code that runs,
+not the code that exists**, and the 35.2% from section X is a share of
+*emitted* bytes, which includes cold code.  Two different quantities.
+
+### The right knob gives a clean slope
+
+`debug.xemu.ldst_pad=N` puts N bytes of NOPs inside the executed access
+sequence.  Bracketed 0/16/0/16, averaged:
+
+| | pad=0 | pad=16 | delta |
+|---|---|---|---|
+| host insns/frame | 171.83 M | 193.93 M | **+22.10 M** |
+| L1I miss/frame | 3,305,475 | 3,771,033 | **+465,558 (+14.1%)** |
+| cycles/frame | 105.72 M | 108.67 M | **+2.95 M (+2.8%)** |
+| frontend stall | 20.3% | 21.3% | +1.0 pp |
+
+The 0-runs agree to 0.4% on L1I misses, so the +14.1% is far outside noise.
+
+**It is fetch cost, not issue cost.**  Cycles per added instruction is
+2.95/22.10 = **0.133**, about 1/7.5 — the NOPs are nearly free to issue.  And
++465,558 misses x ~5.8 cyc effective (section Y) = **2.70 Mcyc against 2.95 M
+measured**.  The cycle increase is the extra instruction fetch, essentially
+exactly.
+
+### It also answers the emitted-vs-executed objection
+
++22.10M instructions / 4 NOPs per access = **5.53M executed guest memory
+accesses per frame**.  At ~10 host instructions each that is ~55M of 172M host
+instructions, **32% of executed instructions** — against 35.2% of emitted
+bytes.  The two shares agree, so section X's static measurement was a fair
+proxy after all.
+
+### The prediction for out-of-lining
+
+Slope: **~29,100 L1I misses per byte per access** (465,558 / 16).
+
+The softmmu fast path is 8-9 instructions (32-36 bytes) of code unique to each
+access site.  A shared stub replaces that with a call plus register setup —
+about 8 bytes at the site, with the stub itself a single hot line that stays
+resident.  Net removal of unique fetch is therefore ~24-32 bytes per access:
+
+| removed | L1I misses | cycles | frame time |
+|---|---|---|---|
+| 24 B/access | -700k (-21%) | -4.1 Mcyc | **-3.8%** |
+| 32 B/access | -930k (-28%) | -5.4 Mcyc | **-5.1%** |
+
+So **~4-5% of frame time, 1.5-1.9 ms on slot 5's 36.5 ms** — the section Y
+estimate, now resting on a measured slope instead of a guess, and comfortably
+clear of the +-0.3 ms noise floor.
+
+**Falsifiable:** if the stub version does not cut L1I misses by ~20%+, the
+mechanism is wrong and it should be abandoned rather than tuned.  Watch that
+counter first, before wall time.
+
+Risks unchanged: fixed input/output registers may force moves that eat the 8
+bytes of saving, and the call/return pair must stay predicted.

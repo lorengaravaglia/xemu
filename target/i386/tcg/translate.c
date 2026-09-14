@@ -223,6 +223,40 @@ void x86_refresh_fpu_mode(void)
         }
 
         {
+            extern int g_ldst_pad_bytes;
+            char qv[PROP_VALUE_MAX] = { 0 };
+            int wantq = __system_property_get("debug.xemu.ldst_pad", qv) > 0 ?
+                        atoi(qv) : 0;
+
+            if (wantq < 0 || wantq > 64) {
+                wantq = 0;
+            }
+            if (wantq != g_ldst_pad_bytes) {
+                g_ldst_pad_bytes = wantq;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
+            extern int g_tb_pad_bytes;
+            char pv[PROP_VALUE_MAX] = { 0 };
+            int want = __system_property_get("debug.xemu.tb_pad", pv) > 0 ?
+                       atoi(pv) : 0;
+
+            if (want < 0 || want > 256) {
+                want = 0;
+            }
+            if (want != g_tb_pad_bytes) {
+                g_tb_pad_bytes = want;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
             extern int g_nochain;
             char nv[PROP_VALUE_MAX] = { 0 };
             int want = __system_property_get("debug.xemu.nochain", nv) > 0 &&
