@@ -140,6 +140,27 @@ target_ulong helper_cc_check_subl(target_ulong inlined, target_ulong dst,
     return inlined;
 }
 
+/*
+ * Validation for the inlined CC_OP_LOGICB path.  compute_all_logic ignores its
+ * second argument, so only dst is needed to reproduce the reference.
+ */
+target_ulong helper_cc_check_logicb(target_ulong inlined, target_ulong dst)
+{
+    target_ulong ref = compute_all_logicb(dst, 0);
+
+    xemu_cc_checks++;
+    if (inlined != ref) {
+        if (xemu_cc_bad < 8) {
+            fprintf(stderr, "cc_inline LOGICB MISMATCH: dst=%08x "
+                    "inline=%08x ref=%08x xor=%08x\n",
+                    (uint32_t)dst, (uint32_t)inlined,
+                    (uint32_t)ref, (uint32_t)(inlined ^ ref));
+        }
+        xemu_cc_bad++;
+    }
+    return inlined;
+}
+
 target_ulong helper_cc_compute_all(target_ulong dst, target_ulong src1,
                                    target_ulong src2, int op)
 {

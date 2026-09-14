@@ -387,6 +387,7 @@ From the heavy-frames agent, not yet measured:
 | Return-address-stack prediction | our mispredict rate is 0.10%; X3 already solves it |
 | Hardware-assisted guest MMU (Captive) | requires EL2, unavailable to an Android app |
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
+| Eliminating CC helper calls | 97% removed, 1.1% fewer host insns, ZERO cycles saved — section W |
 | Trusting absolute PMU figures from before section U | counters were multiplexed to 9-29%; understated 3-11x |
 | Dynamic spin detection (auto) | detects correctly, but the benchmark has no spin worth eliding; 0.2-0.6 ms/frame worse — section R |
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
@@ -1351,3 +1352,75 @@ fetching generated code, and neither change reduced the footprint.
 - **45 host instructions per guest instruction** is the headline number for
   codegen density, worse than the ~33 previously believed.
 - Guest workload is **3.56M guest instructions/frame** at 30 fps.
+
+## W. LOGICB INLINE: correct, removes 97% of the calls, buys nothing (2026-09-13)
+
+The capture in section T showed 39.1k CC helper calls/frame with LOGICB 96% of
+them.  Implemented and measured.
+
+### What was built
+
+`gen_inline_eflags_logic()` in `target/i386/tcg/translate.c`, covering
+CC_OP_LOGICB/W/L.  Logic ops define CF, OF and AF as zero, so only PF, ZF and
+SF are live — far cheaper than the existing SUBL inline.  Two width identities
+help: parity always reads the low byte whatever the operand size, and at byte
+width SF is bit 7, already CC_S's position, so it needs a mask and no shift.
+The helper's `parity_table` lookup folds into shift/xor pairs, keeping the
+sequence register-only.
+
+**The important implementation finding:** inlining only the `CC_OP_DYNAMIC`
+case moved calls 39.1k -> 26.8k, with the remainder *still* 96% LOGICB.  Most
+LOGICB consumers are sites where the translator **statically knows** cc_op, so
+they take the `tcg_constant_i32` path and call the helper anyway, bypassing the
+runtime check entirely.  Catching those needs no compare and no branch and is
+strictly less code than the dispatched version.  With both paths: **39.1k ->
+1.1k calls/frame (97% removed).**
+
+Correctness: `debug.xemu.cc_validate=1`, **392,914,398 checks, 0 mismatches.**
+
+### It is a wash
+
+Interleaved A/B on slot 5 (slot 2 is useless for this — it sits at the 30 fps
+pacing ceiling at 33.02 ms/frame, so removed work becomes idle and cannot be
+seen).  Four pairs each direction:
+
+| order | ON vs OFF, wall time |
+|---|---|
+| ON first | ON better 4/4 |
+| **OFF first** | **ON worse 3/4** |
+
+The sign flips with ordering: the second arm of every pair is slower because
+the device is still heating.  **No wall-time effect.**  Order-independent
+counters:
+
+| metric | ON | OFF |
+|---|---|---|
+| CC helper calls/frame | **2,438** | 70,991 |
+| host insns/frame | **175.7 M** (lower in 8/8 pairs) | 177.6 M |
+| **cycles/frame** | **108.4 M** | **108.4 M** |
+| emitted code | 20.2 MB | 20.1 MB |
+
+1.1% of host instructions removed, **zero cycles saved.**
+
+### This is the corrected model's first successful prediction
+
+Section U established 56-59% backend stalls with instruction-side misses
+outnumbering data-side 8.9:1, and section V concluded the lever is *bytes of
+generated code*, not instruction count.  This result is exactly what that
+predicts: the removed instructions were in the shadow of stalls, the footprint
+did not shrink (20.2 vs 20.1 MB), and so nothing was gained.
+
+It also re-derives section A's operational rule from a sounder basis.  The rule
+said removing instructions from the high-IPC bulk pays ~1:1 — that is now
+wrong as stated.  Removing instructions pays only when it removes *stall*
+cycles, which for this emulator means shrinking the code footprint.
+
+### Disposition
+
+**Kept, default on**, `debug.xemu.cc_logic=0` disables.  It is correct, removes
+real work, and does not grow the code buffer, so there is no reason to carry
+the helper calls — but it does **not** advance the 20 fps floor and must not be
+counted as progress toward it.
+
+Do not chase the remaining 1.1k calls/frame (LOGICL 37%, SUBW 35% of a tiny
+remainder).  On these numbers helper-call elimination is finished as a lever.

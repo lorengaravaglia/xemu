@@ -62,6 +62,8 @@ int g_x86_inline_ic = 1;                /* debug.xemu.ic=0 disables */
  * the same format, and the flush means no half-translated block survives.
  */
 int g_cc_inline = 1;        /* debug.xemu.cc_inline=0 disables */
+int g_cc_logic = 1;         /* debug.xemu.cc_logic=0 disables the
+                             * statically-known logic path */
 int g_cc_validate;          /* debug.xemu.cc_validate=1 checks every result */
 
 /*
@@ -291,6 +293,19 @@ void x86_refresh_fpu_mode(void)
                      (iv[0] == '0' || iv[0] == 'n' || iv[0] == 'f'));
         int wantv = (__system_property_get("debug.xemu.cc_validate", vv) > 0 &&
                      (vv[0] == '1' || vv[0] == 'y' || vv[0] == 't'));
+
+        {
+            char lv[PROP_VALUE_MAX] = { 0 };
+            int wantl = !(__system_property_get("debug.xemu.cc_logic", lv) > 0
+                          && (lv[0] == '0' || lv[0] == 'n' || lv[0] == 'f'));
+
+            if (wantl != g_cc_logic) {
+                g_cc_logic = wantl;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
 
         if (want != g_cc_inline || wantv != g_cc_validate) {
             g_cc_inline = want;
@@ -1262,6 +1277,55 @@ static void gen_movs(DisasContext *s, MemOp ot, TCGv dshift)
     gen_op_add_reg(s, s->aflag, R_EDI, dshift);
 }
 
+/*
+ * Inline EFLAGS for CC_OP_LOGICB.
+ *
+ * After CC_OP_SUBL was inlined, LOGICB became 96% of the calls still reaching
+ * helper_cc_compute_all (~37.5k of 39.1k per frame).  Logic ops are far
+ * cheaper to compute than SUB: AND/OR/XOR/TEST define CF, OF and AF as zero,
+ * so only PF, ZF and SF are live.
+ *
+ * Mirrors compute_all_logic (cc_helper_template.h.inc:137) for B/W/L.  Two
+ * things make it cheap: parity always reads the low byte whatever the operand
+ * width, and the helper's parity_table lookup folds into shift/xor pairs, so
+ * this stays register-only with no memory reference.
+ */
+static void gen_inline_eflags_logic(TCGv reg, TCGv dst, int bits)
+{
+    TCGv d = tcg_temp_new();
+    TCGv t = tcg_temp_new();
+    TCGv u = tcg_temp_new();
+
+    tcg_gen_andi_tl(d, dst, bits == 8 ? 0xffu :
+                            bits == 16 ? 0xffffu : 0xffffffffu);
+
+    /* PF always reads the LOW BYTE, whatever the operand width. */
+    tcg_gen_shri_tl(t, d, 4);
+    tcg_gen_xor_tl(t, t, d);
+    tcg_gen_shri_tl(u, t, 2);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_shri_tl(u, t, 1);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_andi_tl(t, t, 1);        /* 1 = odd parity */
+    tcg_gen_xori_tl(t, t, 1);        /* 1 = even parity, which sets PF */
+    tcg_gen_shli_tl(t, t, 2);        /* CC_P */
+
+    /* SF = lshift(dst, 8 - bits) & CC_S: the operand's top bit moved into
+     * CC_S's position.  At byte width that is a plain mask, no shift. */
+    if (bits == 8) {
+        tcg_gen_andi_tl(u, d, 0x80);
+    } else {
+        tcg_gen_shri_tl(u, d, bits - 8);
+        tcg_gen_andi_tl(u, u, 0x80);
+    }
+    tcg_gen_or_tl(t, t, u);
+
+    /* ZF */
+    tcg_gen_setcondi_tl(TCG_COND_EQ, u, d, 0);
+    tcg_gen_shli_tl(u, u, 6);        /* CC_Z */
+    tcg_gen_or_tl(reg, t, u);
+}
+
 /* compute all eflags to reg */
 
 /*
@@ -1372,6 +1436,35 @@ static void gen_mov_eflags(DisasContext *s, TCGv reg)
         }
     }
 
+    /*
+     * Statically known logic op: emit the computation with no dispatch.
+     *
+     * The runtime check below only fires when cc_op is DYNAMIC, but most
+     * LOGICB calls are not -- the translator already knows the op, takes the
+     * tcg_constant_i32 path, and calls the helper anyway.  Inlining the
+     * dynamic case alone only moved 39.1k calls/frame to 26.8k, with the
+     * remainder still 96% LOGICB for exactly this reason.  These sites are the
+     * better ones to catch: no compare, no branch, strictly less code than the
+     * dispatched version.
+     */
+    if (g_cc_inline && g_cc_logic &&
+        (s->cc_op == CC_OP_LOGICB || s->cc_op == CC_OP_LOGICW ||
+         s->cc_op == CC_OP_LOGICL)) {
+        int bits = s->cc_op == CC_OP_LOGICB ? 8 :
+                   s->cc_op == CC_OP_LOGICW ? 16 : 32;
+
+        if (g_cc_validate && bits == 8) {
+            TCGv save_dst = tcg_temp_new();
+
+            tcg_gen_mov_tl(save_dst, dst);
+            gen_inline_eflags_logic(reg, dst, bits);
+            gen_helper_cc_check_logicb(reg, reg, save_dst);
+        } else {
+            gen_inline_eflags_logic(reg, dst, bits);
+        }
+        return;
+    }
+
     if (s->cc_op != CC_OP_DYNAMIC) {
         cc_op = tcg_constant_i32(s->cc_op);
     } else {
@@ -1403,6 +1496,29 @@ static void gen_mov_eflags(DisasContext *s, TCGv reg)
         }
         tcg_gen_br(done);
         gen_set_label(slow);
+
+        /*
+         * LOGICB second, not first: SUBL is still the most common op overall
+         * (94% of flag consumers before it was inlined), and LOGICB's 96% is a
+         * share of the small remainder that SUBL does not already take.
+         */
+        {
+            TCGLabel *slow2 = gen_new_label();
+
+            tcg_gen_brcondi_i32(TCG_COND_NE, cpu_cc_op, CC_OP_LOGICB, slow2);
+            if (g_cc_validate) {
+                TCGv save_dst = tcg_temp_new();
+
+                tcg_gen_mov_tl(save_dst, cpu_cc_dst);
+                gen_inline_eflags_logic(reg, cpu_cc_dst, 8);
+                gen_helper_cc_check_logicb(reg, reg, save_dst);
+            } else {
+                gen_inline_eflags_logic(reg, cpu_cc_dst, 8);
+            }
+            tcg_gen_br(done);
+            gen_set_label(slow2);
+        }
+
         gen_helper_cc_compute_all(reg, dst, src1, src2, cc_op);
         gen_set_label(done);
         return;

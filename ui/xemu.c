@@ -2213,6 +2213,20 @@ static void bench_tick(void)
           xemu_dfe_ops_seen ? 100.0 * xemu_dfe_removed / xemu_dfe_ops_seen : 0.0,
           xemu_dfe_ops_seen);
 
+    /*
+     * Emitted code size.  Section U established that we are stalled fetching
+     * generated code, so a change that removes host instructions but grows the
+     * footprint can lose overall.  Report bytes with the timing rather than
+     * inferring it afterwards.
+     */
+    {
+        extern size_t tcg_code_size(void);
+        extern unsigned long long xemu_tb_exec_count;
+
+        ALOGI("bench: CODE SIZE %.2f MB emitted in the buffer", 
+              tcg_code_size() / (1024.0 * 1024.0));
+    }
+
     ALOGI("bench: CC SWITCHES inline=%d validate=%d fastpath=%d "
           "(if these do not follow the properties, the wiring is broken)",
           g_cc_inline, g_cc_validate, g_cc_fastpath);
