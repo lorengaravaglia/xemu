@@ -2223,7 +2223,57 @@ static void bench_tick(void)
         extern size_t tcg_code_size(void);
         extern unsigned long long xemu_tb_exec_count;
 
-        ALOGI("bench: CODE SIZE %.2f MB emitted in the buffer", 
+        /*
+     * Where the emitted bytes go.  Footprint is the lever (section U/W), so
+     * report the opcodes that own the code buffer, by bytes rather than by
+     * count -- a rare opcode that emits a long sequence matters more here than
+     * a common one that emits four bytes.
+     */
+    {
+        extern unsigned long long xemu_op_bytes[], xemu_op_count[];
+        extern const char *xemu_tcg_op_name(unsigned opc);
+        unsigned long long tot = 0;
+        int i, j, top[10], n = 0;
+
+        for (i = 0; i < 512; i++) {
+            tot += xemu_op_bytes[i];
+        }
+        for (i = 0; i < 512; i++) {
+            if (!xemu_op_bytes[i]) {
+                continue;
+            }
+            for (j = 0; j < n; j++) {
+                if (xemu_op_bytes[i] > xemu_op_bytes[top[j]]) {
+                    break;
+                }
+            }
+            if (j < 10) {
+                int k;
+
+                for (k = (n < 10 ? n : 9); k > j; k--) {
+                    top[k] = top[k - 1];
+                }
+                top[j] = i;
+                if (n < 10) {
+                    n++;
+                }
+            }
+        }
+        ALOGI("bench: CODE BYTES total %.1f MB emitted since boot", 
+              tot / (1024.0 * 1024.0));
+        for (j = 0; j < n; j++) {
+            int o = top[j];
+
+            ALOGI("bench:   %-22s %6.2f%%  %8llu ops  %5.1f bytes/op",
+                  xemu_tcg_op_name(o),
+                  tot ? 100.0 * xemu_op_bytes[o] / tot : 0.0,
+                  xemu_op_count[o],
+                  xemu_op_count[o] ?
+                      (double)xemu_op_bytes[o] / xemu_op_count[o] : 0.0);
+        }
+    }
+
+    ALOGI("bench: CODE SIZE %.2f MB emitted in the buffer", 
               tcg_code_size() / (1024.0 * 1024.0));
     }
 

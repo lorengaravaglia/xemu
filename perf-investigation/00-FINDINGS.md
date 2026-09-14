@@ -1424,3 +1424,61 @@ counted as progress toward it.
 
 Do not chase the remaining 1.1k calls/frame (LOGICL 37%, SUBW 35% of a tiny
 remainder).  On these numbers helper-call elimination is finished as a lever.
+
+## X. WHERE THE EMITTED BYTES GO (2026-09-13)
+
+Sections U-W established that this emulator is backend-stalled with
+instruction-side misses outnumbering data-side 8.9:1, and that removing host
+instructions without shrinking the code footprint buys exactly nothing.  So the
+question became: what owns the footprint?
+
+New instrumentation measures `tcg_current_code_size()` around every op in
+`tcg_gen_code()` and accumulates bytes per TCG opcode (`bench: CODE BYTES`).
+Bytes, not counts: a rare opcode emitting a long sequence matters more here
+than a common one emitting four bytes.
+
+Slot 5, 400 frames, 24.2 MB emitted:
+
+| opcode | % of bytes | ops | bytes/op |
+|---|---|---|---|
+| **qemu_ld** | **18.86%** | 115,297 | **41.6** |
+| **qemu_st** | **16.38%** | 99,490 | **41.8** |
+| add | 11.42% | 439,170 | 6.6 |
+| ld | 8.25% | 324,014 | 6.5 |
+| mov | 6.74% | 389,588 | 4.4 |
+| brcond | 4.52% | 164,555 | 7.0 |
+| st | 4.35% | 179,685 | 6.2 |
+| exit_tb | 3.97% | 130,474 | 7.7 |
+| st8 | 3.48% | 163,240 | 5.4 |
+| mb | 3.38% | 215,016 | 4.0 |
+
+### The finding
+
+**Guest memory access is 35.2% of the entire code footprint**, at ~41.7 bytes
+— about ten AArch64 instructions — per access.  Those 215k ops are under 10% of
+all ops emitted but own a third of the bytes.  Nothing else comes close; the
+next eight opcodes together are 46% and are all already near-minimal at 4-7
+bytes.
+
+This is the same softmmu sequence that section A found to be 71% of *executed*
+JIT instructions, and which fastmem tried and failed to make cheaper.  The
+difference is the reason to care: not the instructions it executes, which are
+absorbed free by a 6-wide core, but the **bytes it occupies**, which is what
+drives 3.3M L1I misses per frame against a 64 KB L1I.
+
+### The implication is a trade the old model forbade
+
+Out-of-lining the access sequence into shared per-size stubs would replace ~10
+inline instructions with a call, cutting perhaps 25% of total footprint while
+*adding* executed instructions.  Under the old "issue-bound" model that was
+strictly bad.  Under the measured one it is the right direction, because
+instructions in the stall shadow are free and bytes are not.
+
+Risks to size up before building it: a stub needs the address and value in
+fixed registers, which constrains the register allocator and may add moves that
+eat the saving; and the call/return pair must stay predicted.
+
+Note also **`mb` is 3.38% of the footprint** (215k barriers, 860 KB).
+Suppressing barriers was measured at zero for *time* (section D) and is still a
+dead end for time — but it is not free in bytes, so it is worth re-testing if
+and only if a footprint campaign is underway.

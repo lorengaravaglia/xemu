@@ -139,6 +139,19 @@ static void tcg_out_mb(TCGContext *s, unsigned bar);
 static void tcg_out_br(TCGContext *s, TCGLabel *l);
 static void tcg_out_set_carry(TCGContext *s);
 static void tcg_out_set_borrow(TCGContext *s);
+#if defined(__ANDROID__) || defined(ANDROID)
+#define XEMU_TCG_NB_OPC 512
+unsigned long long xemu_op_bytes[XEMU_TCG_NB_OPC];
+unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];
+const char *xemu_tcg_op_name(unsigned opc)
+{
+    if (opc >= XEMU_TCG_NB_OPC) {
+        return "?";
+    }
+    return tcg_op_defs[opc].name ? tcg_op_defs[opc].name : "?";
+}
+#endif
+
 static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
                        const TCGArg args[TCG_MAX_OP_ARGS],
                        const int const_args[TCG_MAX_OP_ARGS]);
@@ -7269,6 +7282,16 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     s->carry_live = false;
     QTAILQ_FOREACH(op, &s->ops, link) {
         TCGOpcode opc = op->opc;
+#if defined(__ANDROID__) || defined(ANDROID)
+        /*
+         * Emitted bytes per opcode.  The emulator is backend-stalled with
+         * instruction-side misses outnumbering data-side 8.9:1, so the code
+         * footprint -- not the instruction count -- is what costs time.  This
+         * says which opcodes the 22 MB of generated code is actually spent on,
+         * so footprint work can aim rather than guess.
+         */
+        size_t xemu_bytes_before = tcg_current_code_size(s);
+#endif
 
         switch (opc) {
         case INDEX_op_extrl_i64_i32:
@@ -7347,6 +7370,12 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
             tcg_reg_alloc_op(s, op);
             break;
         }
+#if defined(__ANDROID__) || defined(ANDROID)
+        if (likely(opc < XEMU_TCG_NB_OPC)) {
+            xemu_op_bytes[opc] += tcg_current_code_size(s) - xemu_bytes_before;
+            xemu_op_count[opc]++;
+        }
+#endif
         /* Test for (pending) buffer overflow.  The assumption is that any
            one operation beginning below the high water mark cannot overrun
            the buffer completely.  Thus we can test for overflow after
