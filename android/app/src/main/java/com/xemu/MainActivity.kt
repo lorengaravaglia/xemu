@@ -126,7 +126,7 @@ class MainActivity : ComponentActivity() {
                         OverlaySettingsScreen(navController, settingsViewModel)
                     }
                     composable("settings/advanced") {
-                        AdvancedSettingsScreen(navController)
+                        AdvancedSettingsScreen(navController, settingsViewModel)
                     }
                 }
             }

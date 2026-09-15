@@ -225,13 +225,21 @@ void x86_refresh_fpu_mode(void)
         {
             extern int g_keep_tso_stores;
             char kv[PROP_VALUE_MAX] = { 0 };
-            int wantk = __system_property_get("debug.xemu.tso_stores", kv) > 0
-                        && (kv[0] == '1' || kv[0] == 'y' || kv[0] == 't');
 
-            if (wantk != g_keep_tso_stores) {
-                g_keep_tso_stores = wantk;
-                if (first_cpu) {
-                    queue_tb_flush(first_cpu);
+            /*
+             * Only honour the property when it is actually set.  The setting
+             * is normally driven from the UI through
+             * xemu_android_set_accurate_mem_ordering(), and an unconditional
+             * read here would stomp that back to 0 on the next refresh.
+             */
+            if (__system_property_get("debug.xemu.tso_stores", kv) > 0) {
+                int wantk = (kv[0] == '1' || kv[0] == 'y' || kv[0] == 't');
+
+                if (wantk != g_keep_tso_stores) {
+                    g_keep_tso_stores = wantk;
+                    if (first_cpu) {
+                        queue_tb_flush(first_cpu);
+                    }
                 }
             }
         }

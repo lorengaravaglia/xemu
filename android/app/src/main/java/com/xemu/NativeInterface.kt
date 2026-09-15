@@ -102,6 +102,15 @@ object NativeInterface {
     external fun setSurfaceScale(scale: Int)
 
     /**
+     * Restore the x86 TSO store barriers that are elided on this uniprocessor
+     * guest. Off by default: eliding them removes about two thirds of the
+     * frames that fall below 20 fps. Turn it on only to rule the elision out
+     * as the cause of graphical corruption or audio glitching.
+     * Invalidates all translated code, so there is a brief hitch.
+     */
+    external fun setAccurateMemoryOrdering(enabled: Boolean)
+
+    /**
      * Save current VM state to a named snapshot inside the qcow2 HDD image.
      * Slot name convention: "slot_1" … "slot_8".
      * Blocks briefly while the snapshot is written; call from a background thread

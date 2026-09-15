@@ -153,6 +153,12 @@ Java_com_xemu_NativeInterface_setFilterNearest(JNIEnv *env, jclass clazz, jboole
 }
 
 JNIEXPORT void JNICALL
+Java_com_xemu_NativeInterface_setAccurateMemoryOrdering(JNIEnv *env, jclass clazz,
+                                                       jboolean enabled) {
+    xemu_android_set_accurate_mem_ordering((bool)enabled);
+}
+
+JNIEXPORT void JNICALL
 Java_com_xemu_NativeInterface_setSurfaceScale(JNIEnv *env, jclass clazz, jint scale) {
     xemu_android_set_surface_scale((unsigned int)scale);
 }

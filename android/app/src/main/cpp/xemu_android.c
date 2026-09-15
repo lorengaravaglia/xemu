@@ -1,4 +1,6 @@
 #include "qemu/osdep.h"
+#include "exec/tb-flush.h"
+#include "hw/core/cpu.h"
 #include "xemu_android.h"
 #include <sys/system_properties.h>
 #ifdef HAVE_ADRENOTOOLS
@@ -619,6 +621,32 @@ void xemu_android_get_rumble(uint16_t *left, uint16_t *right)
 void xemu_android_set_surface_scale(unsigned int scale) {
     scale = surface_scale_override(scale);
     g_surface_scale = (scale >= 1 && scale <= 4) ? scale : 1;
+}
+
+/*
+ * "Accurate memory ordering" — restores the x86 TSO store barriers that are
+ * elided on this uniprocessor guest (see accel/tcg/translate-all.c).
+ *
+ * A safety valve rather than a tuning option.  The elision is believed correct
+ * — every guest-to-device handoff was traced and the one unordered path, the
+ * APU's, was fenced explicitly — but a rare ordering bug would show up as
+ * graphical corruption or audio glitching, and a user who hits one needs a way
+ * back without adb.
+ *
+ * Changing it invalidates every translated block, so flush.
+ */
+void xemu_android_set_accurate_mem_ordering(bool enabled) {
+    extern int g_keep_tso_stores;
+
+    if (g_keep_tso_stores == (int)enabled) {
+        return;
+    }
+    g_keep_tso_stores = (int)enabled;
+    if (first_cpu) {
+        queue_tb_flush(first_cpu);
+    }
+    LOGI("accurate memory ordering: %s", enabled ? "on (TSO stores kept)"
+                                                 : "off (stores elided)");
 }
 
 unsigned int xemu_android_get_surface_scale(void) {

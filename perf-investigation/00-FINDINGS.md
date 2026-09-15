@@ -2065,3 +2065,36 @@ introduced here and not fixed here.
 thread, behind a mutex, or behind the fence added in AF.  The store-side
 elision in AE is sound on the surface that exists today, and the gate on
 `smp.max_cpus == 1` keeps it sound if a multiprocessor guest is ever added.
+
+### AF.2 Settings toggle (2026-09-13)
+
+"Accurate memory ordering" under Settings -> Advanced -> Compatibility,
+**off by default**, restoring the TSO store barriers when enabled.
+
+A safety valve, not a tuning option, and the description says so in the user's
+terms rather than the implementation's: the Xbox has one CPU so the ordering
+its games were written against has nothing to observe it, turn this on only if
+you see flickering or corrupted graphics or hear crackling audio, expect a
+brief pause while translated code reloads.
+
+Path: `SettingsViewModel.setAccurateMemOrdering()` ->
+`NativeInterface.setAccurateMemoryOrdering()` ->
+`xemu_android_set_accurate_mem_ordering()`, which sets `g_keep_tso_stores` and
+calls `queue_tb_flush()` because every translated block becomes stale.
+`EmulationActivity` applies the saved preference at start.
+
+**`debug.xemu.tso_stores` is now an override that only applies when the
+property is actually set**, so it cannot stomp the UI value on the next
+property refresh.  One consequence worth remembering: clearing it needs
+`setprop debug.xemu.tso_stores 0`, not setting it to an empty string —
+`__system_property_get` returns 0 for empty, the guard skips, and the previous
+value stays live.  That looked like the elision had silently stopped working
+until the three states were measured against each other.
+
+Verified all three:
+
+| state | vcpu | fps | frames <20 fps |
+|---|---|---|---|
+| default (UI off, no property) | 32.17 ms | 28.55 | 26 |
+| property = 1 (barriers kept) | 36.25 ms | 26.08 | 92 |
+| property = 0 (elided) | 32.25 ms | 28.59 / 29.11 | 27 / 25 |
