@@ -34,12 +34,15 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.unit.dp as composeDp
+import com.xemu.ui.theme.XemuTheme
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import android.widget.EditText
 import android.util.Log
-import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.xemu.MainActivity
 import com.xemu.NativeInterface
 
@@ -362,7 +365,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             mainPrefs.getString("overlay_mode", OverlayMode.AUTO.name) ?: OverlayMode.AUTO.name
         )
 
-        val root = FrameLayout(this)
+        root = FrameLayout(this)
         setContentView(root)
 
         // ── Rendering surface (full screen, behind everything) ────────────────
@@ -411,7 +414,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         ))
 
         // ── Menu button pill (top-right corner) ───────────────────────────────
-        val menuBtn = TextView(this).apply {
+        menuBtn = TextView(this).apply {
             text = "MENU"
             textSize = 13f
             setTextColor(Color.WHITE)
@@ -419,7 +422,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             setPadding(12.dp, 6.dp, 12.dp, 6.dp)
             isClickable = true
             isFocusable = true
-            setOnClickListener { showMenuSheet() }
+            setOnClickListener { showMenuPopup(this) }
         }
         root.addView(menuBtn, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -685,97 +688,111 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (curr > 0.5f  && prev <= 0.5f)  InputRecorder.sendButtonDown(posMask)
     }
 
-    // ── Bottom sheet menu ─────────────────────────────────────────────────────
+    // ── In-game menu ──────────────────────────────────────────────────────────
 
-    private fun showMenuSheet() {
-        val sheet = BottomSheetDialog(this)
+    private var isExiting = false
+    private lateinit var menuBtn: TextView
+    private lateinit var root: FrameLayout
+    private var menuOverlay: View? = null
 
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#1E1E1E"))
-            setPadding(0, 8.dp, 0, 32.dp)
+    /**
+     * Show the menu anchored under the MENU pill.
+     *
+     * This replaced a BottomSheetDialog.  The activity is locked to landscape,
+     * where a bottom sheet opens at its collapsed peek height against a short
+     * viewport, so most of the list sat below the fold and had to be dragged up
+     * every time.
+     *
+     * It is added to the activity's own root rather than shown in a
+     * PopupWindow: a popup gets its own window whose decor view has no
+     * ViewTreeLifecycleOwner, and Compose walks up to the window root to build
+     * its recomposer, so a ComposeView inside one dies with
+     * "ViewTreeLifecycleOwner not found".  Living in the activity's tree also
+     * means the menu is positioned against the same coordinate space as the
+     * button, so it cannot open off-screen.
+     */
+    private fun showMenuPopup(anchor: View) {
+        if (menuOverlay != null) {
+            dismissMenuPopup()
+            return
         }
 
-        // Drag-handle visual
-        container.addView(View(this).apply {
-            background = GradientDrawable().apply {
-                cornerRadius = 4.dp.toFloat()
-                setColor(Color.parseColor("#555555"))
-            }
-            layoutParams = LinearLayout.LayoutParams(40.dp, 4.dp).apply {
-                gravity = Gravity.CENTER_HORIZONTAL
-                topMargin = 8.dp
-                bottomMargin = 16.dp
-            }
-        })
+        val transition = MutableTransitionState(false).apply { targetState = true }
 
-        val overlayLabel = when (overlayMode) {
-            OverlayMode.AUTO        -> "Overlay: Auto"
-            OverlayMode.ALWAYS_SHOW -> "Overlay: Always Show"
-            OverlayMode.ALWAYS_HIDE -> "Overlay: Always Hide"
-        }
+        /* Bound by the screen, not by the content: whatever the menu grows to,
+         * it stays inside the viewport and scrolls instead. */
+        val topPx = anchor.bottom + 8.dp
+        val maxHeightDp =
+            ((resources.displayMetrics.heightPixels - topPx - 16.dp) /
+             resources.displayMetrics.density).composeDp
 
-        fun item(label: String, danger: Boolean = false, action: () -> Unit) {
-            container.addView(sheetItem(label, danger) { sheet.dismiss(); action() })
-        }
-
-        item(overlayLabel)    { cycleOverlayMode() }
-
-        val hrtfOn = mainPrefs.getBoolean("audio_hrtf", false)
-        item(if (hrtfOn) "HRTF: On" else "HRTF: Off") { toggleHrtf() }
-
-        container.addView(sheetDivider())
-
-        item("Save State")    { showSaveStateDialog() }
-        item("Load State")    { showLoadStateDialog() }
-        item("Map Controls")  { startActivity(Intent(this, MappingActivity::class.java)) }
-
-        container.addView(sheetDivider())
-
-        val recordLabel = when {
-            InputRecorder.isRecording -> "Stop Recording"
-            InputRecorder.isPlaying   -> "Recording (playback active)"
-            else                       -> "Start Recording Input"
-        }
-        item(recordLabel)       { toggleRecording() }
-        item("Play Recording")  { showPlayRecordingDialog() }
-
-        container.addView(sheetDivider())
-
-        item("Exit", danger = true) { confirmExit() }
-
-        sheet.setContentView(container)
-        sheet.show()
-    }
-
-    private fun sheetItem(label: String, danger: Boolean, onClick: () -> Unit): TextView {
-        val normalBg = ColorDrawable(Color.TRANSPARENT)
-        val pressedBg = ColorDrawable(Color.argb(40, 255, 255, 255))
-        return TextView(this).apply {
-            text = label
-            textSize = 15f
-            setTextColor(if (danger) Color.parseColor("#FF5252") else Color.WHITE)
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(24.dp, 14.dp, 24.dp, 14.dp)
-            background = StateListDrawable().apply {
-                addState(intArrayOf(android.R.attr.state_pressed), pressedBg)
-                addState(intArrayOf(), normalBg)
-            }
+        val overlay = FrameLayout(this).apply {
+            /* Catches taps outside the menu. */
             isClickable = true
-            isFocusable = true
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            setOnClickListener { onClick() }
+            setOnClickListener { dismissMenuPopup() }
+        }
+
+        val composeView = ComposeView(this).apply {
+            setContent {
+                XemuTheme {
+                    InGameMenu(
+                        initialOverlayLabel = overlayModeLabel(),
+                        initialHrtfOn = mainPrefs.getBoolean("audio_hrtf", false),
+                        recordingLabel = when {
+                            InputRecorder.isRecording -> "Stop Recording"
+                            InputRecorder.isPlaying   -> "Playback active"
+                            else                      -> "Record Input"
+                        },
+                        isRecordingBusy = InputRecorder.isPlaying,
+                        maxHeight = maxHeightDp,
+                        visibleState = transition,
+                        onFullyHidden = { removeMenuOverlay() },
+                        onCycleOverlay = { cycleOverlayMode() },
+                        onToggleHrtf = { toggleHrtf() },
+                        onSaveState = { dismissMenuPopup(); showSaveStateDialog() },
+                        onLoadState = { dismissMenuPopup(); showLoadStateDialog() },
+                        onMapControls = {
+                            dismissMenuPopup()
+                            startActivity(Intent(this@EmulationActivity,
+                                                 MappingActivity::class.java))
+                        },
+                        onToggleRecording = { dismissMenuPopup(); toggleRecording() },
+                        onPlayRecording = { dismissMenuPopup(); showPlayRecordingDialog() },
+                        onExit = { dismissMenuPopup(); confirmExit() },
+                    )
+                }
+            }
+        }
+
+        overlay.addView(composeView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.END,
+        ).apply { topMargin = topPx; rightMargin = 16.dp })
+
+        root.addView(overlay, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+        ))
+        menuOverlay = overlay
+        menuTransition = transition
+    }
+
+    private var menuTransition: MutableTransitionState<Boolean>? = null
+
+    /** Starts the close animation; the view is removed in [removeMenuOverlay]
+     *  once it finishes, so the menu shrinks back into the button. */
+    private fun dismissMenuPopup() {
+        menuTransition?.targetState = false
+        if (menuTransition == null) {
+            removeMenuOverlay()
         }
     }
 
-    private fun sheetDivider(): View = View(this).apply {
-        setBackgroundColor(Color.parseColor("#333333"))
-        layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 1
-        ).apply { setMargins(0, 4.dp, 0, 4.dp) }
+    private fun removeMenuOverlay() {
+        menuOverlay?.let { root.removeView(it) }
+        menuOverlay = null
+        menuTransition = null
     }
 
     // ── Save / load state dialogs ─────────────────────────────────────────────
@@ -871,7 +888,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             .ifEmpty { "game" }
     }
 
-    private fun cycleOverlayMode() {
+    /** Cycles the overlay mode and returns the new label, so the menu can
+     *  update without being dismissed and reopened. */
+    private fun cycleOverlayMode(): String {
         overlayMode = when (overlayMode) {
             OverlayMode.AUTO        -> OverlayMode.ALWAYS_SHOW
             OverlayMode.ALWAYS_SHOW -> OverlayMode.ALWAYS_HIDE
@@ -879,6 +898,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         }
         mainPrefs.edit().putString("overlay_mode", overlayMode.name).apply()
         updateOverlayVisibility()
+        return overlayModeLabel()
+    }
+
+    private fun overlayModeLabel(): String = when (overlayMode) {
+        OverlayMode.AUTO        -> "Auto"
+        OverlayMode.ALWAYS_SHOW -> "Always"
+        OverlayMode.ALWAYS_HIDE -> "Hidden"
     }
 
     /**
@@ -886,21 +912,49 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
      * frame, so it applies immediately and can be A/B'd while a game is
      * running.  Shares the "audio_hrtf" pref with the Audio settings screen.
      */
-    private fun toggleHrtf() {
+    private fun toggleHrtf(): Boolean {
         val enabled = !mainPrefs.getBoolean("audio_hrtf", false)
         mainPrefs.edit().putBoolean("audio_hrtf", enabled).apply()
         NativeInterface.setHrtf(enabled)
-        Toast.makeText(this, if (enabled) "HRTF on" else "HRTF off",
-                       Toast.LENGTH_SHORT).show()
+        return enabled
     }
 
     private fun confirmExit() {
         AlertDialog.Builder(this)
-            .setTitle("Exit Emulation")
+            .setTitle("Exit to Library")
             .setMessage("Return to the game library?\n\nUnsaved game progress will be lost.")
-            .setPositiveButton("Exit") { _, _ -> NativeInterface.requestExit() }
+            .setPositiveButton("Exit") { _, _ -> exitToLibrary() }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /**
+     * Leave emulation and return to the library.
+     *
+     * The old path called requestExit(), which flushes and then _exit(0)s the
+     * emulation process from under the activity — the window dies mid-frame and
+     * it reads as the app falling over rather than navigating back.
+     *
+     * Flush first, off the UI thread because the call blocks on the QEMU main
+     * loop, then finish() so the normal activity transition plays and
+     * MainActivity resumes.  Only after that does the process go: QEMU cannot
+     * be re-initialised in a process that has already run it, so the next
+     * launch needs a fresh one.
+     */
+    private fun exitToLibrary() {
+        if (isExiting) return
+        isExiting = true
+        Toast.makeText(this, "Saving\u2026", Toast.LENGTH_SHORT).show()
+        Thread {
+            NativeInterface.flushBlockDevices()
+            runOnUiThread {
+                finish()
+                /* Let the transition render before the process disappears. */
+                window.decorView.postDelayed({
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                }, 350)
+            }
+        }.start()
     }
 
     // ── Emulation start ───────────────────────────────────────────────────────
@@ -984,7 +1038,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             ControllerMapping.HotkeyFunction.SLOT_PREV     -> changeQuickSaveSlot(-1)
             ControllerMapping.HotkeyFunction.SCREENSHOT    -> takeScreenshot()
             ControllerMapping.HotkeyFunction.TOGGLE_PAUSE  -> toggleUserPause()
-            ControllerMapping.HotkeyFunction.OPEN_MENU     -> showMenuSheet()
+            ControllerMapping.HotkeyFunction.OPEN_MENU     -> showMenuPopup(menuBtn)
             ControllerMapping.HotkeyFunction.CYCLE_OVERLAY -> cycleOverlayMode()
             ControllerMapping.HotkeyFunction.TOGGLE_FPS    -> toggleFpsOverlay()
         }

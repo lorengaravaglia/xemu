@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Overriding android:background on the dialog theme replaces Material's own
+    background drawable, which is where the rounded corners came from. This
+    restores them on the dark surface.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+       android:shape="rectangle">
+    <solid android:color="@color/xemu_surface" />
+    <corners android:radius="16dp" />
+</shape>

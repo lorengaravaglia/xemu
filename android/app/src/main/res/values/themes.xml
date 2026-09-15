@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        The app used Theme.AppCompat.Light.NoActionBar, which is why every
+        View-based dialog came out white on top of a dark UI.  MainActivity and
+        MappingActivity are pure Compose and paint their own dark scheme, so the
+        light theme was only ever visible through EmulationActivity's dialogs
+        and as a white flash behind activity transitions.
+
+        Dark base, with the Xbox green from XemuTheme as the accent so the
+        View-side dialogs read as part of the same app as the Compose screens.
+    -->
+    <style name="Theme.Xemu" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/xbox_green</item>
+        <item name="colorPrimaryDark">@color/xbox_green_dark</item>
+        <item name="colorAccent">@color/xbox_green_light</item>
+        <item name="android:colorBackground">@color/xemu_background</item>
+        <item name="colorSurface">@color/xemu_surface</item>
+        <item name="materialAlertDialogTheme">@style/Theme.Xemu.Dialog</item>
+        <item name="alertDialogTheme">@style/Theme.Xemu.Dialog</item>
+    </style>
+
+    <!-- Dialogs sit over a running game, so they follow the dark surface. -->
+    <style name="Theme.Xemu.Dialog" parent="ThemeOverlay.MaterialComponents.MaterialAlertDialog">
+        <item name="colorPrimary">@color/xbox_green_light</item>
+        <item name="colorAccent">@color/xbox_green_light</item>
+        <item name="android:background">@drawable/dialog_background</item>
+        <item name="colorSurface">@color/xemu_surface</item>
+        <item name="android:textColorPrimary">@android:color/white</item>
+        <item name="android:textColorSecondary">#CCCCCC</item>
+        <!--
+            The slot pickers list eight items. At the default row height that
+            runs off the bottom in landscape, the same way the old bottom-sheet
+            menu did, so the last slot could not be reached without scrolling.
+        -->
+        <item name="listPreferredItemHeightSmall">44dp</item>
+        <item name="android:listPreferredItemHeightSmall">44dp</item>
+        <item name="android:textAppearanceMedium">@style/TextAppearance.Xemu.DialogItem</item>
+    </style>
+
+    <style name="TextAppearance.Xemu.DialogItem"
+           parent="TextAppearance.AppCompat.Subhead">
+        <item name="android:textSize">15sp</item>
+        <item name="android:textColor">@android:color/white</item>
+    </style>
+</resources>
