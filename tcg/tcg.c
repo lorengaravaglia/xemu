@@ -152,6 +152,7 @@ int g_reserve_x15;    /* debug.xemu.reserve_x15, stub prerequisite */
  * zero.  See section AC.  Enable with debug.xemu.ldst_stub=1.
  */
 int g_ldst_stub;
+int g_mb_mode;        /* debug.xemu.mb_mode, measurement only */
 unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];
 const char *xemu_tcg_op_name(unsigned opc)
 {

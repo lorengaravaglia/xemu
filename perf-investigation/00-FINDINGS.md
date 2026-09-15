@@ -1799,3 +1799,76 @@ Worth doing only if 2% is worth a constraint change that may itself cost moves
 elsewhere — the allocator will insert its own when it cannot satisfy a fixed
 register.  **Kept, default off**, so the measurement stands and the code is
 there if that is attempted.
+
+## AD. THE BARRIERS ARE THE BIGGEST THING LEFT (2026-09-13)
+
+`debug.xemu.mb_mode`: 0 normal, 1 emit a NOP in place of the DMB, 2 emit
+nothing.  Mode 1 holds instruction count and code size fixed and removes only
+the ordering constraint, which isolates memory-level parallelism from
+instruction cost — the separation the out-of-lining experiment failed to make.
+
+### Result
+
+Slot 5, 400 frames, alternating:
+
+| mode | backend | frontend | Mcyc | LL-miss | vcpu | frames >50ms |
+|---|---|---|---|---|---|---|
+| 0 normal | 52.0% | 19.8% | 104.87 | 403,522 | 35.70 | 95 |
+| **1 NOP** | **23.5%** | 15.5% | 95.08 | 363,381 | **32.45** | **22** |
+| 2 omit | 23.6% | 15.9% | 94.68 | 364,139 | 32.52 | 28 |
+| 0 normal | 52.5% | 19.9% | 106.51 | 409,559 | 36.25 | 101 |
+| **1 NOP** | **22.9%** | 16.0% | 92.86 | 362,542 | **32.33** | **20** |
+| 2 omit | 22.6% | 16.1% | 91.57 | 359,086 | 32.25 | 30 |
+
+**Backend stall 52% -> 23%.  Frames below 20 fps 95-101 -> 20-30, a 78%
+reduction.**  Mode 1 and mode 2 are indistinguishable, so this is the ordering
+constraint, not the instruction.
+
+### The guest is doing the same work
+
+Chained runs showed host instructions apparently doubling, which would have
+meant the guest had taken a different path and the comparison was void.  Run
+again under `nochain=1`, where the guest instruction count is exact:
+
+| mode | guest-insn/frame (EXACT) | host-insn/frame | vcpu |
+|---|---|---|---|
+| 0 | 10,607,467 | 711,281,141 | 102.05 |
+| 1 | 10,670,446 | 710,991,136 | 77.95 |
+| 0 | 10,694,094 | 717,299,979 | 103.80 |
+
+Guest instructions agree within 0.8% and host instructions within 0.9%, with
+the two baselines bracketing the NOP run: **identical work, 24% less time.**
+The doubling seen in the chained runs is unexplained and should be treated as a
+counter artifact until someone accounts for it — it does not appear here, where
+the controlled quantities are measured directly.
+
+### Why this is probably fixable rather than just measurable
+
+`tcg_gen_req_mo()` (tcg/tcg-op-ldst.c:129) runs before every guest access and
+emits a barrier when the guest's memory model is stronger than the host's —
+x86 TSO on weakly-ordered AArch64.  `guest_mo` is taken unconditionally from
+`guest_default_memory_order` in translate-all.c:345, **with no reference to how
+many vCPUs exist**.
+
+`hw/xbox/xbox.c:452` sets `m->max_cpus = 1`.  **The Xbox is uniprocessor.**
+TSO describes what one guest CPU may observe of another's stores, and here
+there is no other guest CPU — so these barriers are modelling an ordering that
+has no observer.
+
+That reframes the change: not "drop ordering the guest is entitled to", but
+"stop emitting ordering for an observer that does not exist".  The remaining
+correctness question is narrow and concrete: the NV2A reads guest RAM from
+another host thread, so the question is whether device DMA can observe vCPU
+stores reordered in a way that matters, given that the guest kicks the GPU
+through MMIO and the pushbuffer, which are serialised by the device lock rather
+than by these barriers.
+
+### Status
+
+**Measurement only for now** (`mb_mode` defaults to 0).  This is the largest
+effect found in the entire investigation and the only one that moves the 54%
+backend stall, which sections Y and Z had concluded was closed.  Those sections
+were right that the *misses* are the guest's own — LL misses barely move
+(403k -> 363k).  What changes is the cost of each one: with the barriers gone
+the misses overlap, which is exactly the memory-level-parallelism mechanism the
+test was built to isolate.

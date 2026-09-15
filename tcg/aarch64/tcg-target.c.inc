@@ -1720,6 +1720,37 @@ static void tcg_out_mb(TCGContext *s, unsigned a0)
         [TCG_MO_LD_ST]                = DMB_ISH | DMB_LD,
         [TCG_MO_LD_ST | TCG_MO_LD_LD] = DMB_ISH | DMB_LD,
     };
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    /*
+     * debug.xemu.mb_mode.  A MEASUREMENT ONLY -- modes 1 and 2 drop ordering
+     * the guest is entitled to, and the NV2A runs on another thread, so
+     * neither is shippable as-is.
+     *
+     *   0  normal
+     *   1  emit a NOP in place of the DMB
+     *   2  emit nothing
+     *
+     * Mode 1 is the point.  Suppressing barriers was measured at zero before,
+     * but on wall time with counters reading 0.4x, and the explanation given
+     * for it came from the circular model retracted in section V.  The
+     * hypothesis now is different in kind: a DMB between two independent
+     * misses serialises two overlapping ~110-cycle DRAM trips, so it costs
+     * memory-level parallelism rather than instructions.  That matters here
+     * only because 54% of cycles are DRAM stalls.
+     *
+     * Holding the instruction count fixed with a NOP separates the two
+     * effects, which is exactly what the out-of-lining experiment failed to do
+     * and why its prediction came out wrong.  Mode 2 then prices the
+     * instruction and byte saving on top.
+     */
+    if (unlikely(g_mb_mode)) {
+        if (g_mb_mode == 1) {
+            tcg_out32(s, NOP);
+        }
+        return;
+    }
+#endif
     tcg_out32(s, sync[a0 & TCG_MO_ALL]);
 }
 
@@ -1955,6 +1986,7 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
 extern int g_ldst_pad_bytes;
 extern int g_reserve_x15;
 extern int g_ldst_stub;
+extern int g_mb_mode;
 
 static void xemu_ldst_pad(TCGContext *s)
 {
