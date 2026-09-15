@@ -2098,3 +2098,56 @@ Verified all three:
 | default (UI off, no property) | 32.17 ms | 28.55 | 26 |
 | property = 1 (barriers kept) | 36.25 ms | 26.08 | 92 |
 | property = 0 (elided) | 32.25 ms | 28.59 / 29.11 | 27 / 25 |
+
+## AG. LIVE COMBAT, AFTER (2026-09-13)
+
+Slot 2 played by hand through the combat section, ~70 s, with the shipping
+configuration: store-side TSO barriers elided, APU handoff fenced, notifier
+release added.  Compared against the same section captured in section T before
+any of this work.
+
+| | before (section T) | after |
+|---|---|---|
+| fps | 27.96 | **28.77** |
+| vcpu ms/frame | 34.22 | **32.94** (under the 33.33 budget) |
+| **frames <20 fps** | 242 / 2000 | **161 (-33%)** |
+| **frames <15 fps** | 62 | **28 (-55%)** |
+| mean frame | 35.8 ms | 34.8 ms |
+| slow/fast work ratio | 1.65x | 1.60x |
+| worst frame | 118 ms | 149 ms |
+
+### The shape changed, which is the part that matters
+
+Section T's `SLOWGAPS`: `1 1 1 1 1 1 1 1 1 1 1 2 1 1 ...` — slow frames almost
+entirely consecutive, a sustained heavy regime.
+
+Now: `17 18 19 22 1 4 2 12 2 4 10 7 28 50 9 12 21 32` then a shorter run of 1s
+and 2s, then `6 9 3 5 29 26 40 2 1 1`.  Mostly isolated slow frames with a few
+clusters left.  A one-frame dip is a stutter; twenty consecutive is the game
+becoming unplayable, and that is what has largely gone.
+
+The histogram agrees: 50-60 ms falls 161 -> 121, 60-80 ms falls 61 -> 26, and
+the 30-33 ms bucket goes 0 -> 43 as frames start finishing with headroom.
+
+### Caveats
+
+- **The absolute Mcyc figures are not comparable across these two captures.**
+  Section T predates the PMU multiplexing fix, so its counters read ~0.4x.  Its
+  fast-frame figure of 35.4 Mcyc against 91.4 now is instrument, not workload.
+  The ratio within each run (1.65 vs 1.60) is comparable; the absolutes are not.
+  Everything else here is wall-clock and unaffected.
+- **Not a controlled comparison.**  A human plays the section differently each
+  time, so this is two samples of a scene, not a paired measurement.  The
+  direction and magnitude are clear but the precise percentages are not exact.
+- **The worst frame got worse** (118 -> 149 ms).  With 2000 frames and live
+  input the single worst frame is not a stable statistic, and the count of slow
+  frames -- which is stable -- moved firmly the other way.
+
+### Live gain is smaller than the benchmark's
+
+The slot-5 benchmark showed sub-20 fps frames down 67%; live combat shows 33%.
+The benchmark is a fixed scene with no input, so its cost is dominated by the
+steady-state work the barriers were taxing.  Live combat adds input-driven
+bursts -- AI, projectiles, particles, extra voices -- that the barriers were
+never the limit on.  The benchmark number is the ceiling for this change; 33%
+is what it is worth in the case that actually prompted the work.
