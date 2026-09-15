@@ -70,6 +70,29 @@ static void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
 
     trace_mcpx_apu_reg_write(addr, size, val);
 
+    /*
+     * Release the guest's preceding writes before the register update that
+     * announces them.
+     *
+     * The guest fills a voice or buffer in RAM and then writes an APU
+     * register; the APU frame thread reads that register and follows it into
+     * guest RAM through d->ram_ptr.  Unlike the NV2A's PFIFO path, this
+     * handoff takes no lock -- the register accesses here are qatomic_set(),
+     * which is a RELAXED store and orders nothing.
+     *
+     * That worked only because x86 TSO made the guest's stores reach memory in
+     * program order, and generated code no longer provides it on this host
+     * (see translate-all.c: store-side barriers are elided on a uniprocessor
+     * guest).  Without this fence the register write can become visible to the
+     * APU thread before the sample data it refers to, and the thread reads
+     * stale or half-written audio.
+     *
+     * One barrier per APU register write, against the ~5.5M per frame the
+     * generated code was paying.  Pairs with the smp_rmb() in
+     * mcpx_apu_frame_thread().
+     */
+    smp_wmb();
+
     switch (addr) {
     case NV_PAPU_ISTS:
         /* the bits of the interrupts to clear are written */
@@ -270,6 +293,15 @@ static void *mcpx_apu_frame_thread(void *arg)
         int xcntmode = GET_MASK(qatomic_read(&d->regs[NV_PAPU_SECTL]),
                                 NV_PAPU_SECTL_XCNTMODE);
         uint32_t fectl = qatomic_read(&d->regs[NV_PAPU_FECTL]);
+
+        /*
+         * Acquire: pairs with the smp_wmb() in mcpx_apu_write().  The register
+         * reads above decide whether to process this frame, and processing
+         * follows d->ram_ptr into guest RAM, so those loads must not be
+         * hoisted above the register reads that authorise them.
+         */
+        smp_rmb();
+
         if (xcntmode == NV_PAPU_SECTL_XCNTMODE_OFF ||
             (fectl & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) ||
             (fectl & NV_PAPU_FECTL_FEMETHMODE_HALTED)) {

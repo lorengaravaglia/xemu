@@ -1944,3 +1944,74 @@ graphical corruption or a hang from device DMA observing stores out of order,
 in some path that does not go through the PFIFO kick analysed above.  Audio
 (APU/DSP reading guest RAM) has not been traced the way PFIFO was and is the
 most likely place for a gap.
+
+## AF. DEVICE AUDIT AND THE APU FENCE (2026-09-13)
+
+Section AE elided the store-side TSO barriers on the argument that guest ->
+device ordering comes from device locks.  That argument was only traced for the
+NV2A's PFIFO.  This audits every device that can read guest RAM off the vCPU
+thread and closes the one gap.
+
+### The audit
+
+Devices holding a direct guest-RAM pointer (`memory_region_get_ram_ptr`):
+`apu.c` (`d->ram_ptr`), `nv2a.c` (`vram_ptr`, `ramin_ptr`), the VGA alias, and
+`chihiro.c` — the last being ROM loading at init, on no thread.
+
+Threads that could follow one: `nv2a.pfifo_thread`, `mcpx.apu_thread`,
+`mcpx.voice_worker` (several), and `pgraph.shader_cache` /
+`shader_write_to_disk`, which only touch host files.
+
+| path | ordered by | verdict |
+|---|---|---|
+| guest -> PFIFO -> pgraph | `d->pfifo.lock` + condvar; MMIO handler runs on the vCPU thread | safe |
+| apu_thread -> voice workers | `vwd->lock` + `work_pending`/`work_finished` | safe |
+| **guest -> apu_thread** | **nothing** | **gap** |
+
+### The gap
+
+`mcpx_apu_write()` never takes `d->lock`.  It updates registers with
+`qatomic_set()`, which is a **relaxed** store and orders nothing.  So the guest
+fills a voice buffer in RAM, writes an APU register, and the frame thread reads
+that register and follows `d->ram_ptr` into RAM — with no happens-before edge
+between the data and the announcement.
+
+This worked before only because x86 TSO made the guest's stores reach memory in
+program order, and section AE removed exactly that.  The window is narrow and a
+few minutes of play will not reliably hit it, which is precisely why it needed
+finding by reading rather than by testing.
+
+### The fix
+
+`smp_wmb()` at the top of `mcpx_apu_write()`, paired with `smp_rmb()` in
+`mcpx_apu_frame_thread()` after the control-register reads that authorise
+processing.  That is the release/acquire pair the lock was providing for PFIFO.
+
+**Two barriers per APU register write, against ~5.5M per frame in generated
+code.**  Cost is unmeasurable:
+
+| | cycles/frame | vcpu | fps | frames <20fps |
+|---|---|---|---|---|
+| barriers kept | 109.65 M | 37.66 ms | 25.01 | 124.5 |
+| **elided + APU fences** | **95.2 M** | **33.10 ms** | **28.19** | **44.7** |
+
+95.2 M against 93.85 M measured before the fences, with the <20 fps counts
+overlapping (39-51 across runs).  **Sub-20 fps frames remain 64% down.**
+
+### The general lesson
+
+The barriers were paying for correctness that should be stated explicitly at
+the handoff points.  Five and a half million barriers a frame were standing in
+for a release/acquire pair per device kick — one of which existed (PFIFO's
+mutex) and one of which did not (the APU).  Making the requirement explicit is
+both faster and clearer about what is actually guaranteed.
+
+### Remaining exposure
+
+The load-side barriers are still emitted, so device -> guest message passing
+keeps x86 ordering.  VGA reads the framebuffer while the guest writes it, but
+that races on real hardware too and costs at most tearing.  What has *not* been
+proven is that no other guest -> device handoff exists outside the PFIFO and
+APU register paths; the audit covered every thread and every RAM pointer in
+`hw/xbox`, which is the whole surface unless a device reaches guest memory
+through `address_space_*` from its own thread.
