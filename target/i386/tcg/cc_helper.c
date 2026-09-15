@@ -73,9 +73,114 @@ target_ulong helper_cc_compute_nz(target_ulong dst, target_ulong src1,
     }
 }
 
+/*
+ * Which CC_OPs actually reach the full helper.  helper_cc_compute_all is 31%
+ * of libxemu cycles (~4.3% of vCPU); the fix is to add gen_prepare_cc fast
+ * paths so common cases never call it, but that is only worth doing for the
+ * ops that dominate here.  Measurement build only.
+ */
+unsigned long long xemu_ccop_hist[CC_OP_DYNAMIC + 1];
+int g_cc_fastpath = 1;      /* debug.xemu.cc_fastpath=0 disables, for A/B */
+const int xemu_ccop_nb = CC_OP_DYNAMIC + 1;
+
+const char *xemu_ccop_name(int op);
+const char *xemu_ccop_name(int op)
+{
+    static __thread char bufs[4][24];
+    static __thread unsigned turn;
+    char *buf = bufs[turn++ & 3];
+    static const char *const fam[] = {
+        "MUL", "ADD", "ADC", "SUB", "SBB", "LOGIC",
+        "INC", "DEC", "SHL", "SAR", "BMILG", "BLSI",
+    };
+    static const char sz[] = { 'B', 'W', 'L', 'Q' };
+
+    if (op == CC_OP_EFLAGS) {
+        return "EFLAGS";
+    }
+    if (op == CC_OP_DYNAMIC) {
+        return "DYNAMIC";
+    }
+    if (op >= CC_OP_MULB) {
+        unsigned k = (unsigned)(op - CC_OP_MULB);
+
+        if (k / 4 < ARRAY_SIZE(fam)) {
+            snprintf(buf, sizeof(bufs[0]), "%s%c", fam[k / 4], sz[k % 4]);
+            return buf;
+        }
+    }
+    snprintf(buf, sizeof(bufs[0]), "op%d", op);
+    return buf;
+}
+
+unsigned long long xemu_cc_checks, xemu_cc_bad;
+
+/*
+ * Validation for the inlined CC_OP_SUBL path: recompute with the helper and
+ * compare.  Flag computation decides every conditional branch, so the inline
+ * version is checked against the reference on real workloads before it is
+ * trusted.  Returns the inline value unchanged so behaviour is identical
+ * either way; enable with debug.xemu.cc_validate=1.
+ */
+target_ulong helper_cc_check_subl(target_ulong inlined, target_ulong dst,
+                                  target_ulong src1)
+{
+    target_ulong ref = compute_all_subl(dst, src1);
+
+    xemu_cc_checks++;
+    if (inlined != ref) {
+        if (xemu_cc_bad < 8) {
+            fprintf(stderr, "cc_inline MISMATCH: dst=%08x src1=%08x "
+                    "inline=%08x ref=%08x xor=%08x\n",
+                    (uint32_t)dst, (uint32_t)src1, (uint32_t)inlined,
+                    (uint32_t)ref, (uint32_t)(inlined ^ ref));
+        }
+        xemu_cc_bad++;
+    }
+    return inlined;
+}
+
+/*
+ * Validation for the inlined CC_OP_LOGICB path.  compute_all_logic ignores its
+ * second argument, so only dst is needed to reproduce the reference.
+ */
+target_ulong helper_cc_check_logicb(target_ulong inlined, target_ulong dst)
+{
+    target_ulong ref = compute_all_logicb(dst, 0);
+
+    xemu_cc_checks++;
+    if (inlined != ref) {
+        if (xemu_cc_bad < 8) {
+            fprintf(stderr, "cc_inline LOGICB MISMATCH: dst=%08x "
+                    "inline=%08x ref=%08x xor=%08x\n",
+                    (uint32_t)dst, (uint32_t)inlined,
+                    (uint32_t)ref, (uint32_t)(inlined ^ ref));
+        }
+        xemu_cc_bad++;
+    }
+    return inlined;
+}
+
 target_ulong helper_cc_compute_all(target_ulong dst, target_ulong src1,
                                    target_ulong src2, int op)
 {
+    if ((unsigned)op <= CC_OP_DYNAMIC) {
+        xemu_ccop_hist[op]++;
+    }
+
+    /*
+     * 94% of calls here are CC_OP_SUBL -- a plain 32-bit compare -- because
+     * cc_op resets to CC_OP_DYNAMIC at every TB entry, so the first flag
+     * consumer in a block cannot use the translator's fast paths.  Testing
+     * for it before the switch costs one compare and skips the dispatch.
+     * This isolates how much of the helper's cost is dispatch rather than
+     * call overhead, which decides whether inlining the computation into
+     * generated code is worth the code growth.
+     */
+    if (g_cc_fastpath && op == CC_OP_SUBL) {
+        return compute_all_subl(dst, src1);
+    }
+
     switch (op) {
     default: /* should never happen */
         return 0;

@@ -1,3 +1,9 @@
+DEF_HELPER_FLAGS_3(cc_check_subl, TCG_CALL_NO_RWG, tl, tl, tl, tl)
+DEF_HELPER_FLAGS_2(cc_check_logicb, TCG_CALL_NO_RWG, tl, tl, tl)
+/* NOT _SE: a side-effect-free call with no used output is dead code and TCG
+ * deletes every one of them (tcg/tcg.c:4152).  The counter read zero until
+ * this flag was dropped. */
+DEF_HELPER_FLAGS_1(xemu_count_rep, TCG_CALL_NO_RWG, void, tl)
 DEF_HELPER_FLAGS_4(cc_compute_all, TCG_CALL_NO_RWG_SE, tl, tl, tl, tl, int)
 DEF_HELPER_FLAGS_4(cc_compute_c, TCG_CALL_NO_RWG_SE, tl, tl, tl, tl, int)
 DEF_HELPER_FLAGS_3(cc_compute_nz, TCG_CALL_NO_RWG_SE, tl, tl, tl, int)

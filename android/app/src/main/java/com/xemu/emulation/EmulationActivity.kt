@@ -1145,6 +1145,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
      */
     private fun applyAudioSettings() {
         NativeInterface.setHrtf(mainPrefs.getBoolean("audio_hrtf", false))
+        /* Off by default: the TSO store barriers are elided on this
+         * uniprocessor guest.  Only set if the user turned the safety valve on
+         * in Advanced settings. */
+        NativeInterface.setAccurateMemoryOrdering(
+            mainPrefs.getBoolean("accurate_mem_ordering", false))
     }
 
     /** Read overlay settings from main_prefs and apply position + visibility. */

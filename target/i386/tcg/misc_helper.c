@@ -37,6 +37,21 @@ void cpu_load_eflags(CPUX86State *env, int eflags, int update_mask)
         (eflags & update_mask) | 0x2;
 }
 
+/*
+ * Measurement only: total rep-string iterations executed.  QEMU emits x86
+ * string ops as a per-element loop, so a 4 KB `rep movsd` is 1024 iterations
+ * at ~20-30 host instructions each.  This counts the iterations so the size
+ * of a memcpy fast path can be judged before building one.  Called once per
+ * rep instruction with ECX, not once per iteration.
+ */
+unsigned long long xemu_rep_iters, xemu_rep_execs;
+
+void helper_xemu_count_rep(target_ulong ecx)
+{
+    xemu_rep_iters += ecx;
+    xemu_rep_execs++;
+}
+
 void helper_into(CPUX86State *env, int next_eip_addend)
 {
     int eflags;

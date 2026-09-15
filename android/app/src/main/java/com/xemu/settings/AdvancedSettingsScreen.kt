@@ -12,8 +12,12 @@ import androidx.navigation.NavController
 import java.io.File
 
 @Composable
-fun AdvancedSettingsScreen(navController: NavController) {
+fun AdvancedSettingsScreen(
+    navController: NavController,
+    settingsViewModel: SettingsViewModel,
+) {
     val context = LocalContext.current
+    val accurateMemOrdering by settingsViewModel.accurateMemOrdering.collectAsState()
 
     // Compute shader cache stats on composition
     val shaderDir = remember { File(context.filesDir, "shaders") }
@@ -36,6 +40,24 @@ fun AdvancedSettingsScreen(navController: NavController) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Spacer(Modifier.height(0.dp))
+
+            SettingsSectionLabel("Compatibility")
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    SettingsSwitchRow(
+                        label = "Accurate memory ordering",
+                        subtitle = "The Xbox has one CPU, so the strict store " +
+                                   "ordering its games were written against has " +
+                                   "nothing to observe it, and skipping it removes " +
+                                   "most of the worst frame drops. Turn this on only " +
+                                   "if you see flickering or corrupted graphics, or " +
+                                   "hear crackling audio \u2014 it will cost " +
+                                   "performance. Reloads translated code, so " +
+                                   "expect a brief pause.",
+                        checked = accurateMemOrdering,
+                    ) { settingsViewModel.setAccurateMemOrdering(it) }
+                }
+            }
 
             SettingsSectionLabel("Shader Cache")
             OutlinedCard(modifier = Modifier.fillMaxWidth()) {

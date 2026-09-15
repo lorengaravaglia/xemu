@@ -137,6 +137,8 @@ int xemu_android_get_rendered_frame_count(void)
 static volatile int g_worst_frame_time_ms = 0;
 /* Wall time of the last NEW guest frame, for the frame-time graph. */
 static int64_t s_last_guest_frame_ms;
+static int s_slow_ms = 50;
+static int s_run_worst_ms, s_run_over50, s_run_over66;
 /* Most recent eglSwapBuffers interval -- presentation smoothness, not
  * emulation cost.  Kept for diagnostics; not shown as "frame time". */
 static volatile int g_present_interval_ms;
@@ -1396,6 +1398,140 @@ extern int xemu_vcpu_tid;      /* accel/tcg/cpu-exec.c */
  */
 static int bench_cycles_fd = -1;
 
+static int bench_insn_fd = -1;
+static int bench_dtlb_fd = -1;   /* host dTLB walks */
+static int bench_itlb_fd = -1;   /* host iTLB walks */
+static int bench_l1d_fd  = -1;   /* host L1D read misses */
+static int bench_ll_fd   = -1;   /* host LAST-LEVEL misses: the DRAM question */
+static int bench_l1dw_fd = -1;   /* host L1D write misses */
+static int bench_dwalk_fd = -1;  /* ARM DTLB_WALK  (raw 0x34) */
+static int bench_iwalk_fd = -1;  /* ARM ITLB_WALK  (raw 0x35) */
+static int bench_l1i_fd  = -1;   /* host L1I read misses */
+static int bench_l2r_fd  = -1;   /* ARM L2D_CACHE_REFILL (raw 0x17) */
+static int bench_l1irf_fd = -1;  /* ARM L1I_CACHE_REFILL (raw 0x01) */
+static int bench_stallf_fd = -1; /* ARM STALL_FRONTEND (raw 0x23) */
+static int bench_stallb_fd = -1; /* ARM STALL_BACKEND  (raw 0x24) */
+static int bench_l2irf_fd = -1;  /* ARM L2I_CACHE_REFILL (raw 0x28) */
+static int bench_llmr_fd  = -1;  /* ARM LL_CACHE_MISS_RD (raw 0x37) */
+static int bench_br_fd  = -1;    /* host branch instructions */
+static int bench_brm_fd = -1;    /* host branch mispredicts */
+
+/*
+ * A dTLB *refill* is not a page-table walk: most are satisfied by the
+ * 2048-entry L2 TLB.  A WALK is a real traversal of the page tables, and each
+ * level is itself a memory access that can miss to DRAM.  With 285k refills
+ * per frame against 194k last-level misses, walks could be a large share of
+ * the DRAM traffic -- which is exactly what 2 MB pages would remove.  These
+ * are architected Armv8 PMU events, so they are read raw.
+ */
+/*
+ * Multiplexing correction.
+ *
+ * This benchmark opens 15+ counters on a PMU with about 6 programmable slots,
+ * so the kernel time-slices them and each one only counts for a fraction of
+ * the window.  Read raw, every figure came back scaled down by that fraction:
+ * the cycle counter reported an "effective 1.13 GHz" for a thread measured
+ * from outside to be saturating a core held at 3187 MHz.
+ *
+ * PERF_FORMAT_TOTAL_TIME_ENABLED/RUNNING makes the kernel report the window it
+ * wanted to count over and the window it actually got, which is exactly the
+ * factor needed to scale the value back.  Every open site sets it and every
+ * read goes through bench_scale() below.
+ */
+#define BENCH_READ_FORMAT \
+    (PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING)
+
+/* Worst (smallest) running/enabled seen, so the summary can report how heavily
+ * the counters were multiplexed rather than hiding the correction. */
+static double s_bench_mux_worst = 1.0;
+
+static bool bench_pmu_few(void)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+
+    return __system_property_get("debug.xemu.pmu_few", v) > 0 &&
+           (v[0] == '1' || v[0] == 'y' || v[0] == 't');
+}
+
+static uint64_t bench_scale(int fd)
+{
+    uint64_t buf[3] = { 0, 0, 0 };   /* value, time_enabled, time_running */
+    double frac;
+
+    if (fd < 0 || read(fd, buf, sizeof(buf)) != (ssize_t)sizeof(buf)) {
+        return 0;
+    }
+    if (buf[2] == 0) {
+        return 0;                    /* never scheduled; no information */
+    }
+    frac = (double)buf[2] / (double)buf[1];
+    if (frac < s_bench_mux_worst) {
+        s_bench_mux_worst = frac;
+    }
+    if (buf[1] == buf[2]) {
+        return buf[0];               /* had the PMU to itself */
+    }
+    return (uint64_t)((double)buf[0] / frac);
+}
+
+static int bench_open_raw(uint64_t config)
+{
+    struct perf_event_attr pe;
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_RAW;
+    pe.size = sizeof(pe);
+    pe.config = config;
+    pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
+    return (int)syscall(__NR_perf_event_open, &pe, xemu_vcpu_tid, -1, -1, 0);
+}
+
+static int bench_open_hw(uint64_t config)
+{
+    struct perf_event_attr pe;
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_HARDWARE;
+    pe.size = sizeof(pe);
+    pe.config = config;
+    pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
+    return (int)syscall(__NR_perf_event_open, &pe, xemu_vcpu_tid, -1, -1, 0);
+}
+
+/* PERF_TYPE_HW_CACHE config: id | (op << 8) | (result << 16) */
+#define BENCH_CACHE_CFG(id, op, res) ((id) | ((op) << 8) | ((res) << 16))
+
+static int bench_open_cache_counter(uint64_t config)
+{
+    struct perf_event_attr pe;
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_HW_CACHE;
+    pe.size = sizeof(pe);
+    pe.config = config;
+    pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
+    return (int)syscall(__NR_perf_event_open, &pe, xemu_vcpu_tid, -1, -1, 0);
+}
+
+static uint64_t bench_read_fd(int fd)
+{
+    return bench_scale(fd);
+}
+
+/*
+ * Host instructions retired on the vCPU thread.  This is the honest work
+ * proxy: it is counted by hardware, it sees chained TBs (which the dispatcher
+ * counters cannot), and nothing in the emulator can inflate it the way
+ * cpu_exit() inflates a re-entry count.
+ */
+static uint64_t bench_read_insns(void)
+{
+    return bench_scale(bench_insn_fd);
+}
+
 static void bench_open_cycles(void)
 {
     struct perf_event_attr pe;
@@ -1410,6 +1546,7 @@ static void bench_open_cycles(void)
     pe.config = PERF_COUNT_HW_CPU_CYCLES;
     pe.inherit = 0;
     pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
 
     /* Self-monitoring one of our own threads, which perf_event_paranoid=1
      * permits; cross-process would need the shell helper. */
@@ -1417,17 +1554,143 @@ static void bench_open_cycles(void)
                                    xemu_vcpu_tid, -1, -1, 0);
     if (bench_cycles_fd < 0) {
         ALOGI("bench: cycle counter unavailable (%s)", strerror(errno));
+        return;
+    }
+
+    memset(&pe, 0, sizeof(pe));
+    pe.type = PERF_TYPE_HARDWARE;
+    pe.size = sizeof(pe);
+    pe.config = PERF_COUNT_HW_INSTRUCTIONS;
+    pe.exclude_hv = 1;
+    pe.read_format = BENCH_READ_FORMAT;
+    bench_insn_fd = (int)syscall(__NR_perf_event_open, &pe,
+                                 xemu_vcpu_tid, -1, -1, 0);
+
+    /*
+     * Host address-translation cost, never measured on this project.  Guest
+     * RAM is 64 MB over 16,384 4 KB host pages (THP is "never" on this
+     * device and cannot be changed without root), the JIT buffer is 256 MB,
+     * and blocks average 533 bytes -- so both the data and instruction sides
+     * could plausibly be walking page tables.  This says whether any of the
+     * 213k misses/frame are host TLB walks rather than real data misses.
+     */
+    bench_dtlb_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_DTLB,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    /*
+     * Everything from here to the stall counters is optional.  Scaling a
+     * counter that only ran 9% of the window is right on average but noisy,
+     * and these numbers now decide strategy, so debug.xemu.pmu_few=1 opens
+     * only the six that matter -- cycles, instructions, L1I-miss, LL-miss and
+     * the two stall counters -- which fits the PMU's programmable slots and
+     * makes them exact.  Cross-check the scaled full set against it before
+     * trusting a number.
+     */
+    if (bench_pmu_few()) {
+        goto core_counters;
+    }
+
+    bench_itlb_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_ITLB,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_l1d_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1D,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+
+    /*
+     * The decisive one.  The generic HW_CACHE_MISSES counter reads ~213k/frame
+     * and L1D read misses read 203-232k -- nearly identical, which suggests
+     * the generic counter is reporting L1 refills rather than last-level
+     * misses.  That distinction is worth ~10x in cost per miss (an L2 hit is
+     * ~12 cycles, a DRAM trip 100+), and the whole "memory-latency bound,
+     * irreducible" conclusion rests on it.  Count last-level misses directly.
+     */
+    bench_ll_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_LL,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_l1dw_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1D,
+                        PERF_COUNT_HW_CACHE_OP_WRITE,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_dwalk_fd = bench_open_raw(0x34);   /* DTLB_WALK */
+    bench_iwalk_fd = bench_open_raw(0x35);   /* ITLB_WALK */
+
+    /*
+     * Instruction side.  We emit ~82 bytes of ARM per guest x86 instruction,
+     * a roughly 20x code-footprint expansion the real hardware never had, so
+     * the translated code may be competing with the game's data for the same
+     * 8 MB L3.  Every cache measurement so far has been data-side only, which
+     * cannot see that.  L1I_CACHE_REFILL is the architected Armv8 event.
+     */
+    bench_l1i_fd = bench_open_cache_counter(
+        BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1I,
+                        PERF_COUNT_HW_CACHE_OP_READ,
+                        PERF_COUNT_HW_CACHE_RESULT_MISS));
+    bench_l1irf_fd = bench_open_raw(0x01);   /* L1I_CACHE_REFILL */
+
+    /*
+     * Why is IPC only 1.85 on a 6-wide core with 0.10% branch mispredicts?
+     * These two say where the issue slots go.  STALL_FRONTEND counts cycles
+     * with no operation issued because none was available to dispatch --
+     * instruction fetch, i.e. the code side.  STALL_BACKEND counts cycles
+     * where one was available but could not issue -- execution resources or
+     * waiting on memory.  Which one dominates decides whether the lever is
+     * code layout or the dependency structure of the generated code.
+     */
+core_counters:
+    if (bench_pmu_few()) {
+        /* L1I misses and last-level misses are the two that carry the
+         * memory story; keep them even in the reduced set. */
+        bench_l1i_fd = bench_open_cache_counter(
+            BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_L1I,
+                            PERF_COUNT_HW_CACHE_OP_READ,
+                            PERF_COUNT_HW_CACHE_RESULT_MISS));
+        bench_ll_fd = bench_open_cache_counter(
+            BENCH_CACHE_CFG(PERF_COUNT_HW_CACHE_LL,
+                            PERF_COUNT_HW_CACHE_OP_READ,
+                            PERF_COUNT_HW_CACHE_RESULT_MISS));
+    }
+    if (!bench_pmu_few()) {
+        /*
+         * Re-measuring the recorded 0.10% mispredict rate, which was used to
+         * rule out return-address-stack work.  It is a ratio of two counters,
+         * so multiplexing only distorts it if the two were scheduled for
+         * different fractions -- which is exactly what needs checking.
+         */
+        /*
+         * Raw ARM events, not PERF_TYPE_HARDWARE: the generic branch events
+         * are not mapped on this PMU and read back zero.  0x21 BR_RETIRED and
+         * 0x22 BR_MIS_PRED_RETIRED are architected, like the stall counters
+         * above that do work.
+         */
+        bench_br_fd = bench_open_raw(0x21);    /* BR_RETIRED */
+        bench_brm_fd = bench_open_raw(0x22);   /* BR_MIS_PRED_RETIRED */
+    }
+    bench_stallf_fd = bench_open_raw(0x23);
+    bench_stallb_fd = bench_open_raw(0x24);
+    if (!bench_pmu_few()) {
+        bench_l2r_fd = bench_open_raw(0x17);   /* L2D_CACHE_REFILL, unified */
+        /*
+         * Splitting the miss streams by side is what decides the next move.
+         * An L1I miss stalls the FRONTEND; a data miss stalls the BACKEND.
+         * Our stalls are 52% backend against 14% frontend, so if code misses
+         * are mostly caught by L2 then shrinking the code footprint can only
+         * ever attack the 14%, and the 52% is guest data.  0x28 is the
+         * instruction-side L2 refill, 0x37 the architected last-level read
+         * miss.
+         */
+        bench_l2irf_fd = bench_open_raw(0x28);  /* L2I_CACHE_REFILL */
+        bench_llmr_fd  = bench_open_raw(0x37);  /* LL_CACHE_MISS_RD */
     }
 }
 
 static uint64_t bench_read_cycles(void)
 {
-    uint64_t v = 0;
-
-    if (bench_cycles_fd >= 0 && read(bench_cycles_fd, &v, sizeof(v)) != sizeof(v)) {
-        v = 0;
-    }
-    return v;
+    return bench_scale(bench_cycles_fd);
 }
 
 /* Hottest CPU die sensor, in degrees C.  The battery sensor lags by ~25 C and
@@ -1487,6 +1750,7 @@ static double bench_cpu_temp_c(void)
  */
 extern unsigned long long xemu_tb_exec_count;
 extern unsigned long long xemu_guest_insn_count;
+extern int g_nochain;
 
 /* CPU time consumed by the vCPU thread, in milliseconds. */
 static double bench_vcpu_cpu_ms(void)
@@ -1542,6 +1806,62 @@ static uint64_t s_bench_worst_cycles;
 static uint64_t s_bench_prev_insn;
 static uint64_t s_cheap_cycles, s_cheap_insn; static int s_cheap_n;
 static uint64_t s_exp_cycles, s_exp_insn;     static int s_exp_n;
+/* TLB flush counts: each full flush wipes all 22 mmu-mode TLBs and the jump
+ * cache, and xemu triggers one from the GPU thread on every NV2A surface
+ * create/destroy.  Defined in accel/tcg/cputlb.c. */
+extern void xemu_tlb_flush_counts(unsigned long long *, unsigned long long *,
+                                  unsigned long long *);
+extern unsigned long long xemu_mmio_reads, xemu_mmio_writes;
+extern unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
+extern void xemu_notdirty_top(uint64_t *page, unsigned long long *hits);
+extern void xemu_dump_guest_map(void);
+extern const char *xemu_map_dir;
+extern void xemu_dump_guest_code(void);
+extern uint32_t g_spin_lo, g_spin_hi;
+extern unsigned long long xemu_spin_hits, xemu_spin_sleeps, xemu_spin_us_total;
+extern unsigned long long xemu_spin_probes, xemu_spin_found;
+extern int xemu_spin_best_run;
+extern int g_spin_auto;
+static unsigned long long s_spin_h0, s_spin_s0, s_spin_u0;
+extern unsigned long long xemu_rep_iters, xemu_rep_execs;
+extern unsigned long long xemu_ccop_hist[];
+extern unsigned long long xemu_cc_checks, xemu_cc_bad;
+extern int g_cc_inline, g_cc_validate, g_cc_fastpath;
+extern int g_xemu_dfe;
+extern unsigned long long xemu_dfe_removed, xemu_dfe_tbs, xemu_dfe_ops_seen;
+extern const char *xemu_ccop_name(int op);
+extern const int xemu_ccop_nb;          /* real size -- do NOT guess */
+#define XEMU_CC_OP_MAX 80
+/* Captured when the window OPENS.  Taking a delta from the previous report
+ * instead would span the free-running gameplay between benchmarks -- about
+ * 55 s, or ~9x the measured window, which inflated this by an order of
+ * magnitude the first time. */
+static unsigned long long s_bench_start_ccop[XEMU_CC_OP_MAX];
+static uint64_t s_bench_prev_hinsn, s_cheap_hinsn, s_exp_hinsn;
+static uint64_t s_bench_prev_mmio, s_cheap_mmio, s_exp_mmio;
+/* Per-frame wall timestamp and cost, so perf samples can be assigned to a
+ * frame offline and the guest-PC profile split by frame weight.  Timestamps
+ * are CLOCK_MONOTONIC, the same clock perf stamps samples with, and nothing
+ * is added to the hot path -- the alternative, counting spin iterations in
+ * generated code, would perturb the very frames being classified. */
+#define BENCH_FRAMELOG_MAX 2048
+static uint64_t s_frame_ts[BENCH_FRAMELOG_MAX];
+static uint64_t s_frame_cyc[BENCH_FRAMELOG_MAX];
+static int s_frame_log_n;
+static uint64_t s_bench_start_dtlb, s_bench_start_itlb, s_bench_start_l1d;
+static uint64_t s_bench_start_ll, s_bench_start_l1dw;
+static uint64_t s_bench_start_dwalk, s_bench_start_iwalk;
+static uint64_t s_bench_start_l1i, s_bench_start_l1irf, s_bench_start_l2r;
+static uint64_t s_bench_start_stallf, s_bench_start_stallb;
+static uint64_t s_bench_start_br, s_bench_start_brm;
+static uint64_t s_bench_start_l2irf, s_bench_start_llmr;
+static uint64_t s_bench_prev_hinsn_base;
+static unsigned long long s_bench_start_rep_i, s_bench_start_rep_e;
+static unsigned long long s_bench_start_nd, s_bench_start_ndsmc;
+static uint64_t s_bench_start_mmio_r, s_bench_start_mmio_w;
+static unsigned long long s_bench_start_full, s_bench_start_part,
+                          s_bench_start_elide;
+
 static double   s_bench_start_cpu_ms;
 
 void xemu_android_benchmark_start(int frames)
@@ -1600,16 +1920,66 @@ void xemu_android_benchmark_start(int frames)
     s_bench_start_tb = xemu_tb_exec_count;
     s_bench_start_insn = xemu_guest_insn_count;
     s_bench_start_cpu_ms = bench_vcpu_cpu_ms();
+    s_cheap_hinsn = s_exp_hinsn = 0;
+    s_cheap_mmio = s_exp_mmio = 0;
+    s_frame_log_n = 0;
+    s_run_worst_ms = s_run_over50 = s_run_over66 = 0;
+    {
+        char sv[PROP_VALUE_MAX] = { 0 };
+        if (__system_property_get("debug.xemu.slow_ms", sv) > 0 && atoi(sv)) {
+            s_slow_ms = atoi(sv);
+        }
+    }
+    s_spin_h0 = xemu_spin_hits;
+    s_spin_s0 = xemu_spin_sleeps;
+    s_spin_u0 = xemu_spin_us_total;
+    s_bench_start_mmio_r = xemu_mmio_reads;
+    s_bench_start_mmio_w = xemu_mmio_writes;
+    xemu_tlb_flush_counts(&s_bench_start_full, &s_bench_start_part,
+                          &s_bench_start_elide);
     bench_open_cycles();
     s_bench_start_cycles = bench_read_cycles();
     s_bench_prev_cycles = s_bench_start_cycles;
     memset(s_bench_frame_buckets, 0, sizeof(s_bench_frame_buckets));
     s_bench_worst_cycles = 0;
     s_bench_prev_insn = xemu_guest_insn_count;
+    s_bench_prev_hinsn = bench_read_insns();
+    s_bench_prev_hinsn_base = s_bench_prev_hinsn;
+    s_bench_prev_mmio = xemu_mmio_reads + xemu_mmio_writes;
+    {
+        int i, nb = xemu_ccop_nb < XEMU_CC_OP_MAX ?
+                    xemu_ccop_nb : XEMU_CC_OP_MAX;
+
+        for (i = 0; i < nb; i++) {
+            s_bench_start_ccop[i] = xemu_ccop_hist[i];
+        }
+    }
+    s_bench_start_nd = xemu_notdirty_writes;
+    s_bench_start_ndsmc = xemu_notdirty_smc;
+    s_bench_start_rep_i = xemu_rep_iters;
+    s_bench_start_rep_e = xemu_rep_execs;
+    s_bench_start_dtlb = bench_read_fd(bench_dtlb_fd);
+    s_bench_start_itlb = bench_read_fd(bench_itlb_fd);
+    s_bench_start_l1d  = bench_read_fd(bench_l1d_fd);
+    s_bench_start_ll   = bench_read_fd(bench_ll_fd);
+    s_bench_start_l1dw = bench_read_fd(bench_l1dw_fd);
+    s_bench_start_dwalk = bench_read_fd(bench_dwalk_fd);
+    s_bench_start_iwalk = bench_read_fd(bench_iwalk_fd);
+    s_bench_start_l1i   = bench_read_fd(bench_l1i_fd);
+    s_bench_start_l1irf = bench_read_fd(bench_l1irf_fd);
+    s_bench_start_l2r   = bench_read_fd(bench_l2r_fd);
+    s_bench_start_l2irf = bench_read_fd(bench_l2irf_fd);
+    s_bench_start_llmr = bench_read_fd(bench_llmr_fd);
+    s_bench_start_br = bench_read_fd(bench_br_fd);
+    s_bench_start_brm = bench_read_fd(bench_brm_fd);
+    s_bench_start_stallf = bench_read_fd(bench_stallf_fd);
+    s_bench_start_stallb = bench_read_fd(bench_stallb_fd);
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    ALOGI("bench: started, %d guest frames — hands off the controls", frames);
+    ALOGI("bench: started, %d guest frames (~%d s) — hands off the controls; "
+          "the screen will look frozen, that is expected",
+          frames, (frames + 29) / 30);
 }
 
 /* Called once per guest frame. */
@@ -1626,6 +1996,15 @@ static void bench_tick(void)
         int b;
 
         s_bench_prev_cycles = now;
+        if (s_frame_log_n < BENCH_FRAMELOG_MAX) {
+            struct timespec ts;
+
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            s_frame_ts[s_frame_log_n] =
+                (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+            s_frame_cyc[s_frame_log_n] = frame;
+            s_frame_log_n++;
+        }
         if (frame > s_bench_worst_cycles) {
             s_bench_worst_cycles = frame;
         }
@@ -1636,15 +2015,47 @@ static void bench_tick(void)
         {
             uint64_t insn_now = xemu_guest_insn_count;
             uint64_t insn = insn_now - s_bench_prev_insn;
+            uint64_t hi_now = bench_read_insns();
+            uint64_t hi = hi_now - s_bench_prev_hinsn;
+            uint64_t mm_now = xemu_mmio_reads + xemu_mmio_writes;
+            uint64_t mm = mm_now - s_bench_prev_mmio;
 
             s_bench_prev_insn = insn_now;
+            s_bench_prev_hinsn = hi_now;
+            s_bench_prev_mmio = mm_now;
             if (ratio <= 1.0) {
-                s_cheap_cycles += frame; s_cheap_insn += insn; s_cheap_n++;
+                s_cheap_cycles += frame; s_cheap_insn += insn;
+                s_cheap_hinsn += hi; s_cheap_mmio += mm; s_cheap_n++;
             } else if (ratio > 1.2) {
-                s_exp_cycles += frame; s_exp_insn += insn; s_exp_n++;
+                s_exp_cycles += frame; s_exp_insn += insn;
+                s_exp_hinsn += hi; s_exp_mmio += mm; s_exp_n++;
             }
         }
     }
+    /*
+     * Heartbeat.  A benchmark window is indistinguishable from a hung
+     * emulator from the outside -- static scene, no input, nothing moving on
+     * screen for the better part of a minute, several times in a row.  That
+     * has twice led to a run being stopped by hand mid-measurement.  Say
+     * plainly that it is alive, how far along it is, and how long is left.
+     */
+    {
+        int done = s_bench_frames_total - s_bench_frames_left + 1;
+
+        if (s_bench_frames_left > 1 && done % 30 == 0) {
+            double el_ms =
+                (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s_bench_start_ns)
+                / 1e6;
+            double per = done ? el_ms / done : 0.0;
+
+            ALOGI("bench: RUNNING %d/%d frames (%d%%) | %.1f ms/frame so far "
+                  "| ~%.0f s left -- ALIVE, do not kill",
+                  done, s_bench_frames_total,
+                  100 * done / s_bench_frames_total, per,
+                  (s_bench_frames_left - 1) * per / 1000.0);
+        }
+    }
+
     if (--s_bench_frames_left > 0) {
         return;
     }
@@ -1686,6 +2097,523 @@ static void bench_tick(void)
      * as an absolute instruction rate but good for confirming two runs did the
      * same work.
      */
+    {
+        uint64_t dt = bench_read_fd(bench_dtlb_fd) - s_bench_start_dtlb;
+        uint64_t it = bench_read_fd(bench_itlb_fd) - s_bench_start_itlb;
+        uint64_t l1 = bench_read_fd(bench_l1d_fd) - s_bench_start_l1d;
+        uint64_t n = s_bench_frames_total;
+
+        {
+            uint64_t ll = bench_read_fd(bench_ll_fd) - s_bench_start_ll;
+            uint64_t l1w = bench_read_fd(bench_l1dw_fd) - s_bench_start_l1dw;
+            uint64_t l1r = bench_read_fd(bench_l1d_fd) - s_bench_start_l1d;
+            uint64_t nn = s_bench_frames_total;
+            double cyc_frame = 93.0e6;
+
+            ALOGI("bench: MEMORY L1D read-miss %llu/frame | L1D write-miss "
+                  "%llu/frame | LAST-LEVEL miss %llu/frame  [fds %d/%d]",
+                  (unsigned long long)(l1r / nn),
+                  (unsigned long long)(l1w / nn),
+                  (unsigned long long)(ll / nn),
+                  bench_l1d_fd, bench_ll_fd);
+            {
+                uint64_t sf = bench_read_fd(bench_stallf_fd)
+                              - s_bench_start_stallf;
+                uint64_t sb = bench_read_fd(bench_stallb_fd)
+                              - s_bench_start_stallb;
+
+                ALOGI("bench: STALLS frontend %llu Mcyc/frame (%.1f%% of "
+                      "frame) | backend %llu Mcyc/frame (%.1f%%)  "
+                      "[frontend = starved of instructions -> code layout; "
+                      "backend = cannot issue -> dependencies or memory]",
+                      (unsigned long long)(sf / nn / 1000000),
+                      100.0 * (sf / nn) / cyc_frame,
+                      (unsigned long long)(sb / nn / 1000000),
+                      100.0 * (sb / nn) / cyc_frame);
+            }
+
+            {
+                uint64_t i1 = bench_read_fd(bench_l1i_fd) - s_bench_start_l1i;
+                uint64_t irf = bench_read_fd(bench_l1irf_fd)
+                               - s_bench_start_l1irf;
+                uint64_t l2r = bench_read_fd(bench_l2r_fd) - s_bench_start_l2r;
+
+                ALOGI("bench: CODE SIDE L1I-miss %llu/frame | L1I-refill "
+                      "%llu/frame | L2 refill (both sides) %llu/frame | vs "
+                      "data L1D-miss %llu and LAST-LEVEL %llu  [fds %d/%d/%d]",
+                      (unsigned long long)(i1 / nn),
+                      (unsigned long long)(irf / nn),
+                      (unsigned long long)(l2r / nn),
+                      (unsigned long long)(l1r / nn),
+                      (unsigned long long)(ll / nn),
+                      bench_l1i_fd, bench_l1irf_fd, bench_l2r_fd);
+            }
+
+            {
+                uint64_t dw = bench_read_fd(bench_dwalk_fd)
+                              - s_bench_start_dwalk;
+                uint64_t iw = bench_read_fd(bench_iwalk_fd)
+                              - s_bench_start_iwalk;
+
+                ALOGI("bench: PAGE WALKS dtlb-walk %llu/frame | itlb-walk "
+                      "%llu/frame | vs %llu last-level misses/frame  "
+                      "(walks are memory accesses too; 2 MB pages would "
+                      "remove nearly all of them)  [fds %d/%d, -1 = "
+                      "counter unavailable]",
+                      (unsigned long long)(dw / nn),
+                      (unsigned long long)(iw / nn),
+                      (unsigned long long)(ll / nn),
+                      bench_dwalk_fd, bench_iwalk_fd);
+            }
+
+            ALOGI("bench: MEMORY cost model | LL misses at ~110 cyc = %.1f%% "
+                  "of frame | L1 misses served by L2 at ~12 cyc = %.1f%% "
+                  "(the two together are the whole memory story)",
+                  100.0 * (ll / nn) * 110.0 / cyc_frame,
+                  100.0 * ((l1r + l1w) / nn > (ll / nn) ?
+                           ((l1r + l1w) / nn - (ll / nn)) : 0) * 12.0
+                      / cyc_frame);
+        }
+
+        ALOGI("bench: HOST TLB dtlb-miss %llu/frame | itlb-miss %llu/frame | "
+              "L1D-read-miss %llu/frame  (generic cache-miss is ~213k/frame; "
+              "if dtlb is a small fraction, host address translation is not "
+              "the cost)  [fds %d/%d/%d, -1 = counter unavailable]",
+              (unsigned long long)(dt / n), (unsigned long long)(it / n),
+              (unsigned long long)(l1 / n),
+              bench_dtlb_fd, bench_itlb_fd, bench_l1d_fd);
+    }
+
+    {
+        unsigned long long tot = 0, cur[XEMU_CC_OP_MAX];
+        int nb = xemu_ccop_nb < XEMU_CC_OP_MAX ?
+                 xemu_ccop_nb : XEMU_CC_OP_MAX;
+        int i, top[4] = { -1, -1, -1, -1 };
+
+        for (i = 0; i < nb; i++) {
+            cur[i] = xemu_ccop_hist[i] - s_bench_start_ccop[i];
+            tot += cur[i];
+        }
+        for (i = 0; i < nb; i++) {
+            int r;
+
+            for (r = 0; r < 4; r++) {
+                if (top[r] < 0 || cur[i] > cur[top[r]]) {
+                    int k;
+
+                    for (k = 3; k > r; k--) {
+                        top[k] = top[k - 1];
+                    }
+                    top[r] = i;
+                    break;
+                }
+            }
+        }
+        if (tot) {
+            ALOGI("bench: CC helper %llu calls/frame | top ops: "
+                  "%s %.0f%%, %s %.0f%%, %s %.0f%%, %s %.0f%% "
+                  "(these are the ops a gen_prepare_cc fast path must cover)",
+                  tot / s_bench_frames_total,
+                  xemu_ccop_name(top[0]), 100.0 * cur[top[0]] / tot,
+                  xemu_ccop_name(top[1]), 100.0 * cur[top[1]] / tot,
+                  xemu_ccop_name(top[2]), 100.0 * cur[top[2]] / tot,
+                  xemu_ccop_name(top[3]), 100.0 * cur[top[3]] / tot);
+        }
+    }
+
+    ALOGI("bench: DEAD-FLAG ELIM dfe=%d | %llu ops removed over %llu TBs "
+          "(%.2f per TB, %.3f%% of %llu ops seen) -- if ~0, QEMU's own "
+          "liveness already does this",
+          g_xemu_dfe, xemu_dfe_removed, xemu_dfe_tbs,
+          xemu_dfe_tbs ? (double)xemu_dfe_removed / xemu_dfe_tbs : 0.0,
+          xemu_dfe_ops_seen ? 100.0 * xemu_dfe_removed / xemu_dfe_ops_seen : 0.0,
+          xemu_dfe_ops_seen);
+
+    /*
+     * Emitted code size.  Section U established that we are stalled fetching
+     * generated code, so a change that removes host instructions but grows the
+     * footprint can lose overall.  Report bytes with the timing rather than
+     * inferring it afterwards.
+     */
+    {
+        extern size_t tcg_code_size(void);
+        extern unsigned long long xemu_tb_exec_count;
+
+        /*
+     * Where the emitted bytes go.  Footprint is the lever (section U/W), so
+     * report the opcodes that own the code buffer, by bytes rather than by
+     * count -- a rare opcode that emits a long sequence matters more here than
+     * a common one that emits four bytes.
+     */
+    {
+        extern unsigned long long xemu_op_bytes[], xemu_op_count[];
+        extern const char *xemu_tcg_op_name(unsigned opc);
+        unsigned long long tot = 0;
+        int i, j, top[10], n = 0;
+
+        for (i = 0; i < 512; i++) {
+            tot += xemu_op_bytes[i];
+        }
+        for (i = 0; i < 512; i++) {
+            if (!xemu_op_bytes[i]) {
+                continue;
+            }
+            for (j = 0; j < n; j++) {
+                if (xemu_op_bytes[i] > xemu_op_bytes[top[j]]) {
+                    break;
+                }
+            }
+            if (j < 10) {
+                int k;
+
+                for (k = (n < 10 ? n : 9); k > j; k--) {
+                    top[k] = top[k - 1];
+                }
+                top[j] = i;
+                if (n < 10) {
+                    n++;
+                }
+            }
+        }
+        /*
+     * Stall attribution by side.  The two stall counters say how much time is
+     * lost and where in the pipeline; these miss counters say what is causing
+     * it.  Costing them against the measured stalls is the check on whether a
+     * code-footprint campaign can pay for itself at all.
+     */
+    {
+        uint64_t l1irf = bench_read_fd(bench_l1irf_fd) - s_bench_start_l1irf;
+        uint64_t l2irf = bench_read_fd(bench_l2irf_fd) - s_bench_start_l2irf;
+        uint64_t l2rf = bench_read_fd(bench_l2r_fd) - s_bench_start_l2r;
+        uint64_t llmr = bench_read_fd(bench_llmr_fd) - s_bench_start_llmr;
+        uint64_t sf = bench_read_fd(bench_stallf_fd) - s_bench_start_stallf;
+        uint64_t sb = bench_read_fd(bench_stallb_fd) - s_bench_start_stallb;
+        double n = (double)s_bench_frames_total;
+
+        if (l1irf || l2rf) {
+            ALOGI("bench: SIDES/frame | L1I-refill %.0f (L2I-refill %.0f, "
+                  "%.1f%% escape L2) | L2-refill total %.0f | LL-read-miss "
+                  "%.0f",
+                  l1irf / n, l2irf / n,
+                  l1irf ? 100.0 * (double)l2irf / (double)l1irf : 0.0,
+                  l2rf / n, llmr / n);
+            /*
+             * Cost the two streams: an L1I miss caught by L2 is ~12 cycles of
+             * frontend starvation, a last-level miss is a ~110 cycle DRAM trip
+             * that stalls the backend.
+             */
+            ALOGI("bench: SIDES cost/frame | code: L1I in L2 %.1f Mcyc + L2I "
+                  "to DRAM %.1f Mcyc | data+code LL %.1f Mcyc | MEASURED "
+                  "frontend %.1f Mcyc, backend %.1f Mcyc",
+                  (l1irf - l2irf) * 12.0 / n / 1e6,
+                  l2irf * 110.0 / n / 1e6,
+                  llmr * 110.0 / n / 1e6,
+                  sf / n / 1e6, sb / n / 1e6);
+        }
+    }
+
+    {
+        extern unsigned long long xemu_ldst_opc_hist[2][256];
+        extern unsigned long long xemu_ldst_stub_used, xemu_ldst_stub_missed;
+        int d, i, j, top[6], n = 0;
+
+        for (d = 0; d < 2; d++) {
+            n = 0;
+            for (i = 0; i < 256; i++) {
+                if (!xemu_ldst_opc_hist[d][i]) {
+                    continue;
+                }
+                for (j = 0; j < n; j++) {
+                    if (xemu_ldst_opc_hist[d][i] >
+                        xemu_ldst_opc_hist[d][top[j]]) {
+                        break;
+                    }
+                }
+                if (j < 6) {
+                    int k;
+
+                    for (k = (n < 6 ? n : 5); k > j; k--) {
+                        top[k] = top[k - 1];
+                    }
+                    top[j] = i;
+                    if (n < 6) {
+                        n++;
+                    }
+                }
+            }
+            {
+                char line[256];
+                int off = 0;
+
+                for (j = 0; j < n; j++) {
+                    off += snprintf(line + off, sizeof(line) - off,
+                                    " 0x%02x=%llu", top[j],
+                                    xemu_ldst_opc_hist[d][top[j]]);
+                }
+                ALOGI("bench: LDST MemOp %s:%s", d ? "loads" : "stores",
+                      n ? line : " (none)");
+            }
+        }
+        {
+            extern unsigned long long xemu_ldst_reject[6];
+            extern unsigned long long xemu_ldst_mmuidx_seen[16];
+            static const char *why[6] = { "mmuidx>=8", "bswap/sign", "amask",
+                                          "no-stub", "BL-range", "MemOp" };
+            char line[256], mi[256];
+            int off = 0, moff = 0, k;
+
+            for (k = 0; k < 6; k++) {
+                off += snprintf(line + off, sizeof(line) - off, " %s=%llu",
+                                why[k], xemu_ldst_reject[k]);
+            }
+            for (k = 0; k < 16; k++) {
+                if (xemu_ldst_mmuidx_seen[k]) {
+                    moff += snprintf(mi + moff, sizeof(mi) - moff,
+                                     " %d:%llu", k, xemu_ldst_mmuidx_seen[k]);
+                }
+            }
+            ALOGI("bench: LDST STUB used %llu, fell back %llu |%s",
+                  xemu_ldst_stub_used, xemu_ldst_stub_missed, line);
+            ALOGI("bench: LDST mmu_idx seen:%s", moff ? mi : " none");
+            {
+                extern unsigned long long xemu_ldst_badop[256];
+                extern unsigned long long xemu_ldst_expect;
+                char bl[256];
+                int boff = 0;
+
+                for (k = 0; k < 256; k++) {
+                    if (xemu_ldst_badop[k] && boff < 200) {
+                        boff += snprintf(bl + boff, sizeof(bl) - boff,
+                                         " 0x%02x=%llu", k,
+                                         xemu_ldst_badop[k]);
+                    }
+                }
+                ALOGI("bench: LDST rejected MemOps:%s (last expected 0x%llx)",
+                      boff ? bl : " none", xemu_ldst_expect);
+            }
+        }
+    }
+
+    ALOGI("bench: CODE BYTES total %.1f MB emitted since boot", 
+              tot / (1024.0 * 1024.0));
+        for (j = 0; j < n; j++) {
+            int o = top[j];
+
+            ALOGI("bench:   %-22s %6.2f%%  %8llu ops  %5.1f bytes/op",
+                  xemu_tcg_op_name(o),
+                  tot ? 100.0 * xemu_op_bytes[o] / tot : 0.0,
+                  xemu_op_count[o],
+                  xemu_op_count[o] ?
+                      (double)xemu_op_bytes[o] / xemu_op_count[o] : 0.0);
+        }
+    }
+
+    ALOGI("bench: CODE SIZE %.2f MB emitted in the buffer", 
+              tcg_code_size() / (1024.0 * 1024.0));
+    }
+
+    ALOGI("bench: CC SWITCHES inline=%d validate=%d fastpath=%d "
+          "(if these do not follow the properties, the wiring is broken)",
+          g_cc_inline, g_cc_validate, g_cc_fastpath);
+
+    if (xemu_cc_checks) {
+        ALOGI("bench: CC INLINE VALIDATION %llu checks, %llu MISMATCHES%s",
+              xemu_cc_checks, xemu_cc_bad,
+              xemu_cc_bad ? "  <-- INLINE PATH IS WRONG, DO NOT SHIP"
+                          : "  (inline result is bit-identical)");
+    }
+
+    {
+        char fp[512];
+        FILE *f;
+
+        snprintf(fp, sizeof(fp), "%s/framelog.bin",
+                 xemu_map_dir ? xemu_map_dir : ".");
+        f = fopen(fp, "wb");
+        if (f) {
+            uint32_t n = s_frame_log_n;
+
+            fwrite("XFRM1", 1, 5, f);
+            fwrite(&n, 4, 1, f);
+            fwrite(s_frame_ts, 8, n, f);
+            fwrite(s_frame_cyc, 8, n, f);
+            fclose(f);
+            ALOGI("bench: wrote framelog.bin (%u frames)", n);
+        }
+    }
+
+    xemu_dump_guest_map();
+    xemu_dump_guest_code();
+
+    /*
+     * Frame-time histogram.  The FLOOR counters say how many frames miss, but
+     * not what the distribution looks like, and that shape decides strategy:
+     * a mean sitting just over budget needs a few percent off everything,
+     * whereas a bimodal split needs whatever the expensive mode is doing.
+     * On the slot-5 scene the two are easy to confuse -- mean 35.7 ms with a
+     * quarter of frames past 50 ms -- so print the buckets and stop guessing.
+     */
+    if (s_frame_log_n > 1) {
+        static const int edge[] = { 20, 25, 30, 33, 36, 40, 45, 50, 60, 80 };
+        const int nb = (int)(sizeof(edge) / sizeof(edge[0]));
+        int bucket[sizeof(edge) / sizeof(edge[0]) + 1];
+        int i, b, n = 0;
+        double sum = 0.0;
+
+        memset(bucket, 0, sizeof(bucket));
+        for (i = 1; i < s_frame_log_n; i++) {
+            double ms = (double)(s_frame_ts[i] - s_frame_ts[i - 1]) / 1e6;
+
+            /* Skip the save-state reload stall at the head of the run. */
+            if (ms > 500.0) {
+                continue;
+            }
+            for (b = 0; b < nb && ms >= edge[b]; b++) {
+                /* find the bucket */
+            }
+            bucket[b]++;
+            sum += ms;
+            n++;
+        }
+        if (n) {
+            char line[512];
+            int off = 0;
+
+            for (b = 0; b <= nb; b++) {
+                if (b == 0) {
+                    off += snprintf(line + off, sizeof(line) - off,
+                                    " <%d:%d", edge[0], bucket[b]);
+                } else if (b == nb) {
+                    off += snprintf(line + off, sizeof(line) - off,
+                                    " %d+:%d", edge[nb - 1], bucket[b]);
+                } else {
+                    off += snprintf(line + off, sizeof(line) - off,
+                                    " %d-%d:%d", edge[b - 1], edge[b],
+                                    bucket[b]);
+                }
+                if (off >= (int)sizeof(line) - 16) {
+                    break;
+                }
+            }
+            ALOGI("bench: HIST n=%d mean %.1f ms |%s", n, sum / n, line);
+
+            /*
+             * Where the slow frames fall.  A bimodal distribution can come
+             * from periodic work (an autosave, an audio refill, a texture
+             * upload on a cycle) or from a scene that is simply heavy in
+             * bursts, and the spacing between slow frames tells them apart:
+             * a fixed stride means something is on a timer.
+             */
+            {
+                char g[400];
+                int off2 = 0, prev = -1, shown = 0;
+
+                for (i = 1; i < s_frame_log_n && shown < 40; i++) {
+                    double ms = (double)(s_frame_ts[i] - s_frame_ts[i - 1])
+                                / 1e6;
+
+                    if (ms < 45.0 || ms > 500.0) {
+                        continue;
+                    }
+                    if (prev >= 0) {
+                        off2 += snprintf(g + off2, sizeof(g) - off2, " %d",
+                                         i - prev);
+                        shown++;
+                        if (off2 >= (int)sizeof(g) - 8) {
+                            break;
+                        }
+                    }
+                    prev = i;
+                }
+                ALOGI("bench: SLOWGAPS (frames between >45ms frames):%s",
+                      off2 ? g : " none");
+
+            /*
+             * Work or wait?  s_frame_cyc holds real cycles for the frame, and
+             * nothing else is holding the PMU here, so comparing the two
+             * populations answers it outright: cycles scaling with wall time
+             * means the slow frames are doing more work, whereas flat cycles
+             * against longer frames would mean the vCPU was blocked on
+             * something and no amount of codegen work would help.
+             */
+            {
+                double fc = 0.0, sc = 0.0;
+                int fn = 0, sn = 0;
+
+                for (i = 1; i < s_frame_log_n; i++) {
+                    double ms = (double)(s_frame_ts[i] - s_frame_ts[i - 1])
+                                / 1e6;
+
+                    if (ms > 500.0) {
+                        continue;
+                    }
+                    if (ms < 40.0) {
+                        fc += (double)s_frame_cyc[i]; fn++;
+                    } else if (ms >= 45.0) {
+                        sc += (double)s_frame_cyc[i]; sn++;
+                    }
+                }
+                if (fn && sn) {
+                    ALOGI("bench: WORKSPLIT fast n=%d %.1f Mcyc | slow n=%d "
+                          "%.1f Mcyc | slow/fast %.2fx",
+                          fn, fc / fn / 1e6, sn, sc / sn / 1e6,
+                          (sc / sn) / (fc / fn));
+                }
+            }
+            }
+        }
+    }
+
+    ALOGI("bench: FLOOR worst %d ms (%.1f fps) | frames over 50ms (20fps): %d "
+          "| over 66ms (15fps): %d",
+          s_run_worst_ms, s_run_worst_ms ? 1000.0 / s_run_worst_ms : 0.0,
+          s_run_over50, s_run_over66);
+
+    ALOGI("bench: SPIN AUTO %s | %llu probe windows | %llu wait loops found",
+          g_spin_auto ? "on" : "off", xemu_spin_probes, xemu_spin_found);
+    ALOGI("bench: SPIN best identical-state run seen: %d (need %d)",
+          xemu_spin_best_run, 32);
+
+    ALOGI("bench: SPIN range 0x%x-0x%x | %llu iterations/frame | %llu "
+          "sleeps/frame | %llu us slept/frame (%.1f%% of a 33.3ms frame)",
+          g_spin_lo, g_spin_hi,
+          (xemu_spin_hits - s_spin_h0) / s_bench_frames_total,
+          (xemu_spin_sleeps - s_spin_s0) / s_bench_frames_total,
+          (xemu_spin_us_total - s_spin_u0) / s_bench_frames_total,
+          100.0 * ((xemu_spin_us_total - s_spin_u0) / (double)s_bench_frames_total)
+              / 33330.0);
+
+    ALOGI("bench: NOTDIRTY %llu store-traps/frame (%llu of them SMC checks) "
+          "-- guest stores forced out of generated code by VRAM dirty "
+          "tracking; this is what a fork skipping surface downloads avoids",
+          (xemu_notdirty_writes - s_bench_start_nd) / s_bench_frames_total,
+          (xemu_notdirty_smc - s_bench_start_ndsmc) / s_bench_frames_total);
+
+    ALOGI("bench: REP-STRING %llu iterations/frame over %llu instructions "
+          "| ABSOLUTE since boot: %llu iters over %llu instructions "
+          "(nonzero absolute proves the probe works)",
+          (xemu_rep_iters - s_bench_start_rep_i) / s_bench_frames_total,
+          (xemu_rep_execs - s_bench_start_rep_e) / s_bench_frames_total,
+          xemu_rep_iters, xemu_rep_execs);
+
+    ALOGI("bench: MMIO %llu reads/frame, %llu writes/frame (each leaves "
+          "generated code and takes the BQL + a device lock)",
+          (xemu_mmio_reads - s_bench_start_mmio_r) / s_bench_frames_total,
+          (xemu_mmio_writes - s_bench_start_mmio_w) / s_bench_frames_total);
+
+    {
+        unsigned long long f, pa, e;
+
+        xemu_tlb_flush_counts(&f, &pa, &e);
+        ALOGI("bench: TLB FLUSHES %.2f full/frame (each wipes 22 TLBs + the "
+              "jump cache) | %.2f partial/frame | %.2f elided/frame "
+              "| ABSOLUTE since boot: full=%llu part=%llu elide=%llu",
+              (double)(f - s_bench_start_full) / s_bench_frames_total,
+              (double)(pa - s_bench_start_part) / s_bench_frames_total,
+              (double)(e - s_bench_start_elide) / s_bench_frames_total,
+              f, pa, e);
+    }
+
     ALOGI("bench: RESULT %d frames | vcpu %.2f ms/frame (budget 33.33) | "
           "headroom %.0f%% | wall %.1f ms (%.2f fps, guest-paced) | "
           "util %.0f%% | reentry_insns %llu | reentry_tb %llu",
@@ -1697,12 +2625,56 @@ static void bench_tick(void)
     {
         uint64_t cyc = bench_read_cycles() - s_bench_start_cycles;
 
+        /*
+         * Effective GHz is the validation for the multiplexing correction, not
+         * just a readout: the vCPU thread saturates a core whose frequency can
+         * be read from outside, so this number has a known right answer.  If
+         * it lands near the measured core clock the scaling is working; if it
+         * comes back near 1.1 GHz again the counters are still being read raw.
+         */
         ALOGI("bench: cycles %llu (%llu per frame) | effective %.2f GHz | "
-              "cpu %.1f C",
+              "cpu %.1f C | pmu scheduled %.0f%% of the time%s",
               (unsigned long long)cyc,
               (unsigned long long)(cyc / s_bench_frames_total),
               cpu_ms > 0 ? cyc / (cpu_ms * 1e6) : 0.0,
-              bench_cpu_temp_c());
+              bench_cpu_temp_c(),
+              100.0 * s_bench_mux_worst,
+              s_bench_mux_worst < 0.95 ?
+                  " (counts scaled up to compensate)" : "");
+
+        /*
+         * Re-measurement of the section-A facts that a hardware counter can
+         * move.  Recorded values were IPC 1.80-1.85, ~33 executed host
+         * instructions per guest instruction, and a 0.10% mispredict rate --
+         * all computed while the counters were being scheduled 9-29% of the
+         * time.  Ratios of two counters survive multiplexing only when both
+         * got the same share, which is not guaranteed, so print them together
+         * with the inputs so the arithmetic is checkable.
+         */
+        {
+            uint64_t hi = bench_read_insns() - s_bench_prev_hinsn_base;
+            uint64_t gi = xemu_guest_insn_count - s_bench_start_insn;
+            uint64_t br = bench_read_fd(bench_br_fd) - s_bench_start_br;
+            uint64_t brm = bench_read_fd(bench_brm_fd) - s_bench_start_brm;
+
+            ALOGI("bench: RECHECK host-insn %llu (%llu/frame) | guest-insn "
+                  "%llu (%llu/frame%s) | IPC %.2f",
+                  (unsigned long long)hi,
+                  (unsigned long long)(hi / s_bench_frames_total),
+                  (unsigned long long)gi,
+                  (unsigned long long)(gi / s_bench_frames_total),
+                  g_nochain ? ", EXACT" : ", chain-breaks only -- run "
+                              "debug.xemu.nochain=1 for a true count",
+                  cyc ? (double)hi / (double)cyc : 0.0);
+            {
+                ALOGI("bench: RECHECK branches %llu/frame | mispredicts "
+                      "%llu/frame | rate %.3f%% of branches, %.3f%% of insns",
+                      (unsigned long long)(br / s_bench_frames_total),
+                      (unsigned long long)(brm / s_bench_frames_total),
+                      br ? 100.0 * (double)brm / (double)br : 0.0,
+                      hi ? 100.0 * (double)brm / (double)hi : 0.0);
+            }
+        }
 
         ALOGI("bench: per-frame vs 33.3ms budget | <80%%=%d 80-100%%=%d "
               "100-120%%=%d 120-150%%=%d 150-200%%=%d >200%%=%d | worst %.0f%%",
@@ -1717,11 +2689,48 @@ static void bench_tick(void)
             double cheap_ki = s_cheap_insn / (double)s_cheap_n / 1e3;
             double exp_ki   = s_exp_insn   / (double)s_exp_n   / 1e3;
 
-            ALOGI("bench: cheap frames (n=%d) %.0f Mcyc, %.0f k reentry-insn | "
-                  "expensive (n=%d) %.0f Mcyc, %.0f k reentry-insn | "
-                  "cycles x%.2f, work x%.2f",
-                  s_cheap_n, cheap_mc, cheap_ki, s_exp_n, exp_mc, exp_ki,
-                  exp_mc / cheap_mc, cheap_ki > 0 ? exp_ki / cheap_ki : 0.0);
+            double cheap_hm = s_cheap_n ?
+                (double)s_cheap_hinsn / s_cheap_n / 1e6 : 0.0;
+            double exp_hm = s_exp_n ?
+                (double)s_exp_hinsn / s_exp_n / 1e6 : 0.0;
+
+            ALOGI("bench: cheap frames (n=%d) %.0f Mcyc, %.1f Mhost-insn | "
+                  "expensive (n=%d) %.0f Mcyc, %.1f Mhost-insn | "
+                  "cycles x%.2f, HOST WORK x%.2f, IPC %.2f vs %.2f",
+                  s_cheap_n, cheap_mc, cheap_hm,
+                  s_exp_n, exp_mc, exp_hm,
+                  exp_mc / cheap_mc, cheap_hm > 0 ? exp_hm / cheap_hm : 0.0,
+                  cheap_mc > 0 ? cheap_hm / cheap_mc : 0.0,
+                  exp_mc > 0 ? exp_hm / exp_mc : 0.0);
+
+            /*
+             * How to read this.  HOST WORK is hardware-counted and sees
+             * chained code, so it cannot be inflated by cpu_exit() the way a
+             * dispatcher re-entry count is.
+             *
+             *   HOST WORK ~= cycles ratio, IPC flat  -> heavy frames simply
+             *       run more code: the game is doing more (hypothesis a).
+             *   HOST WORK flat but cycles up, IPC down -> the same work is
+             *       stalling more: an emulator or memory-system effect
+             *       (hypothesis b).
+             *
+             * The old "work x" column was reentry-insn and could not tell
+             * these apart -- see perf-investigation/00-FINDINGS.md section F.
+             */
+            ALOGI("bench: MMIO cheap %.0f/frame | expensive %.0f/frame | "
+                  "x%.2f (vs host work x%.2f) -- if MMIO scales WITH host "
+                  "work the heavy frames are spinning; if flat, real game work",
+                  s_cheap_n ? (double)s_cheap_mmio / s_cheap_n : 0.0,
+                  s_exp_n ? (double)s_exp_mmio / s_exp_n : 0.0,
+                  (s_cheap_n && s_cheap_mmio) ?
+                      ((double)s_exp_mmio / s_exp_n) /
+                      ((double)s_cheap_mmio / s_cheap_n) : 0.0,
+                  cheap_hm > 0 ? exp_hm / cheap_hm : 0.0);
+
+            ALOGI("bench: cheap frames (n=%d) %.0f k reentry-insn | "
+                  "expensive (n=%d) %.0f k reentry-insn  "
+                  "(re-entry count, CONTAMINATED by cpu_exit -- not work)",
+                  s_cheap_n, cheap_ki, s_exp_n, exp_ki);
         }
     }
 }
@@ -1827,15 +2836,15 @@ static void gl_render_frame(struct xemu_console *scon)
             /*
              * Frame time, measured between NEW GUEST FRAMES.
              *
-             * This was previously sampled at eglSwapBuffers, which was wrong
-             * in a way that hid what it was meant to show: the render loop
-             * presents whether or not the guest produced a new frame (it
-             * reuses s_last_tex above), so the swap interval is pinned to the
-             * presentation cadence.  It could never read above ~31 ms and sat
-             * there while the guest was managing 20 fps.
+             * This used to be sampled at eglSwapBuffers instead, which was
+             * wrong in a way that hid exactly what it was meant to show: the
+             * render loop presents whether or not the guest produced a new
+             * frame (it reuses s_last_tex above), so the swap interval is
+             * pinned to the presentation cadence.  It could never read above
+             * ~31 ms, and sat there while the guest was managing 20 fps.
              *
              * The interval between new guest frames is the real cost of
-             * emulating a frame -- ~33 ms when keeping up, ~50 ms at 20 fps --
+             * emulating a frame: ~33 ms when keeping up, ~50 ms at 20 fps,
              * and it agrees with the fps counter beside it because both now
              * advance at the same moment.
              */
@@ -1844,6 +2853,58 @@ static void gl_render_frame(struct xemu_console *scon)
 
                 if (s_last_guest_frame_ms != 0) {
                     int ft = (int)(gnow - s_last_guest_frame_ms);
+
+                    /*
+                     * Slow-frame forensics.  The frame-time readout used to be
+                     * capped at the presentation rate, so spikes like these
+                     * were invisible; now that they are visible, log what else
+                     * happened during the frame so the cause is attributable
+                     * rather than guessed at.
+                     */
+                    /* 50 ms is 20 fps -- the floor that makes the game
+                     * hard to play.  Tunable with debug.xemu.slow_ms. */
+                    if (ft >= s_slow_ms) {
+                        unsigned long long f, pa, e;
+                        extern int xemu_android_get_compiled_shader_count(void);
+                        static unsigned long long p_nd, p_spin, p_sleep;
+                        static unsigned long long p_full, p_part;
+                        static int p_sh;
+                        int sh = xemu_android_get_compiled_shader_count();
+
+                        xemu_tlb_flush_counts(&f, &pa, &e);
+                        {
+                            uint64_t tpg = 0;
+                            unsigned long long thits = 0;
+                            static unsigned long long p_smc;
+
+                            xemu_notdirty_top(&tpg, &thits);
+                            ALOGI("bench: SLOW FRAME %d ms | shaders +%d | "
+                                  "tlb full +%llu part +%llu | notdirty +%llu "
+                                  "(smc +%llu) top page 0x%llx x%llu | "
+                                  "spin iters +%llu sleeps +%llu",
+                                  ft, sh - p_sh, f - p_full, pa - p_part,
+                                  xemu_notdirty_writes - p_nd,
+                                  xemu_notdirty_smc - p_smc,
+                                  (unsigned long long)(tpg << 12), thits,
+                                  xemu_spin_hits - p_spin,
+                                  xemu_spin_sleeps - p_sleep);
+                            p_smc = xemu_notdirty_smc;
+                        }
+                        p_sh = sh; p_full = f; p_part = pa;
+                        p_nd = xemu_notdirty_writes;
+                        p_spin = xemu_spin_hits;
+                        p_sleep = xemu_spin_sleeps;
+                    }
+
+                    if (ft > s_run_worst_ms) {
+                        s_run_worst_ms = ft;
+                    }
+                    if (ft >= 50) {
+                        s_run_over50++;
+                    }
+                    if (ft >= 66) {
+                        s_run_over66++;
+                    }
 
                     if (ft > g_worst_frame_time_ms) {
                         g_worst_frame_time_ms = ft;
@@ -1984,8 +3045,8 @@ static void gl_render_frame(struct xemu_console *scon)
     }
     {
         /* Presentation cadence only.  Deliberately NOT fed to the frame-time
-         * graph: it is floored by the display rate and so cannot show a guest
-         * that has fallen behind.  See the guest-frame site above. */
+         * graph any more: it is floored by the display rate and so cannot
+         * show a guest that has fallen behind.  See the guest-frame site. */
         int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
         if (s_last_swap_ms != 0) {

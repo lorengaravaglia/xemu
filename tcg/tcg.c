@@ -139,6 +139,31 @@ static void tcg_out_mb(TCGContext *s, unsigned bar);
 static void tcg_out_br(TCGContext *s, TCGLabel *l);
 static void tcg_out_set_carry(TCGContext *s);
 static void tcg_out_set_borrow(TCGContext *s);
+#if defined(__ANDROID__) || defined(ANDROID)
+#define XEMU_TCG_NB_OPC 512
+unsigned long long xemu_op_bytes[XEMU_TCG_NB_OPC];
+int g_tb_pad_bytes;   /* debug.xemu.tb_pad, measurement only */
+int g_ldst_pad_bytes; /* debug.xemu.ldst_pad, measurement only */
+int g_reserve_x15;    /* debug.xemu.reserve_x15, stub prerequisite */
+/*
+ * Out-of-lined guest memory access.  Off by default: it does exactly what it
+ * was designed to do -- 23% less generated code, 19.5% fewer L1I misses -- but
+ * the instructions it adds cost as much as the fetch it saves, so the net is
+ * zero.  See section AC.  Enable with debug.xemu.ldst_stub=1.
+ */
+int g_ldst_stub;
+int g_mb_mode;        /* debug.xemu.mb_mode, measurement only */
+int g_keep_tso_stores; /* debug.xemu.tso_stores=1 restores them */
+unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];
+const char *xemu_tcg_op_name(unsigned opc)
+{
+    if (opc >= XEMU_TCG_NB_OPC) {
+        return "?";
+    }
+    return tcg_op_defs[opc].name ? tcg_op_defs[opc].name : "?";
+}
+#endif
+
 static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
                        const TCGArg args[TCG_MAX_OP_ARGS],
                        const int const_args[TCG_MAX_OP_ARGS]);
@@ -6970,6 +6995,203 @@ static void tcg_out_st_helper_args(TCGContext *s, const TCGLabelQemuLdst *ldst,
     tcg_out_helper_load_common_args(s, ldst, parm, info, next_arg);
 }
 
+
+/*
+ * Dead flag elimination for the x86 condition-code globals.
+ *
+ * Ported from hakuX (tcg/tier1-opt.c, GPL-2.0-or-later, same licence).
+ * Backward liveness over cc_op/cc_dst/cc_src/cc_src2 only: an op whose sole
+ * outputs are CC globals that are already dead, and which has no side
+ * effects, is removed.
+ *
+ * Conservative everywhere it matters -- labels, block ends, conditional
+ * branches and calls all reset every CC global to live, and the walk starts
+ * with them live for the TB exit.
+ *
+ * Whether this finds anything is an open question: QEMU's own
+ * liveness_pass_1 already removes ops whose outputs are all dead and which
+ * are side-effect free.  The counter below exists to answer that before any
+ * conclusion is drawn about speed.  debug.xemu.dfe=0 disables.
+ */
+int g_xemu_dfe = 1;
+unsigned long long xemu_dfe_removed, xemu_dfe_tbs, xemu_dfe_ops_seen;
+
+#define XEMU_CC_N 4
+
+static bool xemu_find_cc_globals(TCGContext *s, TCGTemp **out)
+{
+    static const char *const names[XEMU_CC_N] = {
+        "cc_op", "cc_dst", "cc_src", "cc_src2"
+    };
+    int found = 0, i, g;
+
+    memset(out, 0, sizeof(*out) * XEMU_CC_N);
+    for (g = 0; g < s->nb_globals; g++) {
+        TCGTemp *ts = &s->temps[g];
+
+        if (!ts->name) {
+            continue;
+        }
+        for (i = 0; i < XEMU_CC_N; i++) {
+            if (!out[i] && strcmp(ts->name, names[i]) == 0) {
+                out[i] = ts;
+                found++;
+                break;
+            }
+        }
+    }
+    return found == XEMU_CC_N;
+}
+
+static inline int xemu_cc_index(TCGTemp **cc, TCGTemp *ts)
+{
+    int i;
+
+    for (i = 0; i < XEMU_CC_N; i++) {
+        if (ts == cc[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void xemu_dead_flag_elimination(TCGContext *s)
+{
+    TCGTemp *cc[XEMU_CC_N];
+    uint32_t live = (1u << XEMU_CC_N) - 1;
+    TCGOp *op, *op_prev;
+
+    if (!g_xemu_dfe || !xemu_find_cc_globals(s, cc)) {
+        return;
+    }
+    xemu_dfe_tbs++;
+
+    QTAILQ_FOREACH_REVERSE_SAFE(op, &s->ops, link, op_prev) {
+        TCGOpcode opc = op->opc;
+        const TCGOpDef *def = &tcg_op_defs[opc];
+        int nb_oargs, nb_iargs, i;
+        bool writes_cc = false, only_dead_cc = true;
+
+        xemu_dfe_ops_seen++;
+
+        if (opc == INDEX_op_set_label || opc == INDEX_op_call) {
+            live = (1u << XEMU_CC_N) - 1;
+            continue;
+        }
+        if (def->flags & (TCG_OPF_BB_EXIT | TCG_OPF_BB_END |
+                          TCG_OPF_COND_BRANCH)) {
+            live = (1u << XEMU_CC_N) - 1;
+        }
+
+        nb_oargs = def->nb_oargs;
+        nb_iargs = def->nb_iargs;
+
+        for (i = 0; i < nb_oargs; i++) {
+            int idx = xemu_cc_index(cc, arg_temp(op->args[i]));
+
+            if (idx >= 0) {
+                writes_cc = true;
+                if (live & (1u << idx)) {
+                    only_dead_cc = false;
+                }
+            } else {
+                only_dead_cc = false;
+            }
+        }
+
+        if (writes_cc && only_dead_cc && nb_oargs > 0 &&
+            !(def->flags & TCG_OPF_SIDE_EFFECTS)) {
+            tcg_op_remove(s, op);
+            xemu_dfe_removed++;
+            continue;
+        }
+
+        if (writes_cc) {
+            for (i = 0; i < nb_oargs; i++) {
+                int idx = xemu_cc_index(cc, arg_temp(op->args[i]));
+
+                if (idx >= 0) {
+                    live &= ~(1u << idx);
+                }
+            }
+        }
+        for (i = nb_oargs; i < nb_oargs + nb_iargs; i++) {
+            int idx = xemu_cc_index(cc, arg_temp(op->args[i]));
+
+            if (idx >= 0) {
+                live |= (1u << idx);
+            }
+        }
+    }
+}
+
+
+/*
+ * Guest-PC profiling map.
+ *
+ * Every profile on this project has been host-side: which TCG op, which cache
+ * level.  None has asked *which guest code* is hot.  Games usually
+ * concentrate -- a vertex transform, a collision loop, an audio mixer -- and
+ * if one Halo routine holds a large share of guest time, replacing that one
+ * routine natively beats every generic technique measured here.
+ *
+ * Records host code range -> guest PC per TB.  Correlated offline against
+ * perf samples by android/tools/guest-pc-profile.py.  debug.xemu.guest_map=1.
+ */
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/system_properties.h>
+
+typedef struct {
+    uint64_t host_addr;
+    uint32_t host_size;
+    uint32_t guest_pc;
+} XemuGuestTB;
+
+#define XM_GTB_CAP (512u * 1024u)
+
+int g_xemu_guest_map;
+const char *xemu_map_dir;
+static XemuGuestTB *xm_gtb;
+static size_t xm_gtb_n;
+static int xm_gtb_init;
+
+static void xm_gtb_lazy_init(void)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+
+    xm_gtb_init = 1;
+    if (__system_property_get("debug.xemu.guest_map", v) > 0 &&
+        (v[0] == '1' || v[0] == 'y' || v[0] == 't')) {
+        xm_gtb = calloc(XM_GTB_CAP, sizeof(*xm_gtb));
+        g_xemu_guest_map = (xm_gtb != NULL);
+    }
+    fprintf(stderr, "guest_map: %s\n", g_xemu_guest_map ? "recording" : "off");
+}
+
+void xemu_dump_guest_map(void);
+void xemu_dump_guest_map(void)
+{
+    char path[512];
+    FILE *f;
+    uint32_t n = xm_gtb_n;
+
+    if (!g_xemu_guest_map || !n) {
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/guestmap.bin",
+             xemu_map_dir ? xemu_map_dir : ".");
+    f = fopen(path, "wb");
+    if (!f) {
+        return;
+    }
+    fwrite("XGPC1", 1, 5, f);
+    fwrite(&n, 4, 1, f);
+    fwrite(xm_gtb, sizeof(*xm_gtb), n, f);
+    fclose(f);
+    fprintf(stderr, "guest_map: wrote %s (%u TBs)\n", path, n);
+}
+#endif
+
 int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
 {
     int i, num_insns;
@@ -7007,6 +7229,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     tcg_temp_ebb_reset_freed(s);
 
     tcg_optimize(s);
+    xemu_dead_flag_elimination(s);
 
     reachable_code_pass(s);
     liveness_pass_0(s);
@@ -7048,6 +7271,9 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     tb->jmp_insn_offset[0] = TB_JMP_OFFSET_INVALID;
     tb->jmp_insn_offset[1] = TB_JMP_OFFSET_INVALID;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    xemu_update_reserved_regs(s);
+#endif
     tcg_reg_alloc_start(s);
 
     /*
@@ -7071,6 +7297,16 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     s->carry_live = false;
     QTAILQ_FOREACH(op, &s->ops, link) {
         TCGOpcode opc = op->opc;
+#if defined(__ANDROID__) || defined(ANDROID)
+        /*
+         * Emitted bytes per opcode.  The emulator is backend-stalled with
+         * instruction-side misses outnumbering data-side 8.9:1, so the code
+         * footprint -- not the instruction count -- is what costs time.  This
+         * says which opcodes the 22 MB of generated code is actually spent on,
+         * so footprint work can aim rather than guess.
+         */
+        size_t xemu_bytes_before = tcg_current_code_size(s);
+#endif
 
         switch (opc) {
         case INDEX_op_extrl_i64_i32:
@@ -7149,6 +7385,12 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
             tcg_reg_alloc_op(s, op);
             break;
         }
+#if defined(__ANDROID__) || defined(ANDROID)
+        if (likely(opc < XEMU_TCG_NB_OPC)) {
+            xemu_op_bytes[opc] += tcg_current_code_size(s) - xemu_bytes_before;
+            xemu_op_count[opc]++;
+        }
+#endif
         /* Test for (pending) buffer overflow.  The assumption is that any
            one operation beginning below the high water mark cannot overrun
            the buffer completely.  Thus we can test for overflow after
@@ -7175,6 +7417,34 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     if (i < 0) {
         return i;
     }
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    /*
+     * debug.xemu.tb_pad=N appends N bytes of NOPs to every block.
+     *
+     * A measurement knob, not an optimisation.  The plan to out-of-line guest
+     * memory access rests on the claim that emitted bytes drive the 3.3M L1I
+     * refills a frame and therefore the 21% frontend stall.  Shrinking the code
+     * to test that is days of backend work; inflating it is a few lines, and
+     * the slope is the same quantity.  The padding sits after the block's last
+     * instruction so it is never executed -- it only spreads the hot blocks
+     * further apart in the buffer, which is exactly the variable of interest,
+     * with no change to what runs.
+     */
+    if (unlikely(g_tb_pad_bytes)) {
+        int pad = g_tb_pad_bytes / 4;
+        int k;
+
+        for (k = 0; k < pad; k++) {
+            if ((void *)s->code_ptr >= s->code_gen_highwater) {
+                break;
+            }
+            tcg_out_nop_fill(s->code_ptr, 1);
+            s->code_ptr++;
+        }
+    }
+#endif
+
     if (!tcg_resolve_relocs(s)) {
         return -2;
     }
@@ -7184,6 +7454,19 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     flush_idcache_range((uintptr_t)tcg_splitwx_to_rx(s->code_buf),
                         (uintptr_t)s->code_buf,
                         tcg_ptr_byte_diff(s->code_ptr, s->code_buf));
+#endif
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (unlikely(!xm_gtb_init)) {
+        xm_gtb_lazy_init();
+    }
+    if (unlikely(g_xemu_guest_map) && xm_gtb_n < XM_GTB_CAP) {
+        XemuGuestTB *r = &xm_gtb[xm_gtb_n++];
+
+        r->host_addr = (uint64_t)(uintptr_t)tcg_splitwx_to_rx(s->code_buf);
+        r->host_size = (uint32_t)tcg_current_code_size(s);
+        r->guest_pc = (uint32_t)pc_start;
+    }
 #endif
 
     return tcg_current_code_size(s);

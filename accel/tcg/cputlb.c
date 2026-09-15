@@ -286,6 +286,40 @@ static void tlb_mmu_flush_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast)
     memset(desc->vtable, -1, sizeof(desc->vtable));
 }
 
+/*
+ * TLB flush counts, for the benchmark.  QEMU already maintains these; the
+ * question is how often a full flush happens per frame.  Each one wipes all
+ * 22 mmu-mode TLBs AND calls tcg_flush_jmp_cache(), so it is far more
+ * expensive than its name suggests, and xemu triggers it from the GPU thread
+ * whenever an NV2A surface is created or destroyed.
+ */
+void xemu_tlb_flush_counts(unsigned long long *full,
+                           unsigned long long *part,
+                           unsigned long long *elide);
+/*
+ * Guest MMIO accesses.  The guest polls NV2A status registers in spin loops,
+ * and every such read leaves generated code and takes the BQL plus a device
+ * lock.  Two things need this number: the absolute rate (how much of a frame
+ * goes on polling) and the split between cheap and expensive frames -- host
+ * instructions retired cannot tell a spin iteration from real game work, but
+ * MMIO volume can.
+ */
+unsigned long long xemu_mmio_reads, xemu_mmio_writes;
+
+void xemu_tlb_flush_counts(unsigned long long *full,
+                           unsigned long long *part,
+                           unsigned long long *elide)
+{
+    CPUState *cpu = first_cpu;
+
+    *full = *part = *elide = 0;
+    if (cpu) {
+        *full  = cpu->neg.tlb.c.full_flush_count;
+        *part  = cpu->neg.tlb.c.part_flush_count;
+        *elide = cpu->neg.tlb.c.elide_flush_count;
+    }
+}
+
 static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
                                         int64_t now)
 {
@@ -1337,14 +1371,75 @@ static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
     return false;
 }
 
+/*
+ * Guest stores forced down the slow path by dirty-memory tracking.
+ *
+ * The NV2A dirty clients re-arm TLB_NOTDIRTY on VRAM pages every time the GPU
+ * side clears them, so each first store to a re-armed page traps out of
+ * generated code into here.  A rival fork that skips surface downloads also
+ * skips this re-arming -- and reportedly runs slightly faster with graphical
+ * glitches, which is the signature of exactly that trade.  This counts the
+ * traps so the size of that trade can be judged before copying it.
+ */
+unsigned long long xemu_notdirty_writes, xemu_notdirty_smc;
+
+/*
+ * Which guest pages are trapping, and how hard.
+ *
+ * notdirty_write() only clears TLB_NOTDIRTY once the page is dirty for every
+ * client.  A page that still has translated code on it stays clean for
+ * DIRTY_MEMORY_CODE, so the flag survives and EVERY store to that page traps
+ * again rather than just the first.  Data sharing a page with code therefore
+ * degrades from one trap per page to one trap per store, which is the shape
+ * of the 132k-trap frame seen in the slow-frame log.
+ *
+ * Small direct-mapped table, vCPU-thread only, no atomics.
+ */
+#define XNDP_SLOTS 64
+static struct { uint64_t page; unsigned long long hits; } xnd_pages[XNDP_SLOTS];
+
+static void xemu_notdirty_note(ram_addr_t ra)
+{
+    uint64_t pg = ra >> 12;
+    unsigned i = (unsigned)(pg * 2654435761u) & (XNDP_SLOTS - 1);
+
+    if (xnd_pages[i].page != pg) {
+        if (xnd_pages[i].hits > 1) {
+            return;             /* keep the incumbent; it is the busier one */
+        }
+        xnd_pages[i].page = pg;
+        xnd_pages[i].hits = 0;
+    }
+    xnd_pages[i].hits++;
+}
+
+void xemu_notdirty_top(uint64_t *page, unsigned long long *hits);
+void xemu_notdirty_top(uint64_t *page, unsigned long long *hits)
+{
+    int i, best = 0;
+
+    for (i = 1; i < XNDP_SLOTS; i++) {
+        if (xnd_pages[i].hits > xnd_pages[best].hits) {
+            best = i;
+        }
+    }
+    *page = xnd_pages[best].page;
+    *hits = xnd_pages[best].hits;
+    memset(xnd_pages, 0, sizeof(xnd_pages));
+}
+
 static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
                            CPUTLBEntryFull *full, uintptr_t retaddr)
 {
+    xemu_notdirty_writes++;
+
     ram_addr_t ram_addr = mem_vaddr + full->xlat_section;
 
+    xemu_notdirty_note(ram_addr);
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
 
     if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
+        xemu_notdirty_smc++;
         tb_invalidate_phys_range_fast(cpu, ram_addr, size, retaddr);
     }
 
@@ -1954,6 +2049,8 @@ static uint64_t int_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
                                 int mmu_idx, MMUAccessType type, uintptr_t ra,
                                 MemoryRegion *mr, hwaddr mr_offset)
 {
+    xemu_mmio_reads++;
+
     do {
         MemOp this_mop;
         unsigned this_size;
@@ -2495,6 +2592,8 @@ static uint64_t int_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
                                 int mmu_idx, uintptr_t ra,
                                 MemoryRegion *mr, hwaddr mr_offset)
 {
+    xemu_mmio_writes++;
+
     do {
         MemOp this_mop;
         unsigned this_size;

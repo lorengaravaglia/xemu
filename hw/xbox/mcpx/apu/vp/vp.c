@@ -38,6 +38,28 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
                            v * MCPX_HW_NOTIFIER_COUNT + notifier);
     notify_offset += 15; // Final byte is status, same for all notifiers
 
+    /*
+     * Release the audio this notifier is announcing.
+     *
+     * Everything the APU thread wrote into guest RAM for this voice -- the
+     * scatter-gather output stores below, and the DSP's -- has to be visible
+     * before the guest can observe DONE_SUCCESS here, or a guest that polls
+     * the status byte can be told the buffer is ready and then read the
+     * previous contents.  Nothing else orders those: this thread writes guest
+     * RAM directly through address_space_memory, and the status byte is a
+     * plain store.
+     *
+     * A guest waiting on the interrupt instead inherits the ordering from
+     * bql_lock()/update_irq()/bql_unlock() on the frame thread, so this only
+     * matters for the polling case -- but that is the case it costs nothing to
+     * make correct.
+     *
+     * Pre-existing on any weakly ordered host, and independent of the guest's
+     * own barriers: this is the device side, which the x86 TSO modelling in
+     * generated code never covered.
+     */
+    smp_wmb();
+
     // FIXME: Check notify enable
     // FIXME: Set NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS when appropriate
     stb_phys(&address_space_memory, notify_offset, status);

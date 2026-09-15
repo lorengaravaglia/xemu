@@ -1,4 +1,6 @@
 #include "qemu/osdep.h"
+#include "exec/tb-flush.h"
+#include "hw/core/cpu.h"
 #include "xemu_android.h"
 #include <sys/system_properties.h>
 #ifdef HAVE_ADRENOTOOLS
@@ -463,10 +465,47 @@ static void *xemu_android_thread(void *opaque) {
     argv[0] = strdup("xemu");
     argv[1] = strdup("-config_path");
     argv[2] = strdup(g_android_args->configPath);
+
+    {
+        /* Where profiling maps are written -- beside the config file. */
+        extern const char *xemu_map_dir;
+        static char mapdir[512];
+        char *slash;
+
+        snprintf(mapdir, sizeof(mapdir), "%s", g_android_args->configPath);
+        slash = strrchr(mapdir, '/');
+        if (slash) {
+            *slash = '\0';
+        }
+        xemu_map_dir = mapdir;
+        LOGI("profiling map dir: %s", xemu_map_dir);
+    }
     argv[3] = strdup("-audio");
     argv[4] = strdup("driver=aaudio");
     argv[5] = strdup("-accel");
-    argv[6] = strdup("tcg,thread=multi,tb-size=256");
+    {
+        /*
+         * Translation buffer size, in MB.  Measured host iTLB refills are
+         * ~112k/frame, and a 256 MB buffer holding 533-byte blocks scatters
+         * hot code across far more pages than the iTLB can cover, so a
+         * smaller buffer may trade recompilation for locality.  Overridable
+         * with debug.xemu.tb_size for A/B measurement.
+         */
+        char tv[PROP_VALUE_MAX] = { 0 };
+        int mb = 256;
+        char *accel = malloc(64);
+
+        if (__system_property_get("debug.xemu.tb_size", tv) > 0) {
+            int v = atoi(tv);
+
+            if (v >= 8 && v <= 1024) {
+                mb = v;
+            }
+        }
+        snprintf(accel, 64, "tcg,thread=multi,tb-size=%d", mb);
+        argv[6] = accel;
+        LOGI("tcg translation buffer: %d MB", mb);
+    }
     argv[7] = NULL;
     int argc = 7;
 
@@ -544,6 +583,31 @@ int xemu_android_get_compiled_shader_count(void) {
  * on the first frame after QEMU/NV2A is fully initialized. */
 static volatile unsigned int g_surface_scale = 1;
 
+/*
+ * Debug override for the internal render scale, for one specific experiment:
+ * does the GPU thread's memory traffic evict the vCPU's working set?
+ *
+ * Raising the scale multiplies GPU-side memory traffic (larger surfaces to
+ * render, download and copy) while leaving guest work identical -- the game
+ * issues exactly the same draws either way.  So if the vCPU's last-level miss
+ * count follows the scale, the GPU is competing for L3; if it does not, the
+ * misses are the guest's own access pattern and there is nothing to reclaim.
+ */
+static unsigned int surface_scale_override(unsigned int requested)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+
+    if (__system_property_get("debug.xemu.surface_scale", v) > 0) {
+        int n = atoi(v);
+
+        if (n >= 1 && n <= 4) {
+            LOGI("surface scale overridden to %d (was %u)", n, requested);
+            return (unsigned int)n;
+        }
+    }
+    return requested;
+}
+
 /* Rumble state written by xemu_input_update_rumble() in ui/xemu-input.c. */
 extern volatile uint16_t g_android_rumble_l;
 extern volatile uint16_t g_android_rumble_r;
@@ -555,7 +619,34 @@ void xemu_android_get_rumble(uint16_t *left, uint16_t *right)
 }
 
 void xemu_android_set_surface_scale(unsigned int scale) {
+    scale = surface_scale_override(scale);
     g_surface_scale = (scale >= 1 && scale <= 4) ? scale : 1;
+}
+
+/*
+ * "Accurate memory ordering" — restores the x86 TSO store barriers that are
+ * elided on this uniprocessor guest (see accel/tcg/translate-all.c).
+ *
+ * A safety valve rather than a tuning option.  The elision is believed correct
+ * — every guest-to-device handoff was traced and the one unordered path, the
+ * APU's, was fenced explicitly — but a rare ordering bug would show up as
+ * graphical corruption or audio glitching, and a user who hits one needs a way
+ * back without adb.
+ *
+ * Changing it invalidates every translated block, so flush.
+ */
+void xemu_android_set_accurate_mem_ordering(bool enabled) {
+    extern int g_keep_tso_stores;
+
+    if (g_keep_tso_stores == (int)enabled) {
+        return;
+    }
+    g_keep_tso_stores = (int)enabled;
+    if (first_cpu) {
+        queue_tb_flush(first_cpu);
+    }
+    LOGI("accurate memory ordering: %s", enabled ? "on (TSO stores kept)"
+                                                 : "off (stores elided)");
 }
 
 unsigned int xemu_android_get_surface_scale(void) {

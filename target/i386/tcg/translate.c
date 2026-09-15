@@ -61,6 +61,77 @@ int g_x86_inline_ic = 1;                /* debug.xemu.ic=0 disables */
  * Safe to flip at runtime: both paths keep guest FP state in env->fpregs in
  * the same format, and the flush means no half-translated block survives.
  */
+int g_cc_inline = 1;        /* debug.xemu.cc_inline=0 disables */
+int g_cc_logic = 1;         /* debug.xemu.cc_logic=0 disables the
+                             * statically-known logic path */
+int g_cc_validate;          /* debug.xemu.cc_validate=1 checks every result */
+
+/*
+ * Dump guest code bytes at a PC, so a hot guest address found by
+ * android/tools/guest-pc-profile.py can be disassembled offline and
+ * identified.  debug.xemu.dump_pc=0xbb0df
+ */
+void xemu_dump_guest_code(void);
+void xemu_dump_guest_code(void)
+{
+    char v[PROP_VALUE_MAX] = { 0 };
+    uint8_t buf[192];
+    char line[16 * 3 + 8];
+    unsigned long pc;
+    int i, j;
+
+    if (__system_property_get("debug.xemu.dump_pc", v) <= 0 || !first_cpu) {
+        return;
+    }
+    pc = strtoul(v, NULL, 0);
+    if (!pc) {
+        return;
+    }
+    if (cpu_memory_rw_debug(first_cpu, pc, buf, sizeof(buf), 0) != 0) {
+        fprintf(stderr, "dump_pc: cannot read guest 0x%lx\n", pc);
+        return;
+    }
+    fprintf(stderr, "dump_pc: guest code at 0x%lx (%zu bytes)\n",
+            pc, sizeof(buf));
+    for (i = 0; i < (int)sizeof(buf); i += 16) {
+        int n = 0;
+
+        for (j = 0; j < 16; j++) {
+            n += snprintf(line + n, sizeof(line) - n, "%02x ", buf[i + j]);
+        }
+        fprintf(stderr, "dump_pc: %08lx  %s\n", pc + i, line);
+    }
+}
+
+/*
+ * Cheap hash of the guest's architectural registers, for spin detection.
+ *
+ * A spin-wait re-reads the same location with its registers unchanged; a loop
+ * doing real work advances something every iteration.  Comparing this hash
+ * across consecutive iterations separates the two without having to know what
+ * the loop is, which is what lets the detector stay game-agnostic.
+ *
+ * EIP is deliberately excluded -- it changes within the loop.
+ */
+uint64_t xemu_guest_reg_hash(void);
+uint64_t xemu_guest_reg_hash(void)
+{
+    CPUX86State *env;
+    uint64_t h = 1469598103934665603ull;
+    int i;
+
+    if (!first_cpu) {
+        return 0;
+    }
+    env = cpu_env(first_cpu);
+    for (i = 0; i < CPU_NB_REGS; i++) {
+        h = (h ^ (uint64_t)env->regs[i]) * 1099511628211ull;
+    }
+    h = (h ^ (uint64_t)env->cc_dst) * 1099511628211ull;
+    h = (h ^ (uint64_t)env->cc_src) * 1099511628211ull;
+    return h;
+}
+
 void x86_refresh_fpu_mode(void);
 void x86_refresh_fpu_mode(void)
 {
@@ -92,6 +163,261 @@ void x86_refresh_fpu_mode(void)
             }
         }
     }
+
+    {
+        /*
+         * Boundary-cost probe for the static-register-allocation question.
+         * one_insn_per_tb puts every guest instruction in its own TB, so the
+         * per-TB costs -- the global sync to env, the reload on entry, and
+         * dispatch -- are paid 6.5x more often.  Measuring the slope gives
+         * the real cost of a TB boundary, which is what SRA would remove part
+         * of, without having to build SRA to find out.
+         */
+        extern bool one_insn_per_tb;
+        char ov[PROP_VALUE_MAX] = { 0 };
+        bool want = (__system_property_get("debug.xemu.one_insn_tb", ov) > 0 &&
+                     (ov[0] == '1' || ov[0] == '2' || ov[0] == 'y' ||
+                      ov[0] == 't'));
+
+        {
+            extern int g_xemu_keep_chain;
+            g_xemu_keep_chain = (ov[0] == '2');
+        }
+        if (want != one_insn_per_tb) {
+            one_insn_per_tb = want;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
+    {
+        extern uint32_t g_spin_lo, g_spin_hi;
+        extern int g_spin_us, g_spin_thresh;
+        char v1[PROP_VALUE_MAX] = { 0 }, v2[PROP_VALUE_MAX] = { 0 };
+        char v3[PROP_VALUE_MAX] = { 0 }, v4[PROP_VALUE_MAX] = { 0 };
+        uint32_t lo = 0, hi = 0;
+
+        if (__system_property_get("debug.xemu.spin_lo", v1) > 0) {
+            lo = (uint32_t)strtoul(v1, NULL, 0);
+        }
+        if (__system_property_get("debug.xemu.spin_hi", v2) > 0) {
+            hi = (uint32_t)strtoul(v2, NULL, 0);
+        }
+        if (__system_property_get("debug.xemu.spin_us", v3) > 0) {
+            g_spin_us = atoi(v3) ? atoi(v3) : 200;
+        }
+        if (__system_property_get("debug.xemu.spin_thresh", v4) > 0) {
+            g_spin_thresh = atoi(v4) ? atoi(v4) : 64;
+        }
+        /*
+         * Only a non-zero property overrides.  Writing 0 back on every
+         * refresh would wipe a range the detector had just found.
+         */
+        if (lo && (lo != g_spin_lo || hi != g_spin_hi)) {
+            g_spin_lo = lo;
+            g_spin_hi = hi;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+
+        {
+            extern int g_keep_tso_stores;
+            char kv[PROP_VALUE_MAX] = { 0 };
+
+            /*
+             * Only honour the property when it is actually set.  The setting
+             * is normally driven from the UI through
+             * xemu_android_set_accurate_mem_ordering(), and an unconditional
+             * read here would stomp that back to 0 on the next refresh.
+             */
+            if (__system_property_get("debug.xemu.tso_stores", kv) > 0) {
+                int wantk = (kv[0] == '1' || kv[0] == 'y' || kv[0] == 't');
+
+                if (wantk != g_keep_tso_stores) {
+                    g_keep_tso_stores = wantk;
+                    if (first_cpu) {
+                        queue_tb_flush(first_cpu);
+                    }
+                }
+            }
+        }
+
+        {
+            extern int g_mb_mode;
+            char mv[PROP_VALUE_MAX] = { 0 };
+            int wantm = __system_property_get("debug.xemu.mb_mode", mv) > 0 ?
+                        atoi(mv) : 0;
+
+            if (wantm < 0 || wantm > 4) {
+                wantm = 0;
+            }
+            if (wantm != g_mb_mode) {
+                g_mb_mode = wantm;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
+            extern int g_ldst_stub;
+            char sv[PROP_VALUE_MAX] = { 0 };
+            int wants = __system_property_get("debug.xemu.ldst_stub", sv) > 0
+                        && (sv[0] == '1' || sv[0] == 'y' || sv[0] == 't');
+
+            if (wants != g_ldst_stub) {
+                g_ldst_stub = wants;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
+            extern int g_reserve_x15;
+            char rv[PROP_VALUE_MAX] = { 0 };
+            int wantr = __system_property_get("debug.xemu.reserve_x15", rv) > 0
+                        && (rv[0] == '1' || rv[0] == 'y' || rv[0] == 't');
+
+            if (wantr != g_reserve_x15) {
+                g_reserve_x15 = wantr;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
+            extern int g_ldst_pad_bytes;
+            char qv[PROP_VALUE_MAX] = { 0 };
+            int wantq = __system_property_get("debug.xemu.ldst_pad", qv) > 0 ?
+                        atoi(qv) : 0;
+
+            if (wantq < 0 || wantq > 64) {
+                wantq = 0;
+            }
+            if (wantq != g_ldst_pad_bytes) {
+                g_ldst_pad_bytes = wantq;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
+            extern int g_tb_pad_bytes;
+            char pv[PROP_VALUE_MAX] = { 0 };
+            int want = __system_property_get("debug.xemu.tb_pad", pv) > 0 ?
+                       atoi(pv) : 0;
+
+            if (want < 0 || want > 256) {
+                want = 0;
+            }
+            if (want != g_tb_pad_bytes) {
+                g_tb_pad_bytes = want;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
+            extern int g_nochain;
+            char nv[PROP_VALUE_MAX] = { 0 };
+            int want = __system_property_get("debug.xemu.nochain", nv) > 0 &&
+                       (nv[0] == '1' || nv[0] == 'y' || nv[0] == 't');
+
+            if (want != g_nochain) {
+                g_nochain = want;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
+            extern int g_spin_auto;
+            char av[PROP_VALUE_MAX] = { 0 };
+
+            /* Opt-in: absent property means off, matching g_spin_auto's default. */
+            g_spin_auto = __system_property_get("debug.xemu.spin_auto", av) > 0
+                          && (av[0] == '1' || av[0] == 'y' || av[0] == 't');
+            /* spin_lo=0 with auto off means "no elision at all". */
+            if (!g_spin_auto && !lo) {
+                g_spin_lo = g_spin_hi = 0;
+            }
+        }
+    }
+
+    {
+        extern int g_xbox_tb_overlap_test;
+        char tv[PROP_VALUE_MAX] = { 0 };
+        int want = (__system_property_get("debug.xemu.tb_overlap", tv) > 0 &&
+                    (tv[0] == '1' || tv[0] == 'y' || tv[0] == 't'));
+
+        if (want != g_xbox_tb_overlap_test) {
+            g_xbox_tb_overlap_test = want;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
+    {
+        extern int g_xemu_dfe;
+        char dv[PROP_VALUE_MAX] = { 0 };
+        int want = !(__system_property_get("debug.xemu.dfe", dv) > 0 &&
+                     (dv[0] == '0' || dv[0] == 'n' || dv[0] == 'f'));
+
+        if (want != g_xemu_dfe) {
+            g_xemu_dfe = want;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
+    {
+        extern int g_cc_fastpath;
+        char fv[PROP_VALUE_MAX] = { 0 };
+
+        g_cc_fastpath = !(__system_property_get("debug.xemu.cc_fastpath", fv) > 0
+                          && (fv[0] == '0' || fv[0] == 'n' || fv[0] == 'f'));
+    }
+
+    {
+        char iv[PROP_VALUE_MAX] = { 0 };
+        char vv[PROP_VALUE_MAX] = { 0 };
+        int want = !(__system_property_get("debug.xemu.cc_inline", iv) > 0 &&
+                     (iv[0] == '0' || iv[0] == 'n' || iv[0] == 'f'));
+        int wantv = (__system_property_get("debug.xemu.cc_validate", vv) > 0 &&
+                     (vv[0] == '1' || vv[0] == 'y' || vv[0] == 't'));
+
+        {
+            char lv[PROP_VALUE_MAX] = { 0 };
+            int wantl = !(__system_property_get("debug.xemu.cc_logic", lv) > 0
+                          && (lv[0] == '0' || lv[0] == 'n' || lv[0] == 'f'));
+
+            if (wantl != g_cc_logic) {
+                g_cc_logic = wantl;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        if (want != g_cc_inline || wantv != g_cc_validate) {
+            g_cc_inline = want;
+            g_cc_validate = wantv;
+            xemu_ic_generation++;
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+        }
+    }
+
 }
 #endif
 
@@ -1052,7 +1378,134 @@ static void gen_movs(DisasContext *s, MemOp ot, TCGv dshift)
     gen_op_add_reg(s, s->aflag, R_EDI, dshift);
 }
 
+/*
+ * Inline EFLAGS for CC_OP_LOGICB.
+ *
+ * After CC_OP_SUBL was inlined, LOGICB became 96% of the calls still reaching
+ * helper_cc_compute_all (~37.5k of 39.1k per frame).  Logic ops are far
+ * cheaper to compute than SUB: AND/OR/XOR/TEST define CF, OF and AF as zero,
+ * so only PF, ZF and SF are live.
+ *
+ * Mirrors compute_all_logic (cc_helper_template.h.inc:137) for B/W/L.  Two
+ * things make it cheap: parity always reads the low byte whatever the operand
+ * width, and the helper's parity_table lookup folds into shift/xor pairs, so
+ * this stays register-only with no memory reference.
+ */
+static void gen_inline_eflags_logic(TCGv reg, TCGv dst, int bits)
+{
+    TCGv d = tcg_temp_new();
+    TCGv t = tcg_temp_new();
+    TCGv u = tcg_temp_new();
+
+    tcg_gen_andi_tl(d, dst, bits == 8 ? 0xffu :
+                            bits == 16 ? 0xffffu : 0xffffffffu);
+
+    /* PF always reads the LOW BYTE, whatever the operand width. */
+    tcg_gen_shri_tl(t, d, 4);
+    tcg_gen_xor_tl(t, t, d);
+    tcg_gen_shri_tl(u, t, 2);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_shri_tl(u, t, 1);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_andi_tl(t, t, 1);        /* 1 = odd parity */
+    tcg_gen_xori_tl(t, t, 1);        /* 1 = even parity, which sets PF */
+    tcg_gen_shli_tl(t, t, 2);        /* CC_P */
+
+    /* SF = lshift(dst, 8 - bits) & CC_S: the operand's top bit moved into
+     * CC_S's position.  At byte width that is a plain mask, no shift. */
+    if (bits == 8) {
+        tcg_gen_andi_tl(u, d, 0x80);
+    } else {
+        tcg_gen_shri_tl(u, d, bits - 8);
+        tcg_gen_andi_tl(u, u, 0x80);
+    }
+    tcg_gen_or_tl(t, t, u);
+
+    /* ZF */
+    tcg_gen_setcondi_tl(TCG_COND_EQ, u, d, 0);
+    tcg_gen_shli_tl(u, u, 6);        /* CC_Z */
+    tcg_gen_or_tl(reg, t, u);
+}
+
 /* compute all eflags to reg */
+
+/*
+ * Inline EFLAGS for CC_OP_SUBL.
+ *
+ * cc_op resets to CC_OP_DYNAMIC at every TB entry, so the first flag consumer
+ * in a block calls helper_cc_compute_all even though the runtime op is a
+ * plain 32-bit compare 94% of the time (measured: ~678k calls/frame against
+ * ~740k TB executions).  Short-circuiting the helper's switch was measured at
+ * zero, so the cost is the call itself; this emits the computation instead.
+ *
+ * Mirrors compute_all_subl exactly.  CC_SRC is the minuend, CC_DST the
+ * result, so the subtrahend is recovered as src1 - dst.  Parity is folded
+ * with shifts rather than a table lookup to keep it register-only.
+ */
+static void gen_inline_eflags_subl(TCGv reg, TCGv dst, TCGv src2)
+{
+    TCGv src1 = tcg_temp_new();
+    TCGv carries = tcg_temp_new();
+    TCGv acc = tcg_temp_new();
+    TCGv t = tcg_temp_new();
+    TCGv u = tcg_temp_new();
+
+    /*
+     * Mirrors compute_all_subl exactly -- see cc_helper_template.h.inc and
+     * SUB_COUT_VEC/MAJ_INV1 in cpu.h.  Note the second helper argument is
+     * src2, the SUBTRAHEND, and the minuend is recovered as dst + src2; a
+     * first version of this had the two the other way round and produced a
+     * wrong carry flag on 6.4% of executions.
+     */
+    tcg_gen_add_tl(src1, dst, src2);
+
+    /* carries = MAJ_INV1(src1, src2, dst) = ((src1^src2) & (src2^dst)) ^ dst */
+    tcg_gen_xor_tl(t, src1, src2);
+    tcg_gen_xor_tl(u, src2, dst);
+    tcg_gen_and_tl(t, t, u);
+    tcg_gen_xor_tl(carries, t, dst);
+
+    /* PF: set when the low byte has even parity */
+    tcg_gen_andi_tl(t, dst, 0xff);
+    tcg_gen_shri_tl(u, t, 4);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_shri_tl(u, t, 2);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_shri_tl(u, t, 1);
+    tcg_gen_xor_tl(t, t, u);
+    tcg_gen_not_tl(t, t);
+    tcg_gen_andi_tl(t, t, 1);
+    tcg_gen_shli_tl(acc, t, 2);                 /* CC_P */
+
+    /* ZF */
+    tcg_gen_setcondi_tl(TCG_COND_EQ, t, dst, 0);
+    tcg_gen_shli_tl(t, t, 6);                   /* CC_Z */
+    tcg_gen_or_tl(acc, acc, t);
+
+    /* SF: bit 31 of the result down to bit 7 */
+    tcg_gen_shri_tl(t, dst, 24);
+    tcg_gen_andi_tl(t, t, 0x80);                /* CC_S */
+    tcg_gen_or_tl(acc, acc, t);
+
+    /* AF and CF: rotate the carry vector left by one, keep bits 4 and 0 */
+    tcg_gen_shli_tl(t, carries, 1);
+    tcg_gen_shri_tl(u, carries, 31);
+    tcg_gen_or_tl(t, t, u);
+    tcg_gen_andi_tl(t, t, 0x11);                /* CC_A | CC_C */
+    tcg_gen_or_tl(acc, acc, t);
+
+    /*
+     * OF: the top two carry bits land in CC_O and the bit to its right, and
+     * adding CC_O/2 XORs them.  This must be an add, not an or.
+     */
+    tcg_gen_shri_tl(t, carries, 20);
+    tcg_gen_addi_tl(t, t, 0x400);
+    tcg_gen_andi_tl(t, t, 0x800);               /* CC_O */
+    tcg_gen_or_tl(acc, acc, t);
+
+    tcg_gen_mov_tl(reg, acc);
+}
+
 static void gen_mov_eflags(DisasContext *s, TCGv reg)
 {
     TCGv dst, src1, src2;
@@ -1084,11 +1537,94 @@ static void gen_mov_eflags(DisasContext *s, TCGv reg)
         }
     }
 
+    /*
+     * Statically known logic op: emit the computation with no dispatch.
+     *
+     * The runtime check below only fires when cc_op is DYNAMIC, but most
+     * LOGICB calls are not -- the translator already knows the op, takes the
+     * tcg_constant_i32 path, and calls the helper anyway.  Inlining the
+     * dynamic case alone only moved 39.1k calls/frame to 26.8k, with the
+     * remainder still 96% LOGICB for exactly this reason.  These sites are the
+     * better ones to catch: no compare, no branch, strictly less code than the
+     * dispatched version.
+     */
+    if (g_cc_inline && g_cc_logic &&
+        (s->cc_op == CC_OP_LOGICB || s->cc_op == CC_OP_LOGICW ||
+         s->cc_op == CC_OP_LOGICL)) {
+        int bits = s->cc_op == CC_OP_LOGICB ? 8 :
+                   s->cc_op == CC_OP_LOGICW ? 16 : 32;
+
+        if (g_cc_validate && bits == 8) {
+            TCGv save_dst = tcg_temp_new();
+
+            tcg_gen_mov_tl(save_dst, dst);
+            gen_inline_eflags_logic(reg, dst, bits);
+            gen_helper_cc_check_logicb(reg, reg, save_dst);
+        } else {
+            gen_inline_eflags_logic(reg, dst, bits);
+        }
+        return;
+    }
+
     if (s->cc_op != CC_OP_DYNAMIC) {
         cc_op = tcg_constant_i32(s->cc_op);
     } else {
         cc_op = cpu_cc_op;
     }
+
+    if (s->cc_op == CC_OP_DYNAMIC && g_cc_inline) {
+        TCGLabel *slow = gen_new_label();
+        TCGLabel *done = gen_new_label();
+
+        tcg_gen_brcondi_i32(TCG_COND_NE, cpu_cc_op, CC_OP_SUBL, slow);
+        if (g_cc_validate) {
+            /*
+             * reg is usually cpu_cc_src itself (gen_compute_eflags passes it),
+             * so the inline computation overwrites the operand.  Snapshot the
+             * inputs first or the checker compares against the result it just
+             * produced -- which is what made the first validation run report
+             * a 6% mismatch rate that had nothing to do with the arithmetic.
+             */
+            TCGv save_dst = tcg_temp_new();
+            TCGv save_src = tcg_temp_new();
+
+            tcg_gen_mov_tl(save_dst, cpu_cc_dst);
+            tcg_gen_mov_tl(save_src, cpu_cc_src);
+            gen_inline_eflags_subl(reg, cpu_cc_dst, cpu_cc_src);
+            gen_helper_cc_check_subl(reg, reg, save_dst, save_src);
+        } else {
+            gen_inline_eflags_subl(reg, cpu_cc_dst, cpu_cc_src);
+        }
+        tcg_gen_br(done);
+        gen_set_label(slow);
+
+        /*
+         * LOGICB second, not first: SUBL is still the most common op overall
+         * (94% of flag consumers before it was inlined), and LOGICB's 96% is a
+         * share of the small remainder that SUBL does not already take.
+         */
+        {
+            TCGLabel *slow2 = gen_new_label();
+
+            tcg_gen_brcondi_i32(TCG_COND_NE, cpu_cc_op, CC_OP_LOGICB, slow2);
+            if (g_cc_validate) {
+                TCGv save_dst = tcg_temp_new();
+
+                tcg_gen_mov_tl(save_dst, cpu_cc_dst);
+                gen_inline_eflags_logic(reg, cpu_cc_dst, 8);
+                gen_helper_cc_check_logicb(reg, reg, save_dst);
+            } else {
+                gen_inline_eflags_logic(reg, cpu_cc_dst, 8);
+            }
+            tcg_gen_br(done);
+            gen_set_label(slow2);
+        }
+
+        gen_helper_cc_compute_all(reg, dst, src1, src2, cc_op);
+        gen_set_label(done);
+        return;
+    }
+
     gen_helper_cc_compute_all(reg, dst, src1, src2, cc_op);
 }
 
@@ -1603,6 +2139,8 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
      */
     gen_update_cc_op(s);
     tcg_set_insn_start_param(s->base.insn_start, 1, CC_OP_DYNAMIC);
+
+    gen_helper_xemu_count_rep(cpu_regs[R_ECX]);
 
     /* Any iteration at all?  */
     tcg_gen_brcondi_tl(TCG_COND_TSTEQ, cpu_regs[R_ECX], cx_mask, done);

@@ -123,7 +123,17 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val _hrtf = MutableStateFlow(prefs.getBoolean("audio_hrtf", false))
     val hrtf: StateFlow<Boolean> = _hrtf
 
+    private val _accurateMemOrdering =
+        MutableStateFlow(prefs.getBoolean("accurate_mem_ordering", false))
+    val accurateMemOrdering: StateFlow<Boolean> = _accurateMemOrdering
+
     /** Applies immediately: the APU re-reads this every audio frame. */
+    fun setAccurateMemOrdering(value: Boolean) {
+        _accurateMemOrdering.value = value
+        prefs.edit().putBoolean("accurate_mem_ordering", value).apply()
+        NativeInterface.setAccurateMemoryOrdering(value)
+    }
+
     fun setHrtf(value: Boolean) {
         _hrtf.value = value
         prefs.edit().putBoolean("audio_hrtf", value).apply()

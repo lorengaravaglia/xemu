@@ -2,6 +2,29 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Performance Investigation — READ BEFORE PROPOSING OPTIMIZATIONS
+
+`perf-investigation/00-FINDINGS.md` is the living record of this port's
+performance work: established measurements, ranked leads, and a **dead-ends
+table of ideas already tried and disproved with numbers**.
+
+Read it before proposing or building any performance change. Several
+confident, plausible theories have been falsified here by measurement
+(fastmem, memory barriers, TLB sizing, codegen density, surface churn), and
+re-deriving them costs hours. Add new results to it as they are established —
+negative results especially, since those are what stop the same ground being
+covered twice.
+
+Two rules that came out of that work and are worth applying to any new claim:
+
+1. **Verify the instrumentation before believing the number.** Print absolute
+   counter values, not just deltas; a plausible zero is usually a broken
+   probe. This has caught five wrong answers.
+2. **A/B interleaved inside one process, discarding a warmup after each
+   toggle.** Thermal drift across a session is ~8%, the same size as the
+   effects being measured, and cross-process comparisons have produced
+   outright wrong conclusions.
+
 ## Project Overview
 
 This is **xemu** — an original Xbox emulator — being ported to Android. The codebase is a fork of QEMU targeting the i386-softmmu machine type with Xbox hardware emulation. The Android port is an active work-in-progress.
