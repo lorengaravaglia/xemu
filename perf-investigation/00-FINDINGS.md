@@ -2015,3 +2015,53 @@ proven is that no other guest -> device handoff exists outside the PFIFO and
 APU register paths; the audit covered every thread and every RAM pointer in
 `hw/xbox`, which is the whole surface unless a device reaches guest memory
 through `address_space_*` from its own thread.
+
+### AF.1 The `address_space_*` paths (2026-09-13)
+
+Section AF audited devices by their RAM pointers and threads.  The remaining
+exposure was a device reaching guest memory through `address_space_*` /
+`pci_dma_*` from its own thread, which that audit would not have caught.  Four
+files in `hw/xbox` use those calls; here is every one.
+
+**guest -> device reads** — these need the guest's stores to be visible:
+
+| path | thread | ordered by | status |
+|---|---|---|---|
+| PFIFO -> pgraph | pfifo_thread | `d->pfifo.lock` | safe |
+| APU DSP `ldl_le_phys` (gp_ep.c:87) | apu_thread | `smp_wmb`/`smp_rmb` added in AF | fixed |
+| APU voice workers | workers | `vwd->lock` handoff from apu_thread | safe |
+| **nvnet TX (nvnet.c:349,525)** | **vCPU thread** | same thread, program order | **safe** |
+
+nvnet is the one worth spelling out: it creates no thread, and
+`dma_packet_from_guest()` runs from the `NVNET_TX_RX_CONTROL` MMIO handler on
+the KICK bit — so the guest's packet stores and the device's DMA read happen on
+the same thread.  There is no cross-thread ordering to provide, with or without
+barriers.
+
+**device -> guest writes** — these depend on *device-side* store ordering:
+
+| path | thread | note |
+|---|---|---|
+| vp.c notifiers (43, 47) | apu_thread | two `stb_phys` with nothing between them |
+| vp.c scatter-gather (449, 485, 536) | apu_thread | same |
+| nvnet RX (424, 371) | main loop, BQL | same |
+
+**These are not affected by section AE.**  That change removed the *guest's*
+store-side barriers; it did not touch the ordering of stores made by device
+threads, which was never provided by guest barriers in the first place.
+
+They are worth recording as a pre-existing latent issue on any weakly-ordered
+host, independent of this work.  `vp.c:43-47` writes a status byte and then a
+"ready" byte with no barrier between, which is device -> guest message passing
+that a weakly-ordered host may reorder.  It is mostly masked because the frame
+thread announces completion through `bql_lock(); update_irq(); bql_unlock()`,
+and a guest waiting on the interrupt gets the ordering from that release
+/acquire.  A guest that *polls* the notifier instead would be exposed.  Not
+introduced here and not fixed here.
+
+### Audit conclusion
+
+**No guest -> device handoff is left unordered.**  Every one runs on the vCPU
+thread, behind a mutex, or behind the fence added in AF.  The store-side
+elision in AE is sound on the surface that exists today, and the gate on
+`smp.max_cpus == 1` keeps it sound if a multiprocessor guest is ever added.
