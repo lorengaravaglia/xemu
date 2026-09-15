@@ -35,6 +35,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp as composeDp
 import com.xemu.ui.theme.XemuTheme
@@ -693,139 +694,153 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private var isExiting = false
     private lateinit var menuBtn: TextView
     private lateinit var root: FrameLayout
-    private var menuOverlay: View? = null
+    private var overlayView: View? = null
+    private var overlayTransition: MutableTransitionState<Boolean>? = null
 
     /**
-     * Show the menu anchored under the MENU pill.
+     * Host a Compose overlay in the activity's own view tree.
      *
-     * This replaced a BottomSheetDialog.  The activity is locked to landscape,
-     * where a bottom sheet opens at its collapsed peek height against a short
-     * viewport, so most of the list sat below the fold and had to be dragged up
-     * every time.
-     *
-     * It is added to the activity's own root rather than shown in a
-     * PopupWindow: a popup gets its own window whose decor view has no
+     * Not a PopupWindow: a popup gets its own window whose decor view has no
      * ViewTreeLifecycleOwner, and Compose walks up to the window root to build
      * its recomposer, so a ComposeView inside one dies with
      * "ViewTreeLifecycleOwner not found".  Living in the activity's tree also
-     * means the menu is positioned against the same coordinate space as the
-     * button, so it cannot open off-screen.
+     * puts the overlay in the same coordinate space as the views it is
+     * positioned against, so it cannot land off-screen.
+     *
+     * [content] receives the transition driving its enter/exit animation and a
+     * callback to run once it has finished animating out.  Removal is bound to
+     * this particular view rather than to "whatever is open", because the menu
+     * starts its exit animation and immediately opens the slot picker — a
+     * shared reference would have the menu's removal take the picker with it.
      */
-    private fun showMenuPopup(anchor: View) {
-        if (menuOverlay != null) {
-            dismissMenuPopup()
-            return
-        }
-
+    private fun showOverlay(
+        gravity: Int,
+        topMarginPx: Int = 0,
+        rightMarginPx: Int = 0,
+        dimBackground: Boolean = false,
+        content: @Composable (MutableTransitionState<Boolean>, () -> Unit) -> Unit,
+    ) {
         val transition = MutableTransitionState(false).apply { targetState = true }
-
-        /* Bound by the screen, not by the content: whatever the menu grows to,
-         * it stays inside the viewport and scrolls instead. */
-        val topPx = anchor.bottom + 8.dp
-        val maxHeightDp =
-            ((resources.displayMetrics.heightPixels - topPx - 16.dp) /
-             resources.displayMetrics.density).composeDp
-
         val overlay = FrameLayout(this).apply {
-            /* Catches taps outside the menu. */
             isClickable = true
-            setOnClickListener { dismissMenuPopup() }
+            if (dimBackground) setBackgroundColor(Color.argb(140, 0, 0, 0))
+            setOnClickListener { dismissOverlay() }
         }
 
-        val composeView = ComposeView(this).apply {
-            setContent {
-                XemuTheme {
-                    InGameMenu(
-                        initialOverlayLabel = overlayModeLabel(),
-                        initialHrtfOn = mainPrefs.getBoolean("audio_hrtf", false),
-                        recordingLabel = when {
-                            InputRecorder.isRecording -> "Stop Recording"
-                            InputRecorder.isPlaying   -> "Playback active"
-                            else                      -> "Record Input"
-                        },
-                        isRecordingBusy = InputRecorder.isPlaying,
-                        maxHeight = maxHeightDp,
-                        visibleState = transition,
-                        onFullyHidden = { removeMenuOverlay() },
-                        onCycleOverlay = { cycleOverlayMode() },
-                        onToggleHrtf = { toggleHrtf() },
-                        onSaveState = { dismissMenuPopup(); showSaveStateDialog() },
-                        onLoadState = { dismissMenuPopup(); showLoadStateDialog() },
-                        onMapControls = {
-                            dismissMenuPopup()
-                            startActivity(Intent(this@EmulationActivity,
-                                                 MappingActivity::class.java))
-                        },
-                        onToggleRecording = { dismissMenuPopup(); toggleRecording() },
-                        onPlayRecording = { dismissMenuPopup(); showPlayRecordingDialog() },
-                        onExit = { dismissMenuPopup(); confirmExit() },
-                    )
-                }
+        val removeThis = {
+            root.removeView(overlay)
+            if (overlayView === overlay) {
+                overlayView = null
+                overlayTransition = null
             }
         }
 
+        val composeView = ComposeView(this).apply {
+            setContent { XemuTheme { content(transition, removeThis) } }
+        }
         overlay.addView(composeView, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP or Gravity.END,
-        ).apply { topMargin = topPx; rightMargin = 16.dp })
+            gravity,
+        ).apply { topMargin = topMarginPx; rightMargin = rightMarginPx })
 
         root.addView(overlay, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT,
         ))
-        menuOverlay = overlay
-        menuTransition = transition
+        overlayView = overlay
+        overlayTransition = transition
     }
 
-    private var menuTransition: MutableTransitionState<Boolean>? = null
+    /** Starts the close animation; the view is removed once it finishes. */
+    private fun dismissOverlay() {
+        overlayTransition?.targetState = false
+    }
 
-    /** Starts the close animation; the view is removed in [removeMenuOverlay]
-     *  once it finishes, so the menu shrinks back into the button. */
-    private fun dismissMenuPopup() {
-        menuTransition?.targetState = false
-        if (menuTransition == null) {
-            removeMenuOverlay()
+    /**
+     * The in-game menu, anchored under the MENU pill.
+     *
+     * This replaced a BottomSheetDialog.  The activity is locked to landscape,
+     * where a sheet opens at its collapsed peek height against a short
+     * viewport, so most of the list sat below the fold every time.
+     */
+    private fun showMenuPopup(anchor: View) {
+        if (overlayView != null) {
+            dismissOverlay()
+            return
+        }
+
+        val topPx = anchor.bottom + 8.dp
+        val maxHeightDp =
+            ((resources.displayMetrics.heightPixels - topPx - 16.dp) /
+             resources.displayMetrics.density).composeDp
+
+        showOverlay(Gravity.TOP or Gravity.END, topPx, 16.dp) { transition, onHidden ->
+            InGameMenu(
+                initialOverlayLabel = overlayModeLabel(),
+                initialHrtfOn = mainPrefs.getBoolean("audio_hrtf", false),
+                recordingLabel = when {
+                    InputRecorder.isRecording -> "Stop Recording"
+                    InputRecorder.isPlaying   -> "Playback active"
+                    else                      -> "Record Input"
+                },
+                isRecordingBusy = InputRecorder.isPlaying,
+                maxHeight = maxHeightDp,
+                visibleState = transition,
+                onFullyHidden = onHidden,
+                onCycleOverlay = { cycleOverlayMode() },
+                onToggleHrtf = { toggleHrtf() },
+                onSaveState = { dismissOverlay(); showSlotPicker(isSave = true) },
+                onLoadState = { dismissOverlay(); showSlotPicker(isSave = false) },
+                onMapControls = {
+                    dismissOverlay()
+                    startActivity(Intent(this@EmulationActivity,
+                                         MappingActivity::class.java))
+                },
+                onToggleRecording = { dismissOverlay(); toggleRecording() },
+                onPlayRecording = { dismissOverlay(); showPlayRecordingDialog() },
+                onExit = { dismissOverlay(); confirmExit() },
+            )
         }
     }
 
-    private fun removeMenuOverlay() {
-        menuOverlay?.let { root.removeView(it) }
-        menuOverlay = null
-        menuTransition = null
+    /**
+     * Save/load slot picker.  Eight tiles in two rows of four rather than the
+     * eight-item AlertDialog it replaced, which ran off the bottom of a
+     * landscape screen and left the last slot unreachable.
+     */
+    private fun showSlotPicker(isSave: Boolean) {
+        val existing = NativeInterface.listStates().toSet()
+        val slots = (1..8).map { n ->
+            SlotInfo(n, "${gameId}_slot_$n" in existing)
+        }
+
+        showOverlay(Gravity.CENTER, dimBackground = true) { transition, onHidden ->
+            SlotPicker(
+                title = if (isSave) "Save State" else "Load State",
+                slots = slots,
+                isSave = isSave,
+                visibleState = transition,
+                onFullyHidden = onHidden,
+                onCancel = { dismissOverlay() },
+                onPick = { n ->
+                    dismissOverlay()
+                    val name = "${gameId}_slot_$n"
+                    if (isSave) {
+                        NativeInterface.saveState(name)
+                        Toast.makeText(this, "Saved to Slot $n",
+                                       Toast.LENGTH_SHORT).show()
+                    } else {
+                        NativeInterface.loadState(name)
+                        Toast.makeText(this, "Loaded Slot $n",
+                                       Toast.LENGTH_SHORT).show()
+                    }
+                },
+            )
+        }
     }
 
     // ── Save / load state dialogs ─────────────────────────────────────────────
-
-    private fun showSaveStateDialog() {
-        val slotLabels = Array(8) { i -> "Slot ${i + 1}" }
-        AlertDialog.Builder(this)
-            .setTitle("Save State")
-            .setItems(slotLabels) { _, which ->
-                NativeInterface.saveState("${gameId}_slot_${which + 1}")
-                Toast.makeText(this, "Saved to Slot ${which + 1}", Toast.LENGTH_SHORT).show()
-            }
-            .show()
-    }
-
-    private fun showLoadStateDialog() {
-        val existingSlots = NativeInterface.listStates().toSet()
-        val slotLabels = Array(8) { i ->
-            val name = "${gameId}_slot_${i + 1}"
-            if (name in existingSlots) "Slot ${i + 1}" else "Slot ${i + 1} (empty)"
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Load State")
-            .setItems(slotLabels) { _, which ->
-                val name = "${gameId}_slot_${which + 1}"
-                if (name in existingSlots) {
-                    NativeInterface.loadState(name)
-                } else {
-                    Toast.makeText(this, "Slot ${which + 1} is empty", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .show()
-    }
 
     // ── Input recording / playback dialogs ────────────────────────────────────
 
