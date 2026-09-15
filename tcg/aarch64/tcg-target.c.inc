@@ -1730,6 +1730,8 @@ static void tcg_out_mb(TCGContext *s, unsigned a0)
      *   0  normal
      *   1  emit a NOP in place of the DMB
      *   2  emit nothing
+     *   3  keep load-side barriers, drop store-side  (defensible: see below)
+     *   4  keep store-side barriers, drop load-side  (unsafe, for measurement)
      *
      * Mode 1 is the point.  Suppressing barriers was measured at zero before,
      * but on wall time with counters reading 0.4x, and the explanation given
@@ -1745,6 +1747,35 @@ static void tcg_out_mb(TCGContext *s, unsigned a0)
      * instruction and byte saving on top.
      */
     if (unlikely(g_mb_mode)) {
+        /*
+         * Modes 3 and 4 split the two directions, which have different safety
+         * arguments.
+         *
+         * Guest -> device (the store side) is protected by something other
+         * than these barriers: the guest kicks the NV2A by writing a PFIFO
+         * register, that MMIO write runs pfifo_write() on the vCPU thread,
+         * which takes d->pfifo.lock and signals the FIFO condvar, and the
+         * pfifo thread wakes holding the same lock.  The mutex release/acquire
+         * already orders every pushbuffer store the guest made beforehand.
+         *
+         * Device -> guest (the load side) has no such protection.  A guest
+         * that polls an NV2A notifier in RAM and then reads the data it
+         * announces relies on load-load ordering, which x86 guarantees and
+         * AArch64 does not.  Dropping DMB ISHLD permits the data load to be
+         * hoisted above the poll and read stale memory.
+         *
+         * A store-side barrier includes ST_ST; a load-side one is LD_LD alone.
+         */
+        bool store_side = (a0 & TCG_MO_ST_ST) != 0;
+
+        if (g_mb_mode == 3 && !store_side) {
+            tcg_out32(s, sync[a0 & TCG_MO_ALL]);   /* keep load barriers */
+            return;
+        }
+        if (g_mb_mode == 4 && store_side) {
+            tcg_out32(s, sync[a0 & TCG_MO_ALL]);   /* keep store barriers */
+            return;
+        }
         if (g_mb_mode == 1) {
             tcg_out32(s, NOP);
         }

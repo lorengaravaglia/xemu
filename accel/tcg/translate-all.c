@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/boards.h"
 
 #include "trace.h"
 #include "disas/disas.h"
@@ -343,6 +344,49 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     tcg_ctx->gen_tb = tb;
     tcg_ctx->addr_type = target_long_bits() == 32 ? TCG_TYPE_I32 : TCG_TYPE_I64;
     tcg_ctx->guest_mo = cpu->cc->tcg_ops->guest_default_memory_order;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    /*
+     * Drop the store-side TSO barriers on a uniprocessor guest.
+     *
+     * x86 is TSO and AArch64 is weakly ordered, so tcg_gen_req_mo() emits a
+     * barrier before every guest access: DMB ISHLD before loads, a full DMB
+     * ISH before stores.  Measured on Halo, those cost 52% -> 23% of backend
+     * stall and about 100 of every 400 frames falling below 20 fps.
+     *
+     * TSO describes what one guest CPU may observe of another guest CPU's
+     * stores.  hw/xbox/xbox.c sets max_cpus = 1: there is no other guest CPU,
+     * so the store-side ordering has no observer among guest code.  The gate
+     * is on the vCPU count rather than on the machine, so this stays correct
+     * if a multiprocessor guest is ever added.
+     *
+     * The other observer of guest memory is device DMA, and that is ordered by
+     * something else.  The guest kicks the NV2A by writing a PFIFO register;
+     * the MMIO write runs pfifo_write() on this same vCPU thread, which takes
+     * d->pfifo.lock, signals the FIFO condvar and unlocks, while the pfifo
+     * thread wakes holding that lock.  The mutex release/acquire already
+     * orders every pushbuffer store made beforehand, with no help from these
+     * barriers.
+     *
+     * The LOAD side is deliberately kept.  A guest that polls an NV2A notifier
+     * in RAM and then reads the data it announces depends on load-load
+     * ordering, which x86 guarantees and AArch64 does not; dropping DMB ISHLD
+     * would let the data load be hoisted above the poll and return stale
+     * memory.  Measured, keeping it costs little: dropping both directions
+     * reached 32.35 ms/frame against 32.65 for the store side alone, and the
+     * difference is mostly invisible because the guest paces itself at 30 fps.
+     *
+     * debug.xemu.tso_stores=1 restores the store barriers.
+     */
+    {
+        extern int g_keep_tso_stores;
+
+        if (!g_keep_tso_stores && cpu->cc->tcg_ops->guest_default_memory_order
+            && current_machine && current_machine->smp.max_cpus == 1) {
+            tcg_ctx->guest_mo &= TCG_MO_LD_LD;
+        }
+    }
+#endif
 
  restart_translate:
     trace_translate_block(tb, s.pc, tb->tc.ptr);

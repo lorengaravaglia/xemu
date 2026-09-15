@@ -153,6 +153,7 @@ int g_reserve_x15;    /* debug.xemu.reserve_x15, stub prerequisite */
  */
 int g_ldst_stub;
 int g_mb_mode;        /* debug.xemu.mb_mode, measurement only */
+int g_keep_tso_stores; /* debug.xemu.tso_stores=1 restores them */
 unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];
 const char *xemu_tcg_op_name(unsigned opc)
 {

@@ -1872,3 +1872,75 @@ were right that the *misses* are the guest's own — LL misses barely move
 (403k -> 363k).  What changes is the cost of each one: with the barriers gone
 the misses overlap, which is exactly the memory-level-parallelism mechanism the
 test was built to isolate.
+
+## AE. SHIPPED: store-side TSO barriers elided on a uniprocessor guest (2026-09-13)
+
+Section AD measured the barriers as the largest remaining cost.  This is the
+subset that has a correctness argument, implemented properly rather than as a
+knob (`accel/tcg/translate-all.c`, `debug.xemu.tso_stores=1` restores them).
+
+### The argument
+
+`tcg_gen_req_mo()` emits a barrier before every guest access because x86 is TSO
+and AArch64 is weakly ordered.  Two observers of guest memory exist, and they
+are protected differently.
+
+**Guest code.**  TSO describes what one guest CPU may observe of another's
+stores.  `hw/xbox/xbox.c` sets `max_cpus = 1` — there is no other guest CPU, so
+the store-side ordering has no observer.  The gate is written on
+`smp.max_cpus == 1`, not on the machine type, so it stays correct if a
+multiprocessor guest is ever added.
+
+**Device DMA.**  Ordered by the device lock, not by these barriers.  The guest
+kicks the NV2A by writing a PFIFO register; that MMIO write runs
+`pfifo_write()` on the vCPU thread, which takes `d->pfifo.lock`, signals the
+FIFO condvar and unlocks, while `pfifo_thread()` wakes holding the same lock.
+The release/acquire pair already orders every pushbuffer store made beforehand.
+
+**The load side is deliberately kept.**  A guest that polls an NV2A notifier in
+RAM and then reads the data it announces depends on load-load ordering, which
+x86 guarantees and AArch64 does not; dropping `DMB ISHLD` would let the data
+load be hoisted above the poll and return stale memory.  That is the one
+direction with no lock protecting it, so it keeps its barrier.
+
+Measured, keeping it costs little — see the mode 3/4 split below.
+
+### Which direction the cost is in
+
+| mode | cycles/frame | vcpu | frames <20fps |
+|---|---|---|---|
+| normal | 105.6 M | 35.95 | 101.5 |
+| **keep loads, drop stores** | **95.5 M** | **32.65** | **30.5** |
+| keep stores, drop loads | 93.8 M | 32.55 | 22 |
+| drop both | 89.9 M | 32.35 | 21 |
+
+The safe direction carries most of the win, and the remainder is largely
+invisible anyway: below ~33 ms the guest's own 30 fps pacing caps wall time, so
+further cycle savings become idle rather than frames.
+
+### Result as shipped
+
+| | barriers kept | **elided (default)** |
+|---|---|---|
+| backend stall | 52.3 / 53.8% | **42.5 / 42.2%** |
+| cycles/frame | 104.6 / 107.9 M | **93.8 / 93.9 M** |
+| vcpu | 36.12 / 37.58 ms | **33.20 / 33.52 ms** |
+| fps | 25.99 / 25.02 | **28.29 / 28.22** |
+| **frames <20 fps** | 108 / 129 | **41 / 38** |
+| frames <15 fps | 13 / 21 | 9 / 8 |
+
+**Sub-20 fps frames fall 67%**, cycles 11.7%, and the histogram shows it
+directly: the 50-60 ms bucket goes from 86/94 frames to 28/26.
+
+This is the largest improvement in the investigation, and the only one that
+moved the backend stall that sections Y and Z had concluded was closed.  They
+were right that the *misses* are the guest's own — LL misses barely move.  What
+changed is that they now overlap.
+
+### Still to verify
+
+**Play-testing.**  A benchmark cannot show a rare ordering bug.  The risk is
+graphical corruption or a hang from device DMA observing stores out of order,
+in some path that does not go through the PFIFO kick analysed above.  Audio
+(APU/DSP reading guest RAM) has not been traced the way PFIFO was and is the
+most likely place for a gap.

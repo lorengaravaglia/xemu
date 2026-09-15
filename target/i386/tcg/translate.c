@@ -223,12 +223,26 @@ void x86_refresh_fpu_mode(void)
         }
 
         {
+            extern int g_keep_tso_stores;
+            char kv[PROP_VALUE_MAX] = { 0 };
+            int wantk = __system_property_get("debug.xemu.tso_stores", kv) > 0
+                        && (kv[0] == '1' || kv[0] == 'y' || kv[0] == 't');
+
+            if (wantk != g_keep_tso_stores) {
+                g_keep_tso_stores = wantk;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
             extern int g_mb_mode;
             char mv[PROP_VALUE_MAX] = { 0 };
             int wantm = __system_property_get("debug.xemu.mb_mode", mv) > 0 ?
                         atoi(mv) : 0;
 
-            if (wantm < 0 || wantm > 2) {
+            if (wantm < 0 || wantm > 4) {
                 wantm = 0;
             }
             if (wantm != g_mb_mode) {
