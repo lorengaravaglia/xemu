@@ -137,8 +137,11 @@ void xemu_android_get_rumble(uint16_t *left, uint16_t *right);
 /* Save/load a named VM snapshot (stored inside the qcow2 HDD image).
  * Slot convention used by the UI: "slot_1" … "slot_8".
  * Safe to call from any thread; acquires the BQL internally. */
-void xemu_android_save_state(const char *name);
-void xemu_android_load_state(const char *name);
+/* Return true on success.  On failure the reason is available from
+ * xemu_android_last_state_error() until the next call. */
+bool xemu_android_save_state(const char *name);
+bool xemu_android_load_state(const char *name);
+const char *xemu_android_last_state_error(void);
 
 /* Return names of all existing snapshots in *out_names.
  * Free the result with xemu_android_free_state_names(names, count).

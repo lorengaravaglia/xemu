@@ -46,6 +46,12 @@ fun SlotPicker(
     title: String,
     slots: List<SlotInfo>,
     isSave: Boolean,
+    /** Non-null while a save/load is running or its result is being shown. */
+    status: String?,
+    /** True while the operation is in flight, so the tiles stop responding. */
+    busy: Boolean,
+    /** True when [status] reports a failure, which is shown in the error colour. */
+    failed: Boolean,
     visibleState: MutableTransitionState<Boolean>,
     onFullyHidden: () -> Unit,
     onPick: (Int) -> Unit,
@@ -74,7 +80,23 @@ fun SlotPicker(
                     title,
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(bottom = 10.dp),
+                    modifier = Modifier.padding(bottom = 2.dp),
+                )
+
+                /*
+                 * The status line lives above the grid and reserves its space
+                 * whether or not there is anything to say, so starting a save
+                 * does not shift the tiles under the finger that tapped them.
+                 */
+                Text(
+                    status ?: " ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (failed) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    },
+                    modifier = Modifier.padding(bottom = 8.dp),
                 )
 
                 for (row in 0 until 2) {
@@ -83,8 +105,9 @@ fun SlotPicker(
                             val slot = slots.getOrNull(row * 4 + col) ?: continue
                             SlotTile(
                                 slot = slot,
-                                /* Nothing to load from an empty slot. */
-                                enabled = isSave || slot.occupied,
+                                /* Nothing to load from an empty slot, and
+                                 * nothing at all while one is in flight. */
+                                enabled = !busy && (isSave || slot.occupied),
                                 isSave = isSave,
                                 onClick = { onPick(slot.number) },
                             )

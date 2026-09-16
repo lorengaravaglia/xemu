@@ -113,16 +113,24 @@ object NativeInterface {
     /**
      * Save current VM state to a named snapshot inside the qcow2 HDD image.
      * Slot name convention: "slot_1" … "slot_8".
-     * Blocks briefly while the snapshot is written; call from a background thread
-     * if the UI must remain responsive during save.
+     *
+     * Returns null on success, or a human-readable reason it failed.
+     *
+     * BLOCKS until the QEMU main loop has finished the snapshot — call it from
+     * a background thread, never from the UI thread.
      */
-    external fun saveState(name: String)
+    external fun saveState(name: String): String?
 
     /**
      * Load a previously saved VM snapshot by name.
-     * Has no effect if the named snapshot does not exist.
+     *
+     * Returns null on success, or a human-readable reason it failed — which
+     * includes the case of a slot that does not exist.
+     *
+     * BLOCKS until the QEMU main loop has finished restoring — call it from a
+     * background thread, never from the UI thread.
      */
-    external fun loadState(name: String)
+    external fun loadState(name: String): String?
 
     /**
      * Return the names of all snapshots currently stored in the HDD image.

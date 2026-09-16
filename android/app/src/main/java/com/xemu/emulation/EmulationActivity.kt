@@ -36,6 +36,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp as composeDp
 import com.xemu.ui.theme.XemuTheme
@@ -692,6 +693,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     // ── In-game menu ──────────────────────────────────────────────────────────
 
     private var isExiting = false
+    private var stateOpInFlight = false
     private lateinit var menuBtn: TextView
     private lateinit var root: FrameLayout
     private var overlayView: View? = null
@@ -815,25 +817,55 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             SlotInfo(n, "${gameId}_slot_$n" in existing)
         }
 
+        /*
+         * Held outside the composable so the worker thread can drive them.
+         * saveState/loadState block on the QEMU main loop -- calling them from
+         * the click handler froze the UI for the whole operation, which is why
+         * pressing a slot appeared to do nothing until it was already over.
+         */
+        val status = mutableStateOf<String?>(null)
+        val busy = mutableStateOf(false)
+        val failed = mutableStateOf(false)
+
         showOverlay(Gravity.CENTER, dimBackground = true) { transition, onHidden ->
             SlotPicker(
                 title = if (isSave) "Save State" else "Load State",
                 slots = slots,
                 isSave = isSave,
+                status = status.value,
+                busy = busy.value,
+                failed = failed.value,
                 visibleState = transition,
                 onFullyHidden = onHidden,
                 onCancel = { dismissOverlay() },
                 onPick = { n ->
-                    dismissOverlay()
-                    val name = "${gameId}_slot_$n"
-                    if (isSave) {
-                        NativeInterface.saveState(name)
-                        Toast.makeText(this, "Saved to Slot $n",
-                                       Toast.LENGTH_SHORT).show()
-                    } else {
-                        NativeInterface.loadState(name)
-                        Toast.makeText(this, "Loaded Slot $n",
-                                       Toast.LENGTH_SHORT).show()
+                    if (!busy.value) {
+                        busy.value = true
+                        failed.value = false
+                        status.value =
+                            if (isSave) "Saving to slot $n…" else "Loading slot $n…"
+
+                        val name = "${gameId}_slot_$n"
+                        Thread {
+                            val err = if (isSave) {
+                                NativeInterface.saveState(name)
+                            } else {
+                                NativeInterface.loadState(name)
+                            }
+                            runOnUiThread {
+                                busy.value = false
+                                failed.value = err != null
+                                status.value = err
+                                    ?: if (isSave) "Saved to slot $n"
+                                       else "Loaded slot $n"
+                                /* Linger on a failure so the reason can be
+                                 * read; get out of the way on success. */
+                                root.postDelayed(
+                                    { dismissOverlay() },
+                                    if (err == null) 650L else 3000L,
+                                )
+                            }
+                        }.start()
                     }
                 },
             )
@@ -1061,30 +1093,68 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     /* Load a save slot by number.  Logs the outcome under xemu-android so a
      * scripted measurement can confirm the state was actually restored. */
+    /**
+     * Load a slot from the benchmark/automation path.
+     *
+     * Stays synchronous because its callers are scripted and want the result
+     * before continuing; the quick-save hotkeys below do not, and must not
+     * block the UI thread.
+     */
     private fun loadStateSlot(slot: Int): Boolean {
         val name = "${gameId}_slot_$slot"
         if (name !in NativeInterface.listStates()) {
             android.util.Log.w("xemu-android", "loadstate: slot $slot is empty")
             return false
         }
-        NativeInterface.loadState(name)
+        val err = NativeInterface.loadState(name)
+        if (err != null) {
+            android.util.Log.e("xemu-android", "loadstate: slot $slot failed: $err")
+            return false
+        }
         android.util.Log.i("xemu-android", "loadstate: loaded slot $slot")
         return true
     }
 
+    /**
+     * Run a blocking save/load off the UI thread and report what happened.
+     *
+     * saveState/loadState wait on the QEMU main loop, so calling them directly
+     * from a hotkey froze the UI until the snapshot was done — and then said
+     * "Saved" whether or not it had worked.
+     */
+    private fun runStateOp(busyMsg: String, okMsg: String, op: () -> String?) {
+        if (stateOpInFlight) {
+            return
+        }
+        stateOpInFlight = true
+        Toast.makeText(this, busyMsg, Toast.LENGTH_SHORT).show()
+        Thread {
+            val err = op()
+            runOnUiThread {
+                stateOpInFlight = false
+                Toast.makeText(this, err ?: okMsg,
+                               if (err == null) Toast.LENGTH_SHORT
+                               else Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
+
     private fun executeQuickSave() {
         val name = "${gameId}_slot_$quickSaveSlot"
-        NativeInterface.saveState(name)
-        Toast.makeText(this, "Saved to Slot $quickSaveSlot", Toast.LENGTH_SHORT).show()
+        runStateOp("Saving to slot $quickSaveSlot…", "Saved to slot $quickSaveSlot") {
+            NativeInterface.saveState(name)
+        }
     }
 
     private fun executeQuickLoad() {
         val name = "${gameId}_slot_$quickSaveSlot"
-        if (name in NativeInterface.listStates()) {
+        if (name !in NativeInterface.listStates()) {
+            Toast.makeText(this, "Slot $quickSaveSlot is empty",
+                           Toast.LENGTH_SHORT).show()
+            return
+        }
+        runStateOp("Loading slot $quickSaveSlot…", "Loaded slot $quickSaveSlot") {
             NativeInterface.loadState(name)
-            Toast.makeText(this, "Loaded Slot $quickSaveSlot", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(this, "Slot $quickSaveSlot is empty", Toast.LENGTH_SHORT).show()
         }
     }
 

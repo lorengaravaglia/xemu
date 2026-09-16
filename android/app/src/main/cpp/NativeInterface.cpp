@@ -163,16 +163,30 @@ Java_com_xemu_NativeInterface_setSurfaceScale(JNIEnv *env, jclass clazz, jint sc
     xemu_android_set_surface_scale((unsigned int)scale);
 }
 
-JNIEXPORT void JNICALL
+/*
+ * Returns null on success, or the reason it failed.
+ *
+ * Reporting the outcome through the return value rather than a separate getter
+ * keeps it to one call, so there is no window in which another save could
+ * overwrite the stored message before it is read.
+ */
+JNIEXPORT jstring JNICALL
 Java_com_xemu_NativeInterface_saveState(JNIEnv *env, jclass clazz, jstring name) {
     std::string s = jstringToString(env, name);
-    xemu_android_save_state(s.c_str());
+    if (xemu_android_save_state(s.c_str())) {
+        return nullptr;
+    }
+    return env->NewStringUTF(xemu_android_last_state_error());
 }
 
-JNIEXPORT void JNICALL
+/* Returns null on success, or the reason it failed. */
+JNIEXPORT jstring JNICALL
 Java_com_xemu_NativeInterface_loadState(JNIEnv *env, jclass clazz, jstring name) {
     std::string s = jstringToString(env, name);
-    xemu_android_load_state(s.c_str());
+    if (xemu_android_load_state(s.c_str())) {
+        return nullptr;
+    }
+    return env->NewStringUTF(xemu_android_last_state_error());
 }
 
 JNIEXPORT jintArray JNICALL

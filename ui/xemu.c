@@ -410,8 +410,11 @@ static void main_thread_bh(void *opaque)
 {
     switch (g_main_req.op) {
     case MAIN_OP_SAVE:
-        save_snapshot(g_main_req.name, true, NULL, false, NULL,
-                      &g_main_req.err);
+        /* save_snapshot()'s result was previously discarded, so a failed save
+         * was indistinguishable from a successful one all the way up to the
+         * UI, which reported "Saved" either way. */
+        g_main_req.ok = save_snapshot(g_main_req.name, true, NULL, false, NULL,
+                                      &g_main_req.err);
         xemu_snapshots_mark_dirty();
         break;
 
@@ -427,6 +430,7 @@ static void main_thread_bh(void *opaque)
     }
 
     case MAIN_OP_FLUSH:
+        g_main_req.ok = true;   /* the calls below abort rather than fail */
         /* vm_stop under BQL (already held) */
         if (runstate_is_running()) {
             vm_stop(RUN_STATE_SHUTDOWN);
@@ -452,9 +456,29 @@ static void main_bh_ensure_init(void)
     g_main_bh = qemu_bh_new(main_thread_bh, NULL);
 }
 
-static void dispatch_main_op(MainThreadOp op, const char *name)
+/*
+ * Message from the last save/load, empty when it succeeded.
+ *
+ * Written under g_main_lock and read immediately after the call returns on the
+ * same thread, which is the only caller pattern: these are driven by UI
+ * actions, one at a time.
+ */
+static char g_main_last_err[256];
+
+const char *xemu_android_last_state_error(void)
 {
-    if (!xemu_android_qemu_initialized()) return;
+    return g_main_last_err;
+}
+
+static bool dispatch_main_op(MainThreadOp op, const char *name)
+{
+    g_main_last_err[0] = '\0';
+
+    if (!xemu_android_qemu_initialized()) {
+        snprintf(g_main_last_err, sizeof(g_main_last_err),
+                 "Emulation is not running");
+        return false;
+    }
     main_bh_ensure_init();
 
     qemu_mutex_lock(&g_main_lock);
@@ -468,15 +492,27 @@ static void dispatch_main_op(MainThreadOp op, const char *name)
     qemu_bh_schedule(g_main_bh);
     qemu_sem_wait(&g_main_done);
 
-    if (g_main_req.err) {
-        const char *opname = (op == MAIN_OP_SAVE) ? "save"
-                           : (op == MAIN_OP_LOAD) ? "load" : "flush";
-        ALOGE("main_op '%s' (%s): %s", name ? name : "", opname,
-              error_get_pretty(g_main_req.err));
-        error_free(g_main_req.err);
-        g_main_req.err = NULL;
+    {
+        bool ok = g_main_req.ok;
+
+        if (g_main_req.err) {
+            const char *opname = (op == MAIN_OP_SAVE) ? "save"
+                               : (op == MAIN_OP_LOAD) ? "load" : "flush";
+
+            /* Keep the reason, not just a log line nobody reads. */
+            snprintf(g_main_last_err, sizeof(g_main_last_err), "%s",
+                     error_get_pretty(g_main_req.err));
+            ALOGE("main_op '%s' (%s): %s", name ? name : "", opname,
+                  error_get_pretty(g_main_req.err));
+            error_free(g_main_req.err);
+            g_main_req.err = NULL;
+        } else if (!ok && !g_main_last_err[0]) {
+            snprintf(g_main_last_err, sizeof(g_main_last_err),
+                     "Operation failed");
+        }
+        qemu_mutex_unlock(&g_main_lock);
+        return ok;
     }
-    qemu_mutex_unlock(&g_main_lock);
 }
 
 /* Stop the VM and flush all block devices (qcow2 HDD) to disk so the dirty
@@ -487,14 +523,14 @@ void xemu_android_flush_block_devices(void)
     dispatch_main_op(MAIN_OP_FLUSH, NULL);
 }
 
-void xemu_android_save_state(const char *name)
+bool xemu_android_save_state(const char *name)
 {
-    dispatch_main_op(MAIN_OP_SAVE, name);
+    return dispatch_main_op(MAIN_OP_SAVE, name);
 }
 
-void xemu_android_load_state(const char *name)
+bool xemu_android_load_state(const char *name)
 {
-    dispatch_main_op(MAIN_OP_LOAD, name);
+    return dispatch_main_op(MAIN_OP_LOAD, name);
 }
 
 /* Return names of all existing snapshots in *out_names (caller frees each entry
