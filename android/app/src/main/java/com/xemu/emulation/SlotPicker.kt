@@ -45,12 +45,12 @@ fun SlotPicker(
     title: String,
     slots: List<SlotInfo>,
     isSave: Boolean,
-    /** Non-null while a save/load is running or its result is being shown. */
-    status: String?,
+    /** Set only when something went wrong; success needs no words. */
+    errorText: String?,
     /** True while the operation is in flight, so the tiles stop responding. */
     busy: Boolean,
-    /** True when [status] reports a failure, which is shown in the error colour. */
-    failed: Boolean,
+    /** The slot being saved or loaded, which shows it is working. */
+    activeSlot: Int?,
     visibleState: MutableTransitionState<Boolean>,
     onFullyHidden: () -> Unit,
     onPick: (Int) -> Unit,
@@ -83,18 +83,15 @@ fun SlotPicker(
                 )
 
                 /*
-                 * The status line lives above the grid and reserves its space
-                 * whether or not there is anything to say, so starting a save
-                 * does not shift the tiles under the finger that tapped them.
+                 * Reserved but blank unless something failed.  Progress is
+                 * shown by the tile that was pressed rather than by text
+                 * appearing here -- but the line keeps its space so an error
+                 * does not shove the grid down when it does appear.
                  */
                 Text(
-                    status ?: " ",
+                    errorText ?: " ",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (failed) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                    },
+                    color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(bottom = 8.dp),
                 )
 
@@ -117,6 +114,7 @@ fun SlotPicker(
                                 /* Clicks stop while an operation is running,
                                  * without the tiles changing how they look. */
                                 interactive = !busy && (isSave || slot.occupied),
+                                active = slot.number == activeSlot,
                                 isSave = isSave,
                                 onClick = { onPick(slot.number) },
                             )
@@ -142,16 +140,20 @@ private fun SlotTile(
     slot: SlotInfo,
     selectable: Boolean,
     interactive: Boolean,
+    /** This is the slot being worked on: hold it visibly pressed. */
+    active: Boolean,
     isSave: Boolean,
     onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val border = when {
+        active        -> scheme.primary
         !selectable   -> scheme.outline.copy(alpha = 0.2f)
         slot.occupied -> scheme.primary.copy(alpha = 0.7f)
         else          -> scheme.outline.copy(alpha = 0.5f)
     }
     val labelColor = when {
+        active        -> scheme.primary
         !selectable   -> scheme.onSurface.copy(alpha = 0.3f)
         slot.occupied -> scheme.primary
         else          -> scheme.onSurface
@@ -165,10 +167,14 @@ private fun SlotTile(
         onClick = onClick,
         enabled = interactive,
         shape = MaterialTheme.shapes.medium,
-        color = if (slot.occupied && selectable) {
-            scheme.primary.copy(alpha = 0.10f)
-        } else {
-            scheme.surfaceVariant.copy(alpha = 0.25f)
+        /*
+         * The worked-on tile stays filled for the duration, so the press has a
+         * visible effect that outlasts the ripple without any text appearing.
+         */
+        color = when {
+            active                       -> scheme.primary.copy(alpha = 0.30f)
+            slot.occupied && selectable  -> scheme.primary.copy(alpha = 0.10f)
+            else                         -> scheme.surfaceVariant.copy(alpha = 0.25f)
         },
         border = BorderStroke(1.dp, border),
         modifier = Modifier.width(84.dp),

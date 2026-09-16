@@ -823,27 +823,28 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
          * the click handler froze the UI for the whole operation, which is why
          * pressing a slot appeared to do nothing until it was already over.
          */
-        val status = mutableStateOf<String?>(null)
+        val errorText = mutableStateOf<String?>(null)
         val busy = mutableStateOf(false)
-        val failed = mutableStateOf(false)
+        val activeSlot = mutableStateOf<Int?>(null)
 
         showOverlay(Gravity.CENTER, dimBackground = true) { transition, onHidden ->
             SlotPicker(
                 title = if (isSave) "Save State" else "Load State",
                 slots = slots,
                 isSave = isSave,
-                status = status.value,
+                errorText = errorText.value,
                 busy = busy.value,
-                failed = failed.value,
+                activeSlot = activeSlot.value,
                 visibleState = transition,
                 onFullyHidden = onHidden,
                 onCancel = { dismissOverlay() },
                 onPick = { n ->
                     if (!busy.value) {
                         busy.value = true
-                        failed.value = false
-                        status.value =
-                            if (isSave) "Saving to slot $n…" else "Loading slot $n…"
+                        errorText.value = null
+                        /* The pressed tile holds a filled state for the
+                         * duration; no text announces what is happening. */
+                        activeSlot.value = n
 
                         val name = "${gameId}_slot_$n"
                         Thread {
@@ -854,15 +855,15 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                             }
                             runOnUiThread {
                                 busy.value = false
-                                failed.value = err != null
-                                status.value = err
-                                    ?: if (isSave) "Saved to slot $n"
-                                       else "Loaded slot $n"
+                                errorText.value = err
+                                if (err != null) {
+                                    activeSlot.value = null
+                                }
                                 /* Linger on a failure so the reason can be
                                  * read; get out of the way on success. */
                                 root.postDelayed(
                                     { dismissOverlay() },
-                                    if (err == null) 650L else 3000L,
+                                    if (err == null) 400L else 3000L,
                                 )
                             }
                         }.start()
