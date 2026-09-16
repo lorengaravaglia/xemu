@@ -8,7 +8,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -105,9 +104,19 @@ fun SlotPicker(
                             val slot = slots.getOrNull(row * 4 + col) ?: continue
                             SlotTile(
                                 slot = slot,
-                                /* Nothing to load from an empty slot, and
-                                 * nothing at all while one is in flight. */
-                                enabled = !busy && (isSave || slot.occupied),
+                                /*
+                                 * Appearance depends only on whether the slot
+                                 * is a valid target -- nothing to load from an
+                                 * empty one.  It deliberately does NOT depend
+                                 * on `busy`: making every tile restyle the
+                                 * moment an operation starts read as the whole
+                                 * grid flashing, which drowned out the ripple
+                                 * on the tile actually pressed.
+                                 */
+                                selectable = isSave || slot.occupied,
+                                /* Clicks stop while an operation is running,
+                                 * without the tiles changing how they look. */
+                                interactive = !busy && (isSave || slot.occupied),
                                 isSave = isSave,
                                 onClick = { onPick(slot.number) },
                             )
@@ -131,32 +140,38 @@ fun SlotPicker(
 @Composable
 private fun SlotTile(
     slot: SlotInfo,
-    enabled: Boolean,
+    selectable: Boolean,
+    interactive: Boolean,
     isSave: Boolean,
     onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val border = when {
-        !enabled      -> scheme.outline.copy(alpha = 0.2f)
+        !selectable   -> scheme.outline.copy(alpha = 0.2f)
         slot.occupied -> scheme.primary.copy(alpha = 0.7f)
         else          -> scheme.outline.copy(alpha = 0.5f)
     }
     val labelColor = when {
-        !enabled      -> scheme.onSurface.copy(alpha = 0.3f)
+        !selectable   -> scheme.onSurface.copy(alpha = 0.3f)
         slot.occupied -> scheme.primary
         else          -> scheme.onSurface
     }
+    /*
+     * Surface's onClick overload rather than Modifier.clickable: it puts the
+     * press indication inside the shape, so the ripple is clipped to the
+     * rounded tile instead of spilling past its corners.
+     */
     Surface(
+        onClick = onClick,
+        enabled = interactive,
         shape = MaterialTheme.shapes.medium,
-        color = if (slot.occupied && enabled) {
+        color = if (slot.occupied && selectable) {
             scheme.primary.copy(alpha = 0.10f)
         } else {
             scheme.surfaceVariant.copy(alpha = 0.25f)
         },
         border = BorderStroke(1.dp, border),
-        modifier = Modifier
-            .width(84.dp)
-            .clickable(enabled = enabled) { onClick() },
+        modifier = Modifier.width(84.dp),
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -175,7 +190,7 @@ private fun SlotTile(
                     else                    -> "Empty"
                 },
                 style = MaterialTheme.typography.labelSmall,
-                color = if (enabled) {
+                color = if (selectable) {
                     scheme.onSurface.copy(alpha = 0.55f)
                 } else {
                     scheme.onSurface.copy(alpha = 0.3f)
