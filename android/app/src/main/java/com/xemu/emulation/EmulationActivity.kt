@@ -32,7 +32,6 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.runtime.Composable
@@ -432,6 +431,31 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             Gravity.TOP or Gravity.END
         ).apply { topMargin = 16.dp; rightMargin = 16.dp })
 
+        // ── Transient message surface (replaces Toast) ────────────────────────
+        /*
+         * Its own small ComposeView under the MENU pill rather than an entry in
+         * showOverlay(): those cover the screen to catch outside taps, which a
+         * message must not do — the game has to stay playable while one is up.
+         * Kept GONE when idle so it cannot intercept a touch even by accident.
+         */
+        messageView = ComposeView(this).apply {
+            visibility = View.GONE
+            setContent {
+                XemuTheme {
+                    GameMessage(
+                        text = messageText.value,
+                        visible = messageVisible.value,
+                        isError = messageIsError.value,
+                    )
+                }
+            }
+        }
+        root.addView(messageView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.END,
+        ).apply { topMargin = 64.dp; rightMargin = 16.dp })
+
         // ── SurfaceView callback — starts emulation once surface is ready ─────
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
@@ -690,10 +714,43 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (curr > 0.5f  && prev <= 0.5f)  InputRecorder.sendButtonDown(posMask)
     }
 
+    /**
+     * Show a transient message, replacing whatever is on screen.
+     *
+     * Safe to call from any thread.  Errors linger, since "it did not work"
+     * takes longer to read and act on than a confirmation.
+     */
+    private fun showMessage(text: String, isError: Boolean = false) {
+        runOnUiThread {
+            messageHide?.let { messageView.removeCallbacks(it) }
+            messageText.value = text
+            messageIsError.value = isError
+            messageVisible.value = true
+            messageView.visibility = View.VISIBLE
+
+            val hide = Runnable {
+                messageVisible.value = false
+                /* Let the fade finish before the view stops being drawable. */
+                messageView.postDelayed({
+                    if (!messageVisible.value) {
+                        messageView.visibility = View.GONE
+                    }
+                }, 220)
+            }
+            messageHide = hide
+            messageView.postDelayed(hide, if (isError) 3500L else 1800L)
+        }
+    }
+
     // ── In-game menu ──────────────────────────────────────────────────────────
 
     private var isExiting = false
     private var stateOpInFlight = false
+    private lateinit var messageView: ComposeView
+    private val messageText = mutableStateOf("")
+    private val messageIsError = mutableStateOf(false)
+    private val messageVisible = mutableStateOf(false)
+    private var messageHide: Runnable? = null
     private lateinit var menuBtn: TextView
     private lateinit var root: FrameLayout
     private var overlayView: View? = null
@@ -879,13 +936,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     private fun toggleRecording() {
         if (InputRecorder.isPlaying) {
-            Toast.makeText(this, "Cannot record during playback", Toast.LENGTH_SHORT).show()
+            showMessage("Cannot record during playback", isError = true)
             return
         }
         if (InputRecorder.isRecording) {
             showStopRecordingDialog()
         } else if (InputRecorder.startRecording(gameId)) {
-            Toast.makeText(this, "Recording started", Toast.LENGTH_SHORT).show()
+            showMessage("Recording started")
         }
     }
 
@@ -897,11 +954,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             .setPositiveButton("Save") { _, _ ->
                 val name = input.text.toString().ifBlank { "recording_${System.currentTimeMillis()}" }
                 val file = InputRecorder.stopRecording(filesDir, name)
-                Toast.makeText(
-                    this,
-                    if (file != null) "Saved: ${file.name}" else "Save failed",
-                    Toast.LENGTH_SHORT
-                ).show()
+                showMessage(if (file != null) "Saved: ${file.name}" else "Save failed")
             }
             .setNegativeButton("Discard") { _, _ -> InputRecorder.cancelRecording() }
             .show()
@@ -910,7 +963,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun showPlayRecordingDialog() {
         val names = InputRecorder.listRecordings(filesDir, gameId)
         if (names.isEmpty()) {
-            Toast.makeText(this, "No recordings for this game", Toast.LENGTH_SHORT).show()
+            showMessage("No recordings for this game", isError = true)
             return
         }
         AlertDialog.Builder(this)
@@ -992,7 +1045,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun exitToLibrary() {
         if (isExiting) return
         isExiting = true
-        Toast.makeText(this, "Saving\u2026", Toast.LENGTH_SHORT).show()
+        showMessage("Saving\u2026")
         Thread {
             NativeInterface.flushBlockDevices()
             runOnUiThread {
@@ -1128,14 +1181,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             return
         }
         stateOpInFlight = true
-        Toast.makeText(this, busyMsg, Toast.LENGTH_SHORT).show()
+        showMessage(busyMsg)
         Thread {
             val err = op()
             runOnUiThread {
                 stateOpInFlight = false
-                Toast.makeText(this, err ?: okMsg,
-                               if (err == null) Toast.LENGTH_SHORT
-                               else Toast.LENGTH_LONG).show()
+                showMessage(err ?: okMsg, isError = err != null)
             }
         }.start()
     }
@@ -1150,8 +1201,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun executeQuickLoad() {
         val name = "${gameId}_slot_$quickSaveSlot"
         if (name !in NativeInterface.listStates()) {
-            Toast.makeText(this, "Slot $quickSaveSlot is empty",
-                           Toast.LENGTH_SHORT).show()
+            showMessage("Slot $quickSaveSlot is empty", isError = true)
             return
         }
         runStateOp("Loading slot $quickSaveSlot…", "Loaded slot $quickSaveSlot") {
@@ -1161,18 +1211,18 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     private fun changeQuickSaveSlot(delta: Int) {
         quickSaveSlot = ((quickSaveSlot - 1 + delta + 8) % 8) + 1
-        Toast.makeText(this, "Quick-save slot: $quickSaveSlot", Toast.LENGTH_SHORT).show()
+        showMessage("Quick-save slot: $quickSaveSlot")
     }
 
     private fun toggleUserPause() {
         if (userPaused) {
             NativeInterface.resumeEmulation()
             userPaused = false
-            Toast.makeText(this, "Resumed", Toast.LENGTH_SHORT).show()
+            showMessage("Resumed")
         } else {
             NativeInterface.pauseEmulation()
             userPaused = true
-            Toast.makeText(this, "Paused — press hotkey again to resume", Toast.LENGTH_SHORT).show()
+            showMessage("Paused — press hotkey again to resume")
         }
     }
 
@@ -1186,7 +1236,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             takeScreenshotApi26()
         } else {
-            Toast.makeText(this, "Screenshot requires Android 8+", Toast.LENGTH_SHORT).show()
+            showMessage("Screenshot requires Android 8+", isError = true)
         }
     }
 
@@ -1198,7 +1248,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         PixelCopy.request(surfaceView, bmp, { result ->
             if (result == PixelCopy.SUCCESS) saveScreenshot(bmp)
-            else Toast.makeText(this, "Screenshot failed", Toast.LENGTH_SHORT).show()
+            else showMessage("Screenshot failed", isError = true)
         }, Handler(Looper.getMainLooper()))
     }
 
@@ -1218,19 +1268,17 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                     contentResolver.openOutputStream(u)?.use {
                         bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
                     }
-                    Toast.makeText(this, "Screenshot saved to Pictures/xemu",
-                        Toast.LENGTH_SHORT).show()
+                    showMessage("Screenshot saved to Pictures/xemu")
                 }
             } else {
                 val dir = java.io.File(filesDir, "screenshots").also { it.mkdirs() }
                 java.io.File(dir, filename).outputStream().use {
                     bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
                 }
-                Toast.makeText(this, "Screenshot saved to app storage",
-                    Toast.LENGTH_SHORT).show()
+                showMessage("Screenshot saved to app storage")
             }
         } catch (e: Exception) {
-            Toast.makeText(this, "Screenshot failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            showMessage("Screenshot failed: ${e.message}", isError = true)
         }
     }
 
