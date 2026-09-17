@@ -5,6 +5,8 @@ import android.graphics.*
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
+import androidx.core.content.ContextCompat
+import com.xemu.R
 import com.xemu.NativeInterface
 import kotlin.math.*
 
@@ -14,9 +16,12 @@ import kotlin.math.*
  *
  * Layout (landscape):
  *   Left side  : D-pad + Left stick
- *   Center     : Back / Start / Guide
+ *   Center     : Back / Start
  *   Right side : Face buttons (A/B/X/Y) + Right stick
- *   Shoulder   : LT/LB (top-left), RT/RB (top-right)
+ *   Top        : LT and the White button (left), RT and Black (right)
+ *
+ * Nothing may overlap anything else, including the MENU pill the activity
+ * draws in the top-right corner -- the triggers start below it.
  */
 class GamepadView @JvmOverloads constructor(
     context: Context,
@@ -29,8 +34,19 @@ class GamepadView @JvmOverloads constructor(
         color = Color.argb(160, 30, 30, 30)
         style = Paint.Style.FILL
     }
+    /*
+     * Pressed takes the app's accent; everything at rest stays neutral.
+     *
+     * Tinting the whole pad green would fight the game behind it -- a control
+     * overlay has to stay legible over arbitrary footage, which neutral
+     * translucency does and a saturated hue does not.  The press is the one
+     * moment where it should look like this app, and it doubles as the
+     * clearest possible press feedback.
+     */
     private val pressedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(200, 80, 80, 80)
+        val accent = ContextCompat.getColor(context, R.color.xbox_green_light)
+        color = Color.argb(210, Color.red(accent), Color.green(accent),
+                           Color.blue(accent))
         style = Paint.Style.FILL
     }
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -81,11 +97,18 @@ class GamepadView @JvmOverloads constructor(
         ButtonDef(NativeInterface.BUTTON_DPAD_LEFT,  "◀"),
         ButtonDef(NativeInterface.BUTTON_DPAD_RIGHT, "▶"),
         // Center
-        ButtonDef(NativeInterface.BUTTON_START, "⏵"),
-        ButtonDef(NativeInterface.BUTTON_BACK,  "⏴"),
-        // Shoulder / bumpers
-        ButtonDef(NativeInterface.BUTTON_WHITE, "LB"),
-        ButtonDef(NativeInterface.BUTTON_BLACK, "RB"),
+        /* Spelled out: the media-control glyphs that were here are not in the
+         * default font and rendered as empty boxes. */
+        ButtonDef(NativeInterface.BUTTON_START, "START"),
+        ButtonDef(NativeInterface.BUTTON_BACK,  "BACK"),
+        /*
+         * Black and White, not bumpers.  The original Xbox controller had no
+         * LB/RB -- it had two extra face buttons, coloured black and white,
+         * which is what BUTTON_BLACK/BUTTON_WHITE are.  Labelling them LB/RB
+         * told the player to press something the console never had.
+         */
+        ButtonDef(NativeInterface.BUTTON_WHITE, "WHT"),
+        ButtonDef(NativeInterface.BUTTON_BLACK, "BLK"),
     )
 
     private fun btn(mask: Int) = buttons.first { it.mask == mask }
@@ -122,53 +145,68 @@ class GamepadView @JvmOverloads constructor(
     }
 
     private fun layout(w: Float, h: Float) {
-        val btnR   = h * 0.07f   // face / dpad button radius
-        val stickR = h * 0.12f   // stick outer radius
+        /*
+         * Laid out in horizontal bands so nothing can overlap: triggers, then
+         * Black/White, then d-pad and faces, then the sticks.  The previous
+         * layout collided in three places -- the left stick sat on the d-pad's
+         * down button, Black and White were drawn on top of the triggers, and
+         * RT ran under the MENU pill.
+         */
+        val btnR      = h * 0.065f   // face / d-pad button radius
+        val stickR    = h * 0.105f   // stick outer radius
+        val shoulderR = h * 0.042f
 
-        // ── Left stick (lower-left quadrant) ─────────────────────────────────
-        leftStick.cx = w * 0.15f
-        leftStick.cy = h * 0.65f
+        // ── Triggers: below the MENU pill, which ends around 0.09h ───────────
+        val trigTop = h * 0.11f
+        val trigBot = h * 0.195f
+        lt.rect = RectF(w * 0.02f, trigTop, w * 0.13f, trigBot)
+        rt.rect = RectF(w * 0.87f, trigTop, w * 0.98f, trigBot)
+
+        // ── Black / White: their own band under the triggers ─────────────────
+        val shoulderCy = h * 0.26f
+        btn(NativeInterface.BUTTON_WHITE).apply {
+            cx = w * 0.075f; cy = shoulderCy; radius = shoulderR
+        }
+        btn(NativeInterface.BUTTON_BLACK).apply {
+            cx = w * 0.925f; cy = shoulderCy; radius = shoulderR
+        }
+
+        // ── Back / Start, centred between them ───────────────────────────────
+        val centerY = h * 0.16f
+        btn(NativeInterface.BUTTON_BACK).apply  {
+            cx = w * 0.42f; cy = centerY; radius = btnR * 0.8f
+        }
+        btn(NativeInterface.BUTTON_START).apply {
+            cx = w * 0.58f; cy = centerY; radius = btnR * 0.8f
+        }
+
+        // ── D-pad and face buttons share a band: 0.318h to 0.682h ────────────
+        val clusterCy = h * 0.50f
+        val dpadCx = w * 0.12f
+        btn(NativeInterface.BUTTON_DPAD_UP).apply    { cx = dpadCx;               cy = clusterCy - btnR * 1.8f; radius = btnR }
+        btn(NativeInterface.BUTTON_DPAD_DOWN).apply  { cx = dpadCx;               cy = clusterCy + btnR * 1.8f; radius = btnR }
+        btn(NativeInterface.BUTTON_DPAD_LEFT).apply  { cx = dpadCx - btnR * 1.8f; cy = clusterCy;               radius = btnR }
+        btn(NativeInterface.BUTTON_DPAD_RIGHT).apply { cx = dpadCx + btnR * 1.8f; cy = clusterCy;               radius = btnR }
+
+        val faceCx = w * 0.85f
+        btn(NativeInterface.BUTTON_Y).apply { cx = faceCx;               cy = clusterCy - btnR * 1.8f; radius = btnR }
+        btn(NativeInterface.BUTTON_A).apply { cx = faceCx;               cy = clusterCy + btnR * 1.8f; radius = btnR }
+        btn(NativeInterface.BUTTON_X).apply { cx = faceCx - btnR * 1.8f; cy = clusterCy;               radius = btnR }
+        btn(NativeInterface.BUTTON_B).apply { cx = faceCx + btnR * 1.8f; cy = clusterCy;               radius = btnR }
+
+        // ── Sticks: below both clusters, which end at 0.682h ─────────────────
+        val stickCy = h * 0.83f
+        leftStick.cx = w * 0.17f
+        leftStick.cy = stickCy
         leftStick.outerR = stickR
         leftStick.knobX = leftStick.cx
         leftStick.knobY = leftStick.cy
 
-        // ── D-pad (upper-left) ────────────────────────────────────────────────
-        val dpadCx = w * 0.12f
-        val dpadCy = h * 0.38f
-        btn(NativeInterface.BUTTON_DPAD_UP).apply    { cx = dpadCx;          cy = dpadCy - btnR * 1.8f; radius = btnR }
-        btn(NativeInterface.BUTTON_DPAD_DOWN).apply  { cx = dpadCx;          cy = dpadCy + btnR * 1.8f; radius = btnR }
-        btn(NativeInterface.BUTTON_DPAD_LEFT).apply  { cx = dpadCx - btnR * 1.8f; cy = dpadCy;          radius = btnR }
-        btn(NativeInterface.BUTTON_DPAD_RIGHT).apply { cx = dpadCx + btnR * 1.8f; cy = dpadCy;          radius = btnR }
-
-        // ── Face buttons (right side) ─────────────────────────────────────────
-        val faceCx = w * 0.82f
-        val faceCy = h * 0.42f
-        btn(NativeInterface.BUTTON_Y).apply { cx = faceCx;          cy = faceCy - btnR * 1.8f; radius = btnR }
-        btn(NativeInterface.BUTTON_A).apply { cx = faceCx;          cy = faceCy + btnR * 1.8f; radius = btnR }
-        btn(NativeInterface.BUTTON_X).apply { cx = faceCx - btnR * 1.8f; cy = faceCy;          radius = btnR }
-        btn(NativeInterface.BUTTON_B).apply { cx = faceCx + btnR * 1.8f; cy = faceCy;          radius = btnR }
-
-        // ── Right stick (lower-right) ─────────────────────────────────────────
-        rightStick.cx = w * 0.72f
-        rightStick.cy = h * 0.65f
+        rightStick.cx = w * 0.80f
+        rightStick.cy = stickCy
         rightStick.outerR = stickR
         rightStick.knobX = rightStick.cx
         rightStick.knobY = rightStick.cy
-
-        // ── Center buttons ─────────────────────────────────────────────────────
-        val centerY = h * 0.25f
-        btn(NativeInterface.BUTTON_BACK).apply  { cx = w * 0.42f; cy = centerY; radius = btnR * 0.75f }
-        btn(NativeInterface.BUTTON_START).apply { cx = w * 0.58f; cy = centerY; radius = btnR * 0.75f }
-
-        // ── Shoulder / bumpers ─────────────────────────────────────────────────
-        val bumperW = w * 0.10f
-        val bumperH = h * 0.07f
-        btn(NativeInterface.BUTTON_WHITE).apply { cx = w * 0.10f; cy = h * 0.08f; radius = bumperW * 0.5f }
-        btn(NativeInterface.BUTTON_BLACK).apply { cx = w * 0.90f; cy = h * 0.08f; radius = bumperW * 0.5f }
-
-        // ── Triggers ──────────────────────────────────────────────────────────
-        lt.rect = RectF(w * 0.02f, h * 0.01f, w * 0.14f, h * 0.06f + bumperH)
-        rt.rect = RectF(w * 0.86f, h * 0.01f, w * 0.98f, h * 0.06f + bumperH)
     }
 
     // ── Drawing ───────────────────────────────────────────────────────────────

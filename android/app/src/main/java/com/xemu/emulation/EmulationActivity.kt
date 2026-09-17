@@ -46,6 +46,7 @@ import android.widget.EditText
 import android.util.Log
 import com.xemu.MainActivity
 import com.xemu.NativeInterface
+import com.xemu.R
 
 /**
  * How long to wait for a second key before treating a combo-participating
@@ -219,6 +220,16 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         private val path = Path()
         private val fillPath = Path()
 
+        /*
+         * These four colours are deliberately NOT themed.
+         *
+         * They carry meaning rather than brand: blue is a frame inside budget,
+         * red is one that missed, yellow dashed is the 33.3 ms line itself.
+         * Repainting a diagnostic in the app's green would destroy the
+         * good/bad distinction that makes the graph readable at a glance, and
+         * green reading as "over budget" would be actively misleading.
+         * Semantic colour is separate from accent colour.
+         */
         private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = 2f
@@ -400,6 +411,10 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         }
         overlayContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            /* Deliberately NOT themed.  The debug readout is an instrument,
+             * not part of the app's look -- plain dark panel, high-contrast
+             * text, and the graph's blue/red/yellow carrying meaning rather
+             * than brand.  Utilitarian on purpose. */
             background = rectDrawable(Color.argb(160, 20, 20, 20))
             setPadding(10.dp, 6.dp, 10.dp, 6.dp)
             addView(fpsLine)
@@ -419,7 +434,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             text = "MENU"
             textSize = 13f
             setTextColor(Color.WHITE)
-            background = pillDrawable(Color.argb(160, 20, 20, 20))
+            background = pillDrawable(overlayScrimColor())
             setPadding(12.dp, 6.dp, 12.dp, 6.dp)
             isClickable = true
             isFocusable = true
@@ -1191,6 +1206,21 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             addState(intArrayOf(android.R.attr.state_pressed), pill(pressed))
             addState(intArrayOf(), pill(colorArgb))
         }
+    }
+
+    /**
+     * Backing colour for the overlays that sit on top of the game.
+     *
+     * The app's surface at partial alpha rather than a hand-mixed near-black,
+     * so the perf readout and the MENU pill sit on the same tone as the menu
+     * and dialogs.  Taken from the fixed palette rather than the dynamic one:
+     * these sit over arbitrary game footage, where a predictable tone matters
+     * more than matching the wallpaper.
+     */
+    private fun overlayScrimColor(): Int {
+        val surface = ContextCompat.getColor(this, R.color.xemu_surface)
+        return Color.argb(170, Color.red(surface), Color.green(surface),
+                          Color.blue(surface))
     }
 
     /** Returns a rectangle GradientDrawable with the given fill color. */
