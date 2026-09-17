@@ -32,13 +32,13 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp as composeDp
 import com.xemu.ui.theme.XemuTheme
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -431,6 +431,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             Gravity.TOP or Gravity.END
         ).apply { topMargin = 16.dp; rightMargin = 16.dp })
 
+        onBackPressedDispatcher.addCallback(this, overlayBackCallback)
+
         // ── Transient message surface (replaces Toast) ────────────────────────
         /*
          * Its own small ComposeView under the MENU pill rather than an entry in
@@ -791,6 +793,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             if (overlayView === overlay) {
                 overlayView = null
                 overlayTransition = null
+                overlayBackCallback.isEnabled = false
             }
         }
 
@@ -809,6 +812,22 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         ))
         overlayView = overlay
         overlayTransition = transition
+        overlayBackCallback.isEnabled = true
+    }
+
+    /**
+     * Let Back close whatever overlay is open instead of leaving the game.
+     *
+     * The menu, slot picker and dialogs used to be AlertDialogs and BottomSheets,
+     * which consume Back themselves.  As Compose overlays inside the activity's
+     * own view tree they do not, so Back fell through to the activity and ended
+     * emulation -- from a menu, with no confirmation and with unsaved progress
+     * lost.
+     */
+    private val overlayBackCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            dismissOverlay()
+        }
     }
 
     /** Starts the close animation; the view is removed once it finishes. */
@@ -862,6 +881,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             )
         }
     }
+
+    /** Height a centred dialog may use before it starts scrolling. */
+    private fun dialogMaxHeight() =
+        ((resources.displayMetrics.heightPixels * 0.62f) /
+         resources.displayMetrics.density).composeDp
 
     /**
      * Save/load slot picker.  Eight tiles in two rows of four rather than the
@@ -947,17 +971,26 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     }
 
     private fun showStopRecordingDialog() {
-        val input = EditText(this).apply { hint = "Recording name, e.g. perf_test_1" }
-        AlertDialog.Builder(this)
-            .setTitle("Save Recording")
-            .setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                val name = input.text.toString().ifBlank { "recording_${System.currentTimeMillis()}" }
-                val file = InputRecorder.stopRecording(filesDir, name)
-                showMessage(if (file != null) "Saved: ${file.name}" else "Save failed")
-            }
-            .setNegativeButton("Discard") { _, _ -> InputRecorder.cancelRecording() }
-            .show()
+        showOverlay(Gravity.CENTER, dimBackground = true) { transition, onHidden ->
+            GameTextInputDialog(
+                title = "Save Recording",
+                label = "Recording name, e.g. perf_test_1",
+                confirmLabel = "Save",
+                dismissLabel = "Discard",
+                visibleState = transition,
+                maxHeight = dialogMaxHeight(),
+                onFullyHidden = onHidden,
+                onConfirm = { name ->
+                    dismissOverlay()
+                    InputRecorder.stopRecording(filesDir, name)
+                    showMessage("Recording saved as $name")
+                },
+                onDismiss = {
+                    dismissOverlay()
+                    InputRecorder.cancelRecording()
+                },
+            )
+        }
     }
 
     private fun showPlayRecordingDialog() {
@@ -966,12 +999,21 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             showMessage("No recordings for this game", isError = true)
             return
         }
-        AlertDialog.Builder(this)
-            .setTitle("Play Recording")
-            .setItems(names.toTypedArray()) { _, which ->
-                InputRecorder.startPlayback(filesDir, gameId, names[which])
-            }
-            .show()
+        showOverlay(Gravity.CENTER, dimBackground = true) { transition, onHidden ->
+            GameListDialog(
+                title = "Play Recording",
+                items = names,
+                dismissLabel = "Cancel",
+                visibleState = transition,
+                maxHeight = dialogMaxHeight(),
+                onFullyHidden = onHidden,
+                onPick = { i ->
+                    dismissOverlay()
+                    InputRecorder.startPlayback(filesDir, gameId, names[i])
+                },
+                onDismiss = { dismissOverlay() },
+            )
+        }
     }
 
     /** Derive a short, filesystem-safe game ID from the ISO URI for snapshot namespacing. */
@@ -1021,12 +1063,20 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     }
 
     private fun confirmExit() {
-        AlertDialog.Builder(this)
-            .setTitle("Exit to Library")
-            .setMessage("Return to the game library?\n\nUnsaved game progress will be lost.")
-            .setPositiveButton("Exit") { _, _ -> exitToLibrary() }
-            .setNegativeButton("Cancel", null)
-            .show()
+        showOverlay(Gravity.CENTER, dimBackground = true) { transition, onHidden ->
+            GameConfirmDialog(
+                title = "Exit to Library",
+                message = "Return to the game library?\n\n" +
+                          "Unsaved game progress will be lost.",
+                confirmLabel = "Exit",
+                dismissLabel = "Cancel",
+                visibleState = transition,
+                maxHeight = dialogMaxHeight(),
+                onFullyHidden = onHidden,
+                onConfirm = { dismissOverlay(); exitToLibrary() },
+                onDismiss = { dismissOverlay() },
+            )
+        }
     }
 
     /**
