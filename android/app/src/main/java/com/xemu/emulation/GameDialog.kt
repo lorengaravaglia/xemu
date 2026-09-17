@@ -7,7 +7,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -32,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 
 /**
  * Shared shell for the in-game dialogs.
@@ -146,17 +146,46 @@ fun GameListDialog(
     onPick: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    /*
+     * Picking a row used to call straight through, which dismissed the dialog
+     * on the same frame and cut the ripple off before it drew -- the tap looked
+     * like it had done nothing.  Hold the chosen row highlighted for a moment
+     * first, the same way the slot picker holds the tile that was pressed.
+     */
+    var picked by remember { mutableStateOf<Int?>(null) }
+
+    LaunchedEffect(picked) {
+        picked?.let {
+            delay(160)
+            onPick(it)
+        }
+    }
+
     GameDialogFrame(title, visibleState, onFullyHidden, maxHeight) {
         items.forEachIndexed { index, label ->
-            Text(
-                label,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onPick(index) }
-                    .padding(horizontal = 4.dp, vertical = 11.dp),
-            )
+            val isPicked = picked == index
+            Surface(
+                onClick = { if (picked == null) picked = index },
+                enabled = picked == null,
+                shape = MaterialTheme.shapes.small,
+                color = if (isPicked) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                } else {
+                    MaterialTheme.colorScheme.surface
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isPicked) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 11.dp),
+                )
+            }
         }
         DialogActions(dismissLabel, onDismiss)
     }

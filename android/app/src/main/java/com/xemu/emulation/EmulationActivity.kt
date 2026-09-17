@@ -1168,9 +1168,29 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /** Returns a rounded-pill GradientDrawable with the given fill color. */
-    private fun pillDrawable(colorArgb: Int) = GradientDrawable().apply {
-        cornerRadius = 100.dp.toFloat()
-        setColor(colorArgb)
+    /**
+     * Pill background with a pressed state.
+     *
+     * UI rule: anything pressable shows it.  The MENU pill had a single flat
+     * fill, so tapping it gave nothing back until the menu appeared.
+     */
+    private fun pillDrawable(colorArgb: Int): StateListDrawable {
+        fun pill(color: Int) = GradientDrawable().apply {
+            cornerRadius = 100.dp.toFloat()
+            setColor(color)
+        }
+        /* Lift towards white rather than tinting, so it reads as pressed
+         * whatever the base colour is. */
+        val pressed = Color.argb(
+            Color.alpha(colorArgb),
+            (Color.red(colorArgb) + 70).coerceAtMost(255),
+            (Color.green(colorArgb) + 70).coerceAtMost(255),
+            (Color.blue(colorArgb) + 70).coerceAtMost(255),
+        )
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), pill(pressed))
+            addState(intArrayOf(), pill(colorArgb))
+        }
     }
 
     /** Returns a rectangle GradientDrawable with the given fill color. */

@@ -7,7 +7,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -43,6 +48,11 @@ import androidx.compose.ui.unit.dp
  * list below the fold — which is why the old menu appeared mostly off-screen.
  * Anchoring to the button keeps it on screen by construction, and [maxHeight]
  * plus a scroll keeps it that way however many items it grows.
+ *
+ * UI RULE: every control that can be pressed must show it, and a highlight is
+ * the first choice -- a ripple alone is too easy to miss against a dark surface
+ * over moving video, and it is gone before the eye reaches it if the press also
+ * dismisses what was pressed.
  *
  * Built in Compose with [com.xemu.ui.theme.XemuTheme] so it picks up the same
  * Material 3 colour scheme as the rest of the app — including the dynamic
@@ -181,11 +191,28 @@ private fun MenuRow(
         danger   -> MaterialTheme.colorScheme.error
         else     -> MaterialTheme.colorScheme.onSurface
     }
+    /* Highlight while held: see the UI rule at the top of this file. */
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = enabled) { onClick() }
+            /* Before clickable(), so the ripple draws over the highlight
+             * rather than under it. */
+            .background(
+                if (pressed && enabled) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                } else {
+                    Color.Transparent
+                }
+            )
+            .clickable(
+                enabled = enabled,
+                interactionSource = interaction,
+                indication = LocalIndication.current,
+            ) { onClick() }
             .padding(horizontal = 14.dp, vertical = 7.dp),
     ) {
         Text(
