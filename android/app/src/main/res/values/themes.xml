@@ -24,6 +24,14 @@
     <style name="Theme.Xemu.Dialog" parent="ThemeOverlay.MaterialComponents.MaterialAlertDialog">
         <item name="colorPrimary">@color/xbox_green_light</item>
         <item name="colorAccent">@color/xbox_green_light</item>
+        <!--
+            The window must not paint its own background.  Overriding
+            android:background gives the CONTENT a rounded drawable, but the
+            window behind it is still an opaque square, so its corners showed
+            past the rounding as lighter 90-degree corners around a darker
+            rounded card.  Transparent here leaves only the rounded drawable.
+        -->
+        <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:background">@drawable/dialog_background</item>
         <item name="colorSurface">@color/xemu_surface</item>
         <item name="android:textColorPrimary">@android:color/white</item>
