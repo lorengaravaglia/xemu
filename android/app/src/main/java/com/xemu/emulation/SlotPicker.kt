@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -126,10 +125,9 @@ fun SlotPicker(
                 /* Aligned within the Column rather than in a fillMaxWidth Row:
                  * filling the width propagates the maximum constraint back up
                  * and stretches the whole dialog across the screen. */
-                TextButton(
-                    onClick = onCancel,
-                    modifier = Modifier.align(Alignment.End),
-                ) { Text("Cancel") }
+                Box(modifier = Modifier.align(Alignment.End)) {
+                    DialogAction("Cancel", onCancel)
+                }
             }
         }
     }

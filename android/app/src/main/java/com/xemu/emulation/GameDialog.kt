@@ -7,6 +7,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -30,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 
@@ -88,6 +92,37 @@ fun GameDialogFrame(
     }
 }
 
+/**
+ * A dialog action.
+ *
+ * TextButton's ripple alone is the weakest feedback in this UI -- a thin wash
+ * over a dark surface on top of moving video -- so per the rule at the top of
+ * InGameMenu.kt it also takes a highlight while held.
+ */
+@Composable
+fun DialogAction(
+    label: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        interactionSource = interaction,
+        modifier = Modifier.background(
+            color = if (pressed && enabled) {
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+            } else {
+                Color.Transparent
+            },
+            shape = MaterialTheme.shapes.small,
+        ),
+    ) { Text(label) }
+}
+
 /** Right-aligned action row, matching the slot picker's Cancel placement. */
 @Composable
 private fun DialogActions(
@@ -102,11 +137,9 @@ private fun DialogActions(
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(onClick = onDismiss) { Text(dismissLabel) }
+        DialogAction(dismissLabel, onDismiss)
         if (confirmLabel != null && onConfirm != null) {
-            TextButton(onClick = onConfirm, enabled = confirmEnabled) {
-                Text(confirmLabel)
-            }
+            DialogAction(confirmLabel, onConfirm, confirmEnabled)
         }
     }
 }

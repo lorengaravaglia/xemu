@@ -1,7 +1,6 @@
 package com.xemu.library
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -19,10 +18,14 @@ import coil.compose.AsyncImage
 
 @Composable
 fun GameCard(game: GameEntry, onClick: () -> Unit) {
+    /*
+     * Card's onClick overload rather than Modifier.clickable: the modifier sits
+     * outside the Card's clipping, so its ripple spilled past the rounded
+     * corners instead of following the card.
+     */
     Card(
-        modifier = Modifier
-            .aspectRatio(0.75f)
-            .clickable(onClick = onClick),
+        onClick = onClick,
+        modifier = Modifier.aspectRatio(0.75f),
         elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
