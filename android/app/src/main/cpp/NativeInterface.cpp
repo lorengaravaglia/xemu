@@ -23,7 +23,7 @@ static std::string jstringToString(JNIEnv* env, jstring jstr) {
 extern "C" {
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_startEmulation(
+Java_com_boxxy_NativeInterface_startEmulation(
     JNIEnv *env, jclass clazz, jobject surface,
     jstring configPath, jstring mcpxPath, jstring biosPath,
     jstring hddPath, jstring isoPath, jstring renderer,
@@ -74,42 +74,42 @@ Java_com_xemu_NativeInterface_startEmulation(
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_stopEmulation(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_stopEmulation(JNIEnv *env, jclass clazz) {
     xemu_android_stop();
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_pauseEmulation(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_pauseEmulation(JNIEnv *env, jclass clazz) {
     xemu_android_vm_pause();
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_resumeEmulation(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_resumeEmulation(JNIEnv *env, jclass clazz) {
     xemu_android_vm_resume();
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_flushBlockDevices(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_flushBlockDevices(JNIEnv *env, jclass clazz) {
     xemu_android_flush_block_devices();
 }
 
 JNIEXPORT jint JNICALL
-Java_com_xemu_NativeInterface_getRenderedFrameCount(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_getRenderedFrameCount(JNIEnv *env, jclass clazz) {
     return xemu_android_get_rendered_frame_count();
 }
 
 JNIEXPORT jint JNICALL
-Java_com_xemu_NativeInterface_getWorstFrameTimeMs(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_getWorstFrameTimeMs(JNIEnv *env, jclass clazz) {
     return xemu_android_get_worst_frame_time_ms();
 }
 
 JNIEXPORT jint JNICALL
-Java_com_xemu_NativeInterface_getCompiledShaderCount(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_getCompiledShaderCount(JNIEnv *env, jclass clazz) {
     return xemu_android_get_compiled_shader_count();
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setSurface(JNIEnv *env, jclass clazz, jobject surface) {
+Java_com_boxxy_NativeInterface_setSurface(JNIEnv *env, jclass clazz, jobject surface) {
     if (surface == nullptr) {
         xemu_android_surface_destroyed();
     } else {
@@ -123,43 +123,43 @@ Java_com_xemu_NativeInterface_setSurface(JNIEnv *env, jclass clazz, jobject surf
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_sendButtonDown(JNIEnv *env, jclass clazz, jint mask) {
+Java_com_boxxy_NativeInterface_sendButtonDown(JNIEnv *env, jclass clazz, jint mask) {
     xemu_android_set_button((uint32_t)mask, 1);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_sendButtonUp(JNIEnv *env, jclass clazz, jint mask) {
+Java_com_boxxy_NativeInterface_sendButtonUp(JNIEnv *env, jclass clazz, jint mask) {
     xemu_android_set_button((uint32_t)mask, 0);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_sendAxis(JNIEnv *env, jclass clazz, jint axis, jint value) {
+Java_com_boxxy_NativeInterface_sendAxis(JNIEnv *env, jclass clazz, jint axis, jint value) {
     xemu_android_set_axis(axis, (int16_t)value);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_requestExit(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_requestExit(JNIEnv *env, jclass clazz) {
     xemu_android_request_exit();
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setAspectRatio(JNIEnv *env, jclass clazz, jint ratio) {
+Java_com_boxxy_NativeInterface_setAspectRatio(JNIEnv *env, jclass clazz, jint ratio) {
     xemu_hud_set_aspect_ratio((int)ratio);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setFilterNearest(JNIEnv *env, jclass clazz, jboolean nearest) {
+Java_com_boxxy_NativeInterface_setFilterNearest(JNIEnv *env, jclass clazz, jboolean nearest) {
     xemu_hud_set_filter_nearest((bool)nearest);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setAccurateMemoryOrdering(JNIEnv *env, jclass clazz,
+Java_com_boxxy_NativeInterface_setAccurateMemoryOrdering(JNIEnv *env, jclass clazz,
                                                        jboolean enabled) {
     xemu_android_set_accurate_mem_ordering((bool)enabled);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setSurfaceScale(JNIEnv *env, jclass clazz, jint scale) {
+Java_com_boxxy_NativeInterface_setSurfaceScale(JNIEnv *env, jclass clazz, jint scale) {
     xemu_android_set_surface_scale((unsigned int)scale);
 }
 
@@ -171,7 +171,7 @@ Java_com_xemu_NativeInterface_setSurfaceScale(JNIEnv *env, jclass clazz, jint sc
  * overwrite the stored message before it is read.
  */
 JNIEXPORT jstring JNICALL
-Java_com_xemu_NativeInterface_saveState(JNIEnv *env, jclass clazz, jstring name) {
+Java_com_boxxy_NativeInterface_saveState(JNIEnv *env, jclass clazz, jstring name) {
     std::string s = jstringToString(env, name);
     if (xemu_android_save_state(s.c_str())) {
         return nullptr;
@@ -181,7 +181,7 @@ Java_com_xemu_NativeInterface_saveState(JNIEnv *env, jclass clazz, jstring name)
 
 /* Returns null on success, or the reason it failed. */
 JNIEXPORT jstring JNICALL
-Java_com_xemu_NativeInterface_loadState(JNIEnv *env, jclass clazz, jstring name) {
+Java_com_boxxy_NativeInterface_loadState(JNIEnv *env, jclass clazz, jstring name) {
     std::string s = jstringToString(env, name);
     if (xemu_android_load_state(s.c_str())) {
         return nullptr;
@@ -190,7 +190,7 @@ Java_com_xemu_NativeInterface_loadState(JNIEnv *env, jclass clazz, jstring name)
 }
 
 JNIEXPORT jintArray JNICALL
-Java_com_xemu_NativeInterface_getRumble(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_getRumble(JNIEnv *env, jclass clazz) {
     uint16_t l = 0, r = 0;
     xemu_android_get_rumble(&l, &r);
     jintArray result = env->NewIntArray(2);
@@ -200,7 +200,7 @@ Java_com_xemu_NativeInterface_getRumble(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT jintArray JNICALL
-Java_com_xemu_NativeInterface_getFrameTimeHistory(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_getFrameTimeHistory(JNIEnv *env, jclass clazz) {
     int buf[60];
     int count = 0;
     xemu_android_get_frame_time_history(buf, 60, &count);
@@ -212,42 +212,42 @@ Java_com_xemu_NativeInterface_getFrameTimeHistory(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_xemu_NativeInterface_getPgraphSyncWaitMs(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_getPgraphSyncWaitMs(JNIEnv *env, jclass clazz) {
     return (jint)xemu_android_get_pgraph_sync_wait_ms();
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setHrtf(JNIEnv *env, jclass clazz,
+Java_com_boxxy_NativeInterface_setHrtf(JNIEnv *env, jclass clazz,
                                       jboolean enabled) {
     xemu_android_set_hrtf((bool)enabled);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_startBenchmark(JNIEnv *env, jclass clazz,
+Java_com_boxxy_NativeInterface_startBenchmark(JNIEnv *env, jclass clazz,
                                              jint frames) {
     xemu_android_benchmark_start((int)frames);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setSkipBootAnim(JNIEnv *env, jclass clazz,
+Java_com_boxxy_NativeInterface_setSkipBootAnim(JNIEnv *env, jclass clazz,
                                               jboolean enabled) {
     xemu_android_set_skip_boot_anim((bool)enabled);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_setVoiceWorkers(JNIEnv *env, jclass clazz,
+Java_com_boxxy_NativeInterface_setVoiceWorkers(JNIEnv *env, jclass clazz,
                                               jint n) {
     xemu_android_set_voice_workers((int)n);
 }
 
 JNIEXPORT void JNICALL
-Java_com_xemu_NativeInterface_frameprofMark(JNIEnv *env, jclass clazz,
+Java_com_boxxy_NativeInterface_frameprofMark(JNIEnv *env, jclass clazz,
                                             jboolean starting) {
     xemu_android_frameprof_mark(starting ? 1 : 0);
 }
 
 JNIEXPORT jobjectArray JNICALL
-Java_com_xemu_NativeInterface_listStates(JNIEnv *env, jclass clazz) {
+Java_com_boxxy_NativeInterface_listStates(JNIEnv *env, jclass clazz) {
     char **names = nullptr;
     int n = xemu_android_list_states(&names);
 

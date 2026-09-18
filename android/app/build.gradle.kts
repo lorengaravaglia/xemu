@@ -5,12 +5,12 @@ plugins {
 }
 
 android {
-    namespace = "com.xemu"
+    namespace = "com.boxxy"
     compileSdk = 34
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
-        applicationId = "com.xemu"
+        applicationId = "com.boxxy"
         minSdk = 28
         targetSdk = 34
         versionCode = 1

@@ -13,5 +13,5 @@
 }
 
 # Keep classes called by JNI
--keep class com.xemu.NativeInterface { *; }
--keep class com.xemu.NativeInput { *; }
+-keep class com.boxxy.NativeInterface { *; }
+-keep class com.boxxy.NativeInput { *; }
