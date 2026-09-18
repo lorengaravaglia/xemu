@@ -114,68 +114,135 @@ object ArtworkRepository {
     }
 
     /**
-     * Returns a local cached [File] containing box art for [displayName], fetching
-     * from the network if necessary. Returns null if no art could be found or all
-     * configured sources are unavailable.
+     * Why a lookup produced no art. Previously every one of these returned a
+     * bare null, so a missing key, a rejected key, an unmatched title and a
+     * dropped connection were indistinguishable — and all four looked like
+     * the feature simply not working.
+     */
+    sealed interface ArtOutcome {
+        data class Found(val file: File) : ArtOutcome
+        /** No key configured; the only source we have needs one. */
+        data object NoKey : ArtOutcome
+        /** The service rejected the key (401/403). */
+        data object KeyRejected : ArtOutcome
+        /** Key accepted, but the title matched nothing. */
+        data object NoMatch : ArtOutcome
+        /** Could not reach the service at all. */
+        data object Unreachable : ArtOutcome
+    }
+
+    /**
+     * Returns box art for [displayName], fetching it if it is not already
+     * cached, and saying why when it cannot.
      */
     suspend fun fetchArt(
         context: Context,
         displayName: String,
         steamGridDbKey: String,
-    ): File? = withContext(Dispatchers.IO) {
+    ): ArtOutcome = withContext(Dispatchers.IO) {
         val dest = cachedFile(context, displayName)
-        if (dest.exists()) return@withContext dest
+        if (dest.exists()) return@withContext ArtOutcome.Found(dest)
+        if (steamGridDbKey.isEmpty()) return@withContext ArtOutcome.NoKey
 
-        if (steamGridDbKey.isNotEmpty()) {
-            fetchFromSteamGridDB(displayName, steamGridDbKey)?.let { url ->
-                downloadTo(url, dest)?.let { return@withContext it }
-            }
+        when (val found = fetchFromSteamGridDB(displayName, steamGridDbKey)) {
+            is Lookup.Url ->
+                downloadTo(found.url, dest)
+                    ?.let { ArtOutcome.Found(it) }
+                    ?: ArtOutcome.Unreachable
+            Lookup.Rejected -> ArtOutcome.KeyRejected
+            Lookup.NoMatch -> ArtOutcome.NoMatch
+            Lookup.Unreachable -> ArtOutcome.Unreachable
         }
 
         // TODO: ScreenScraper fallback (requires devid registration + user credentials)
+    }
 
-        null
+    /** Checks a key without changing any stored art. */
+    suspend fun validateKey(key: String): ArtOutcome = withContext(Dispatchers.IO) {
+        if (key.isEmpty()) return@withContext ArtOutcome.NoKey
+        when (val r = httpGet("$STEAMGRIDDB_BASE/search/autocomplete/halo", key)) {
+            is Response.Ok -> ArtOutcome.NoMatch          // reachable and accepted
+            Response.Rejected -> ArtOutcome.KeyRejected
+            Response.Failed -> ArtOutcome.Unreachable
+        }
+    }
+
+    /**
+     * Clears only art downloaded from the network. User-chosen images and art
+     * extracted from discs live in the same directory and are deliberately
+     * preserved — wiping the directory wholesale would silently destroy a
+     * choice the user made by hand.
+     */
+    fun clearNetworkArt(context: Context) {
+        artworkDir(context).listFiles()?.forEach { f ->
+            if (!f.name.startsWith("custom_") && !f.name.startsWith("disc_")) f.delete()
+        }
     }
 
     // ── SteamGridDB ───────────────────────────────────────────────────────────
 
-    private fun fetchFromSteamGridDB(gameName: String, apiKey: String): String? {
+    private sealed interface Lookup {
+        data class Url(val url: String) : Lookup
+        data object Rejected : Lookup
+        data object NoMatch : Lookup
+        data object Unreachable : Lookup
+    }
+
+    private fun fetchFromSteamGridDB(gameName: String, apiKey: String): Lookup {
         // Step 1: search for the game ID
         val encoded = Uri.encode(gameName)
-        val searchJson = httpGet("$STEAMGRIDDB_BASE/search/autocomplete/$encoded", apiKey)
-            ?: return null
+        val searchJson = when (val r = httpGet("$STEAMGRIDDB_BASE/search/autocomplete/$encoded", apiKey)) {
+            is Response.Ok -> r.body
+            Response.Rejected -> return Lookup.Rejected
+            Response.Failed -> return Lookup.Unreachable
+        }
         val gameId = JSONObject(searchJson)
             .optJSONArray("data")
             ?.optJSONObject(0)
             ?.optInt("id", -1)
             ?.takeIf { it > 0 }
-            ?: return null
+            ?: return Lookup.NoMatch
 
         // Step 2: fetch portrait grid art (600×900 preferred)
-        val gridsJson = httpGet(
+        val gridsJson = when (val r = httpGet(
             "$STEAMGRIDDB_BASE/grids/game/$gameId?dimensions=600x900&mime_types=jpeg,png",
             apiKey,
-        ) ?: return null
+        )) {
+            is Response.Ok -> r.body
+            Response.Rejected -> return Lookup.Rejected
+            Response.Failed -> return Lookup.Unreachable
+        }
 
-        return JSONObject(gridsJson)
+        val url = JSONObject(gridsJson)
             .optJSONArray("data")
             ?.optJSONObject(0)
             ?.optString("url")
             ?.takeIf { it.isNotEmpty() }
+        return if (url != null) Lookup.Url(url) else Lookup.NoMatch
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────
 
-    private fun httpGet(url: String, bearerToken: String?): String? {
+    private sealed interface Response {
+        data class Ok(val body: String) : Response
+        /** Authentication failed — the key is wrong, not the query. */
+        data object Rejected : Response
+        data object Failed : Response
+    }
+
+    private fun httpGet(url: String, bearerToken: String?): Response {
         return try {
             val conn = URL(url).openConnection() as HttpURLConnection
             conn.connectTimeout = CONNECT_TIMEOUT_MS
             conn.readTimeout = READ_TIMEOUT_MS
-            conn.setRequestProperty("User-Agent", "xemu-android/1.0")
+            conn.setRequestProperty("User-Agent", "boxxy-android/1.0")
             bearerToken?.let { conn.setRequestProperty("Authorization", "Bearer $it") }
-            if (conn.responseCode != 200) return null
-            conn.inputStream.bufferedReader().readText()
-        } catch (_: Exception) { null }
+            when (conn.responseCode) {
+                200 -> Response.Ok(conn.inputStream.bufferedReader().readText())
+                401, 403 -> Response.Rejected
+                else -> Response.Failed
+            }
+        } catch (_: Exception) { Response.Failed }
     }
 
     private fun downloadTo(url: String, dest: File): File? {

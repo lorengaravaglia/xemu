@@ -26,6 +26,16 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val _dirs = MutableStateFlow<List<Uri>>(emptyList())
     val dirs: StateFlow<List<Uri>> = _dirs
 
+    /** Outcome of the last artwork lookup, for the settings screen to show. */
+    sealed interface ArtStatus {
+        data object Working : ArtStatus
+        data class Ok(val message: String) : ArtStatus
+        data class Problem(val message: String) : ArtStatus
+    }
+
+    private val _artStatus = MutableStateFlow<ArtStatus?>(null)
+    val artStatus: StateFlow<ArtStatus?> = _artStatus
+
     /** Rows of cards shown at once; the grid scrolls sideways within them. */
     private val _rows = MutableStateFlow(prefs.getInt("grid_rows", 1))
     val rows: StateFlow<Int> = _rows
@@ -67,7 +77,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun rescan(steamGridDbKey: String = "") {
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.IO) { doScan(steamGridDbKey) }
+    }
+
+    /**
+     * The scan itself. Suspending rather than launching so callers that need to
+     * report an outcome can wait for it to finish.
+     */
+    private suspend fun doScan(steamGridDbKey: String) {
+        run {
             val ctx = getApplication<Application>()
             val found = mutableListOf<GameEntry>()
             for (dirUri in _dirs.value) {
@@ -98,11 +116,36 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Delete all cached artwork and re-fetch from scratch. */
+    /**
+     * Discard downloaded art and look it up again, reporting what happened.
+     * Art the user chose and art read from discs is kept — only network
+     * results are refreshed.
+     */
     fun refetchArt(steamGridDbKey: String) {
-        ArtworkRepository.artworkDir(getApplication()).deleteRecursively()
-        rescan(steamGridDbKey)
+        viewModelScope.launch(Dispatchers.IO) {
+            _artStatus.value = ArtStatus.Working
+            ArtworkRepository.clearNetworkArt(getApplication())
+            doScan(steamGridDbKey)
+        }
     }
+
+    /** Checks the key on its own, without touching stored art. */
+    fun testKey(steamGridDbKey: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _artStatus.value = ArtStatus.Working
+            _artStatus.value = when (ArtworkRepository.validateKey(steamGridDbKey)) {
+                is ArtworkRepository.ArtOutcome.KeyRejected ->
+                    ArtStatus.Problem("That key was rejected. Check it on steamgriddb.com and paste it again.")
+                is ArtworkRepository.ArtOutcome.Unreachable ->
+                    ArtStatus.Problem("Could not reach steamgriddb.com. Check the network and try again.")
+                is ArtworkRepository.ArtOutcome.NoKey ->
+                    ArtStatus.Problem("Enter a key first.")
+                else -> ArtStatus.Ok("Key accepted.")
+            }
+        }
+    }
+
+    fun clearArtStatus() { _artStatus.value = null }
 
     /**
      * Scans [dir] for game files. Also recurses one level into subdirectories,
@@ -225,20 +268,60 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Art fetching ──────────────────────────────────────────────────────────
 
-    private fun fetchMissingArt(ctx: Context, steamKey: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            for (game in _games.value.filter { it.coverUri == null }) {
-                // Search with the disc's own title where we have it; a
-                // filename like "Halo - Combat Evolved (USA) (Rev 2)" does not
-                // match any real catalogue entry.
-                val query = game.discTitle ?: game.displayName
-                val file = ArtworkRepository.fetchArt(ctx, query, steamKey)
-                if (file != null) {
+    /**
+     * Looks up art for everything still without a cover, then reports a single
+     * summary. Individual failures are counted rather than announced, so one
+     * unmatched title does not bury the result for the rest.
+     */
+    private suspend fun fetchMissingArt(ctx: Context, steamKey: String) {
+        val missing = _games.value.filter { it.coverUri == null }
+        if (missing.isEmpty()) {
+            _artStatus.value = ArtStatus.Ok("Every game already has artwork.")
+            return
+        }
+
+        var found = 0
+        var unmatched = 0
+        for (game in missing) {
+            // Search with the disc's own title where we have it; a filename
+            // like "Halo - Combat Evolved (USA) (Rev 2)" matches no real
+            // catalogue entry.
+            val query = game.discTitle ?: game.displayName
+            when (val r = ArtworkRepository.fetchArt(ctx, query, steamKey)) {
+                is ArtworkRepository.ArtOutcome.Found -> {
+                    found++
                     _games.value = _games.value.map { g ->
-                        if (g.uri == game.uri) g.copy(coverUri = Uri.fromFile(file)) else g
+                        if (g.uri == game.uri) {
+                            g.copy(coverUri = Uri.fromFile(r.file), coverIsDiscArt = false)
+                        } else g
                     }
                 }
+                is ArtworkRepository.ArtOutcome.NoMatch -> unmatched++
+                // A bad key or a dead connection applies to every remaining
+                // game, so stop rather than repeat the same failure N times.
+                is ArtworkRepository.ArtOutcome.KeyRejected -> {
+                    _artStatus.value = ArtStatus.Problem(
+                        "That key was rejected. Check it on steamgriddb.com and paste it again.")
+                    return
+                }
+                is ArtworkRepository.ArtOutcome.Unreachable -> {
+                    _artStatus.value = ArtStatus.Problem(
+                        "Could not reach steamgriddb.com. Check the network and try again.")
+                    return
+                }
+                is ArtworkRepository.ArtOutcome.NoKey -> {
+                    _artStatus.value = ArtStatus.Problem(
+                        "No API key set, so only artwork from the discs is available.")
+                    return
+                }
             }
+        }
+        _artStatus.value = when {
+            found == 0 -> ArtStatus.Problem(
+                "No matches for $unmatched game${if (unmatched == 1) "" else "s"}. " +
+                "Long-press a game to choose artwork yourself.")
+            unmatched == 0 -> ArtStatus.Ok("Found artwork for $found.")
+            else -> ArtStatus.Ok("Found artwork for $found; no match for $unmatched.")
         }
     }
 }

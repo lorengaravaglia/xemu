@@ -4,7 +4,9 @@ import com.boxxy.NativeInterface
 
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -16,17 +18,50 @@ import java.util.zip.ZipInputStream
 
 class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
+    private companion object {
+        const val TAG = "xemu-settings"
+        const val SECURE_PREFS = "secure_prefs"
+    }
+
     private val prefs = app.getSharedPreferences("main_prefs", Context.MODE_PRIVATE)
 
-    // Separate encrypted store for sensitive values (API keys, credentials).
-    // Uses Android Keystore-backed AES-256-GCM; only SettingsViewModel reads/writes this file.
-    private val securePrefs = EncryptedSharedPreferences.create(
-        app,
-        "secure_prefs",
-        MasterKey.Builder(app).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    /*
+     * Separate encrypted store for sensitive values (API keys, credentials),
+     * backed by an Android Keystore AES-256-GCM master key.
+     *
+     * Opening it can throw, and a throw here is fatal: this runs in the
+     * ViewModel constructor, so the whole app fails to start with "Cannot
+     * create an instance of SettingsViewModel". That is exactly what happened
+     * when the package was renamed — the master key is scoped to the package
+     * name, so the copied-across file could no longer be decrypted and every
+     * screen became unreachable because of one optional API key.
+     *
+     * The contents are a convenience, never something that cannot be re-entered,
+     * so an unreadable store is discarded and rebuilt rather than propagated.
+     */
+    private val securePrefs: SharedPreferences? = openSecurePrefs(app)
+
+    private fun openSecurePrefs(app: Application): SharedPreferences? {
+        repeat(2) { attempt ->
+            try {
+                return EncryptedSharedPreferences.create(
+                    app,
+                    SECURE_PREFS,
+                    MasterKey.Builder(app).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+                    EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                    EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "secure prefs unreadable (attempt ${attempt + 1}): $e")
+                if (attempt == 0) {
+                    // Undecryptable file: drop it so the next attempt starts clean.
+                    app.deleteSharedPreferences(SECURE_PREFS)
+                }
+            }
+        }
+        Log.e(TAG, "giving up on secure prefs; API keys will not persist this session")
+        return null
+    }
 
     private val _mcpxUri = MutableStateFlow(prefs.getString("mcpx_uri", null)?.let { Uri.parse(it) })
     val mcpxUri: StateFlow<Uri?> = _mcpxUri
@@ -67,12 +102,16 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     // ── Box art ───────────────────────────────────────────────────────────────
 
     /** API key from https://www.steamgriddb.com/profile/preferences */
-    private val _steamGridDbKey = MutableStateFlow(securePrefs.getString("steamgriddb_key", "") ?: "")
+    private val _steamGridDbKey =
+        MutableStateFlow(securePrefs?.getString("steamgriddb_key", "") ?: "")
     val steamGridDbKey: StateFlow<String> = _steamGridDbKey
+
+    /** True when the key store could not be opened, so a key cannot be saved. */
+    val secureStoreUnavailable: Boolean get() = securePrefs == null
 
     fun setSteamGridDbKey(value: String) {
         _steamGridDbKey.value = value
-        securePrefs.edit().putString("steamgriddb_key", value).apply()
+        securePrefs?.edit()?.putString("steamgriddb_key", value)?.apply()
     }
 
     // TODO: ScreenScraper (screenscraper.fr) — username + password, system ID 15 for Xbox

@@ -156,8 +156,10 @@ fun SystemSettingsScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(
-                            "Art is fetched automatically when games are scanned. " +
-                            "Get a free API key at steamgriddb.com → Profile → Preferences → API.",
+                            "Games already show the artwork stored on the disc. A key is " +
+                            "only needed for full cover art, which is higher resolution. " +
+                            "Get one free at steamgriddb.com → Profile → Preferences → API. " +
+                            "You can also long-press any game to choose your own image.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -180,12 +182,62 @@ fun SystemSettingsScreen(
                                 }
                             },
                         )
-                        OutlinedButton(
-                            onClick = { libraryViewModel.refetchArt(steamGridDbKey) },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = steamGridDbKey.isNotEmpty(),
-                        ) {
-                            Text("Re-fetch All Art")
+                        val artStatus by libraryViewModel.artStatus.collectAsState()
+                        val busy = artStatus is LibraryViewModel.ArtStatus.Working
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { libraryViewModel.testKey(steamGridDbKey) },
+                                modifier = Modifier.weight(1f),
+                                enabled = steamGridDbKey.isNotEmpty() && !busy,
+                            ) {
+                                Text("Test key")
+                            }
+                            OutlinedButton(
+                                onClick = { libraryViewModel.refetchArt(steamGridDbKey) },
+                                modifier = Modifier.weight(1f),
+                                enabled = steamGridDbKey.isNotEmpty() && !busy,
+                            ) {
+                                Text("Re-fetch art")
+                            }
+                        }
+
+                        /*
+                         * Every one of these used to be silence. A lookup can
+                         * fail four different ways and the difference is the
+                         * only thing that tells the user what to do next.
+                         */
+                        when (val st = artStatus) {
+                            is LibraryViewModel.ArtStatus.Working ->
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    Text("Looking up artwork…", style = MaterialTheme.typography.bodySmall)
+                                }
+                            is LibraryViewModel.ArtStatus.Ok ->
+                                Text(
+                                    st.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            is LibraryViewModel.ArtStatus.Problem ->
+                                Text(
+                                    st.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            null -> {}
+                        }
+
+                        if (settingsViewModel.secureStoreUnavailable) {
+                            Text(
+                                "The secure key store could not be opened, so this key " +
+                                "will be forgotten when the app closes.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
                         }
                     }
                 }
