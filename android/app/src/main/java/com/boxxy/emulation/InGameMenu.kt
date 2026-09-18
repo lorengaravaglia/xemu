@@ -1,13 +1,13 @@
 package com.boxxy.emulation
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -38,6 +39,8 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * The in-game menu.
@@ -53,6 +56,18 @@ import androidx.compose.ui.unit.dp
  * the first choice -- a ripple alone is too easy to miss against a dark surface
  * over moving video, and it is gone before the eye reaches it if the press also
  * dismisses what was pressed.
+ *
+ * That last case is most of this menu: six of its eight items dismiss it as
+ * their first action, so feedback that lasts only while the finger is down is
+ * torn away at the instant it matters and a quick tap shows almost nothing. So
+ * a dismissing row holds a brighter confirm highlight for [CONFIRM_HOLD_MS]
+ * *after* release and only then runs its action, making the chosen row visibly
+ * the thing the menu shrinks back into.
+ *
+ * No ripple on these rows. On a menu the useful question is "which item did I
+ * choose", not "where did I touch", and the ripple is also the part most
+ * truncated by dismissal — so the highlight carries it alone here. This is a
+ * per-surface decision and not a verdict on ripples elsewhere in the app.
  *
  * Built in Compose with [com.boxxy.ui.theme.XemuTheme] so it picks up the same
  * Material 3 colour scheme as the rest of the app — including the dynamic
@@ -136,10 +151,12 @@ fun InGameMenu(
                 MenuRow(
                     label = "Overlay",
                     value = overlayLabel,
+                    dismissesMenu = false,
                 ) { overlayLabel = onCycleOverlay() }
                 MenuRow(
                     label = "HRTF",
                     value = if (hrtfOn) "On" else "Off",
+                    dismissesMenu = false,
                 ) { hrtfOn = onToggleHrtf() }
 
                 MenuSeparator()
@@ -178,12 +195,21 @@ private fun MenuSectionLabel(text: String) {
     )
 }
 
+/** How long a dismissing row stays lit after release, before it acts. */
+private const val CONFIRM_HOLD_MS = 140L
+
 @Composable
 private fun MenuRow(
     label: String,
     value: String? = null,
     danger: Boolean = false,
     enabled: Boolean = true,
+    /**
+     * Whether choosing this row closes the menu. Rows that stay open already
+     * report themselves by changing their value, and delaying those would just
+     * make the toggle feel sluggish.
+     */
+    dismissesMenu: Boolean = true,
     onClick: () -> Unit,
 ) {
     val tint = when {
@@ -191,28 +217,60 @@ private fun MenuRow(
         danger   -> MaterialTheme.colorScheme.error
         else     -> MaterialTheme.colorScheme.onSurface
     }
-    /* Highlight while held: see the UI rule at the top of this file. */
+    /* Highlight while held, then confirm: see the UI rule at the top of this file. */
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    var confirming by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    // The destructive row confirms in its own colour; a green flash on "Exit to
+    // Library" would read as reassurance about the one item that deserves none.
+    val accent = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    val target = when {
+        !enabled           -> Color.Transparent
+        confirming         -> accent.copy(alpha = 0.38f)
+        pressed            -> accent.copy(alpha = 0.18f)
+        else               -> Color.Transparent
+    }
+    /*
+     * The confirm flash appears at once and fades on the way out, so it is not
+     * missed; an animated rise would eat most of the hold before it was bright.
+     */
+    val highlight by animateColorAsState(
+        targetValue = target,
+        animationSpec = tween(if (confirming) 0 else 140),
+        label = "menuRowHighlight",
+    )
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            /* Before clickable(), so the ripple draws over the highlight
-             * rather than under it. */
-            .background(
-                if (pressed && enabled) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                } else {
-                    Color.Transparent
-                }
-            )
+            .background(highlight)
             .clickable(
                 enabled = enabled,
                 interactionSource = interaction,
-                indication = LocalIndication.current,
-            ) { onClick() }
+                indication = null,
+            ) {
+                if (!dismissesMenu) {
+                    onClick()
+                } else if (!confirming) {
+                    // Guarded so a second tap during the hold cannot fire the
+                    // action twice.
+                    confirming = true
+                    scope.launch {
+                        delay(CONFIRM_HOLD_MS)
+                        onClick()
+                        /*
+                         * Deliberately not cleared. onClick() only starts the
+                         * exit animation, so the row stays lit while the menu
+                         * shrinks away — which is the whole point. The state
+                         * dies with the composition when onFullyHidden()
+                         * detaches the view, so the next open starts clean.
+                         */
+                    }
+                }
+            }
             .padding(horizontal = 14.dp, vertical = 7.dp),
     ) {
         Text(
