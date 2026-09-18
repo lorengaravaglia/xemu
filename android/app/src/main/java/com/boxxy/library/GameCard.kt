@@ -1,6 +1,8 @@
 package com.boxxy.library
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -16,25 +18,42 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun GameCard(game: GameEntry, onClick: () -> Unit) {
+fun GameCard(game: GameEntry, onClick: () -> Unit, onLongClick: () -> Unit = {}) {
     /*
-     * Card's onClick overload rather than Modifier.clickable: the modifier sits
-     * outside the Card's clipping, so its ripple spilled past the rounded
-     * corners instead of following the card.
+     * The click handling sits on the inner Box rather than Card's own onClick
+     * overload, because long-press needs combinedClickable and Card has no such
+     * overload. Keeping it inside the Card's content preserves the clipping —
+     * placing it on the Card's modifier let the ripple spill past the rounded
+     * corners.
      */
     Card(
-        onClick = onClick,
         modifier = Modifier.aspectRatio(0.75f),
         elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        ) {
             if (game.coverUri != null) {
+                /*
+                 * Real covers are portrait and fill the card. The disc's own
+                 * title image is square and low-resolution, so cropping it to
+                 * this aspect cuts the logo — fit it on a neutral ground
+                 * instead, which looks chosen rather than broken.
+                 */
                 AsyncImage(
                     model = game.coverUri,
                     contentDescription = game.displayName,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
+                    contentScale = if (game.coverIsDiscArt) ContentScale.Fit else ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            if (game.coverIsDiscArt) MaterialTheme.colorScheme.surfaceVariant
+                            else Color.Transparent
+                        ),
                 )
             }
             // Title bar at bottom — always shown; semi-transparent over art, solid when no art

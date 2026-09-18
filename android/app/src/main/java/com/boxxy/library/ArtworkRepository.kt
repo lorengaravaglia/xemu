@@ -1,6 +1,8 @@
 package com.boxxy.library
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -25,6 +27,9 @@ object ArtworkRepository {
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 20_000
 
+    /** Longest edge kept for user-chosen art; covers never need more. */
+    private const val MAX_ART_EDGE = 1024
+
     fun artworkDir(context: Context): File =
         File(context.filesDir, "artwork").also { it.mkdirs() }
 
@@ -38,6 +43,75 @@ object ArtworkRepository {
 
     fun cachedFile(context: Context, displayName: String): File =
         File(artworkDir(context), "${gameKey(displayName)}.jpg")
+
+    /**
+     * Cache location for art extracted from the disc itself, keyed by title ID
+     * rather than name — the ID is stable across renames and regional variants.
+     */
+    fun discArtFile(context: Context, titleId: Int): File =
+        File(artworkDir(context), "disc_%08x.png".format(titleId))
+
+    // ── User-chosen artwork ───────────────────────────────────────────────────
+    //
+    // Stored as a copy rather than a reference. A picked image arrives as a
+    // content:// URI whose permission grant is not ours to keep, and the file
+    // may sit on removable storage — copying makes the choice durable.
+    //
+    // The filename carries a timestamp because Coil caches by URI: overwriting
+    // a fixed name would keep showing the previous image.
+
+    private fun customPrefix(titleId: Int) = "custom_%08x_".format(titleId)
+
+    /** Most recent user-chosen art for [titleId], or null if none. */
+    fun customArtFor(context: Context, titleId: Int): File? =
+        artworkDir(context)
+            .listFiles { f -> f.name.startsWith(customPrefix(titleId)) }
+            ?.maxByOrNull { it.lastModified() }
+
+    fun clearCustomArt(context: Context, titleId: Int) {
+        artworkDir(context)
+            .listFiles { f -> f.name.startsWith(customPrefix(titleId)) }
+            ?.forEach { it.delete() }
+    }
+
+    /**
+     * Copies the image at [src] into the artwork cache for [titleId], scaling
+     * it down so a large photo does not sit in app storage at full size.
+     * Returns the stored file, or null if the image could not be read.
+     */
+    fun importCustomArt(context: Context, src: Uri, titleId: Int): File? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(src)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_ART_EDGE) sample *= 2
+
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp = context.contentResolver.openInputStream(src)?.use {
+                BitmapFactory.decodeStream(it, null, opts)
+            } ?: return null
+
+            clearCustomArt(context, titleId)
+            saveBitmap(bmp, File(artworkDir(context),
+                customPrefix(titleId) + System.currentTimeMillis() + ".png"))
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Writes [bmp] to [dest] as PNG. Returns null and cleans up on failure. */
+    fun saveBitmap(bmp: Bitmap, dest: File): File? = try {
+        dest.parentFile?.mkdirs()
+        dest.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        dest
+    } catch (_: Exception) {
+        dest.delete()
+        null
+    }
 
     /**
      * Returns a local cached [File] containing box art for [displayName], fetching
