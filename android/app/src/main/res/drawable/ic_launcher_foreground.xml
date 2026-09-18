@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Boxxy's mark: an isometric box.
+
+    The name is the console reduced to the thing everyone called it, so the icon
+    is the box itself rather than anything borrowed from Xbox's own identity —
+    no sphere, no X, no green nebula.  Three flat faces in the app's greens give
+    depth without detail, which is what survives being scaled to 48dp in a
+    launcher and then masked to a circle, squircle or rounded square.
+
+    Drawn in the 108dp adaptive viewport; the cube spans x 28..80 and y 23..85,
+    inside the central 72dp the system guarantees will never be masked away.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Top face: lightest, reads as the lit surface -->
+    <path
+        android:pathData="M54,23 L80,38 L54,53 L28,38 Z"
+        android:fillColor="#52B043" />
+
+    <!-- Left face: the mid tone, the app's primary green -->
+    <path
+        android:pathData="M28,38 L54,53 L54,85 L28,70 Z"
+        android:fillColor="#107C10" />
+
+    <!-- Right face: darkest, so the vertical edge between the two faces
+         carries the silhouette even against a dark ground -->
+    <path
+        android:pathData="M80,38 L80,70 L54,85 L54,53 Z"
+        android:fillColor="#0A5E0A" />
+</vector>

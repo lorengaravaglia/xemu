@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        The launcher name.  Was a hardcoded android:label in the manifest, which
+        meant it could not be translated or reused.
+    -->
+    <string name="app_name">Boxxy</string>
+</resources>
