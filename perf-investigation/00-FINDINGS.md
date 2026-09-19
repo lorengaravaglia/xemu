@@ -2304,3 +2304,68 @@ the user-supplied option it now is — best measured pick **v26.3.0-R3 or R5**
 (lowest CPU with the highest fps of the set) — but the honest sell is a few
 percent of CPU and thermal headroom, not frame rate.
 
+---
+
+## AJ. THE OUT-OF-LINING IS CLOSED (2026-09-19)
+
+Section AC left a salvage open: remove the three register moves at each stub
+call site and the wash becomes ~2%. Both halves are now built and measured.
+
+**Baked the MemOpIdx** (removes `movz x3, oi`): the stub table is keyed on
+atomicity as well as (is_ld, mmu_idx, size), so the value can be exact rather
+than approximate. Section AC's attempt rejected 92% of sites because MemOp
+carries MO_ATOM_* above bit 8 and the diagnostic masked with 0xff. Coverage is
+unchanged at 92.4%.
+
+**Constrained the operands** (removes `mov x16, addr` and `mov data, x16`): the
+stub ABI moved off X16/X17 -- TCG_REG_TMP0/TMP1, reserved, so TCG can never
+place an operand there -- onto X0 for the address and loaded value and X1 for
+stored values, scratch in X15/X16/X17. None needed reserving; qemu_ld/st carry
+TCG_OPF_CALL_CLOBBER and all three are call-clobbered. Constraints are selected
+through `C_Dynamic` on the runtime knob, which is safe because the knob queues
+a TB flush.
+
+**Section AC's stated risk did not materialise.** The worry was that the
+allocator would insert its own moves where it could not satisfy a fixed
+register. It satisfied every one: 56567 loads, 37367 stores, **zero misses**.
+
+### Everything worked and the answer is still no
+
+| | stub off | stub on | |
+|---|---|---|---|
+| code size | 25.24 MB | 17.93 MB | **-29%** |
+| L1I miss/frame | 2,471k | 1,787k | **-27.7%** |
+| host insns/frame | 180.6 M | 192.1 M | **+11.5 M** |
+| vcpu ms/frame | **32.22** (spread 0.05) | **32.38** | **+0.15 ms, +0.5%** |
+
+AC's stub was +0.64 ms; this one is +0.15 ms, an 0.49 ms gain against the
+0.67 ms the model predicted for removing those moves -- so the model was about
+right on the *delta*, having been wrong on the absolute level.
+
+### Why it cannot be salvaged further
+
+At ~5.5M accesses per frame the `BL` and `RET` alone are ~11M instructions,
+which is essentially the entire +11.5M that remains. The moves are gone; what
+is left *is* the call. **An out-of-lined access cannot cost less than the pair
+that makes it out-of-lined**, and at this access rate that pair costs more than
+the instruction fetch it saves. There is no third thing to remove.
+
+Run-to-run spread with the stub on is **2.02 ms** against 0.05 ms for the
+inline path (host insns swing 32.5M across identical configs), which would
+disqualify it even at break-even.
+
+Kept, default off, constraints in place, so this is not priced a fourth time.
+
+### A measurement was taken against unchanged code
+
+The first half was committed with numbers from a binary that did not contain
+it. `tcg/tcg.c` -- and so `tcg/aarch64/tcg-target.c.inc` -- compiles into
+**`libsystem.a`**, not `libqemu-i386-softmmu.a`, so the documented two-step
+rebuild recompiled the object and rebuilt the wrong archive, silently. The
+giveaway was there and was misread: stub coverage came out 92.4% against AC's
+92.5%, which was taken as "unchanged by the change" when it was unchanged
+because nothing had changed. Both traps are now in CLAUDE.md, including that
+`ui/xemu.c` is CMake-compiled and must *not* be put back into `libsystem.a` --
+doing so aborts at startup with `assertion "mutex->initialized" failed`, which
+reads like anything but a duplicate QOM registration.
+
