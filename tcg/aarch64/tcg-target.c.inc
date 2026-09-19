@@ -2080,6 +2080,12 @@ unsigned long long xemu_ldst_stub_used, xemu_ldst_stub_missed;
 /* why a site fell back: 0 mmuidx, 1 bswap/sign, 2 amask, 3 no stub,
  * 4 out of BL range, 5 MemOp mismatch */
 unsigned long long xemu_ldst_reject[6];
+/*
+ * How often the fixed-register constraint actually placed the operand.  A
+ * constraint TCG cannot satisfy costs a move here instead of at the call site,
+ * which is the whole risk of this change -- so count it rather than assume.
+ */
+unsigned long long xemu_ldst_fixed_hit[2], xemu_ldst_fixed_miss[2];
 unsigned long long xemu_ldst_mmuidx_seen[16];
 unsigned long long xemu_ldst_badop[256];
 unsigned long long xemu_ldst_expect;
@@ -2102,8 +2108,21 @@ static void xemu_emit_one_ldst_stub(TCGContext *s, bool is_ld,
                                     unsigned mem_index, MemOp size,
                                     unsigned atom)
 {
-    const TCGReg ADDR = TCG_REG_X16;   /* in: guest address; out: value */
-    const TCGReg VAL  = TCG_REG_X17;   /* in: value to store */
+    /*
+     * ABI: the address arrives in X0 and a loaded value is returned there;
+     * a stored value arrives in X1.  Both are allocatable, so the TCG operands
+     * can be *constrained* to them (see cset_qemu_ld/st) and the call site
+     * needs no register moves at all.
+     *
+     * Scratch is X15/X16/X17.  None needs reserving: qemu_ld/qemu_st carry
+     * TCG_OPF_CALL_CLOBBER and all three are in tcg_target_call_clobber_regs,
+     * so TCG already keeps nothing live in them across an access.
+     */
+    const TCGReg ADDR = TCG_REG_X0;    /* in: guest address; out: value */
+    const TCGReg VAL  = TCG_REG_X1;    /* in: value to store */
+    const TCGReg S0   = TCG_REG_X15;
+    const TCGReg S1   = TCG_REG_X16;
+    const TCGReg S2   = TCG_REG_X17;
     TCGType addr_type = s->addr_type;
     MemOp opc = size | (unsigned)(atom << MO_ATOM_SHIFT);
     /* Baked, not passed: the site is accepted only if its oi equals this. */
@@ -2116,15 +2135,15 @@ static void xemu_emit_one_ldst_stub(TCGContext *s, bool is_ld,
     xemu_ldst_stub[is_ld][mem_index][size][atom] = s->code_ptr;
 
     /* Load CPUTLBDescFast.{mask,table}. */
-    tcg_out_insn(s, 3314, LDP, TCG_REG_X0, TCG_REG_X1, TCG_AREG0,
+    tcg_out_insn(s, 3314, LDP, S0, S1, TCG_AREG0,
                  tlb_mask_table_ofs(s, mem_index), 1, 0);
     /* index = mask & (addr >> (PAGE_BITS - ENTRY_BITS)) */
-    tcg_out_insn(s, 3502S, AND_LSR, TCG_TYPE_I64, TCG_REG_X0, TCG_REG_X0,
+    tcg_out_insn(s, 3502S, AND_LSR, TCG_TYPE_I64, S0, S0,
                  ADDR, TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
     /* entry = table + index */
-    tcg_out_insn(s, 3502, ADD, 1, TCG_REG_X1, TCG_REG_X1, TCG_REG_X0);
+    tcg_out_insn(s, 3502, ADD, 1, S1, S1, S0);
     /* comparator */
-    tcg_out_ld(s, addr_type, TCG_REG_X0, TCG_REG_X1,
+    tcg_out_ld(s, addr_type, S0, S1,
                is_ld ? offsetof(CPUTLBEntry, addr_read)
                      : offsetof(CPUTLBEntry, addr_write));
 
@@ -2135,22 +2154,20 @@ static void xemu_emit_one_ldst_stub(TCGContext *s, bool is_ld,
      * in the comparison falls back to the inline path at the call site.
      */
     if (s_mask) {
-        tcg_out_insn(s, 3401, ADDI, addr_type, TCG_REG_X2, ADDR, s_mask);
+        tcg_out_insn(s, 3401, ADDI, addr_type, S2, ADDR, s_mask);
     } else {
-        tcg_out_mov(s, addr_type, TCG_REG_X2, ADDR);
+        tcg_out_mov(s, addr_type, S2, ADDR);
     }
     compare_mask = (uint64_t)TARGET_PAGE_MASK;
-    tcg_out_logicali(s, I3404_ANDI, addr_type, TCG_REG_X2, TCG_REG_X2,
-                     compare_mask);
-    tcg_out_cmp(s, addr_type, TCG_COND_NE, TCG_REG_X0, TCG_REG_X2, 0);
+    tcg_out_logicali(s, I3404_ANDI, addr_type, S2, S2, compare_mask);
+    tcg_out_cmp(s, addr_type, TCG_COND_NE, S0, S2, 0);
 
     slow_br = s->code_ptr;
     tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
 
     /* Fast path: addend, then the access itself. */
-    tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_X1, TCG_REG_X1,
-               offsetof(CPUTLBEntry, addend));
-    h.base = TCG_REG_X1;
+    tcg_out_ld(s, TCG_TYPE_PTR, S1, S1, offsetof(CPUTLBEntry, addend));
+    h.base = S1;
     h.index = ADDR;
     h.index_ext = addr_type;
     if (is_ld) {
@@ -2163,29 +2180,34 @@ static void xemu_emit_one_ldst_stub(TCGContext *s, bool is_ld,
     /* Slow path: hand off to the usual helper. */
     reloc_pc19(slow_br, tcg_splitwx_to_rx(s->code_ptr));
     tcg_out_insn(s, 3314, STP, TCG_REG_LR, TCG_REG_LR, TCG_REG_SP, -16, 1, 1);
+    /*
+     * The helper argument registers overlap the stub's own ABI now that the
+     * address is X0 and the store value X1, so each has to be read before it
+     * is written: X2 <- VAL(X1) before X1 <- ADDR(X0) before X0 <- env.
+     */
     if (is_ld) {
         /* helper_ld*_mmu(env, addr, oi, retaddr). */
-        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X2, stub_oi);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X3, TCG_REG_LR);
+        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X2, stub_oi);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, ADDR);
         tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
         tcg_out_call_int(s, qemu_ld_helpers[size]);
-        tcg_out_mov(s, TCG_TYPE_I64, ADDR, TCG_REG_X0);
+        /* Result is returned in X0, which *is* ADDR -- no move needed. */
     } else {
         /* helper_st*_mmu(env, addr, val, oi, retaddr). */
-        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, stub_oi);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X4, TCG_REG_LR);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X2, VAL);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, ADDR);
         tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
+        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, stub_oi);
         tcg_out_call_int(s, qemu_st_helpers[size]);
     }
     /*
-     * Restore into (LR, X0), NOT (LR, TMP0): TMP0 is X16, which by this point
-     * holds the value just loaded, and pairing it here would overwrite the
-     * result with stack garbage on every slow-path load.
+     * Restore into (LR, S1), never into X0: X0 is ADDR, which on a load now
+     * holds the value the helper returned, and pairing it here would overwrite
+     * the result with stack garbage on every slow-path load.
      */
-    tcg_out_insn(s, 3314, LDP, TCG_REG_LR, TCG_REG_X0, TCG_REG_SP, 16, 0, 1);
+    tcg_out_insn(s, 3314, LDP, TCG_REG_LR, S1, TCG_REG_SP, 16, 0, 1);
     tcg_out_insn(s, 3207, RET, TCG_REG_LR);
 }
 
@@ -2286,9 +2308,23 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
         tcg_insn_unit *stub = xemu_ldst_stub_for(s, oi, true);
 
         if (stub) {
-            tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X16, addr_reg);
+            /*
+             * With the constraint satisfied this is a single BL.  The moves
+             * remain as a fallback: the allocator is free to ignore a fixed
+             * register it cannot satisfy, and silently passing the address in
+             * the wrong register would corrupt every access.
+             */
+            bool fixed = (addr_reg == TCG_REG_X0 && data_reg == TCG_REG_X0);
+            xemu_ldst_fixed_hit[1] += fixed;
+            xemu_ldst_fixed_miss[1] += !fixed;
+
+            if (addr_reg != TCG_REG_X0) {
+                tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X0, addr_reg);
+            }
             tcg_out_call_int(s, tcg_splitwx_to_rx(stub));
-            tcg_out_mov(s, data_type, data_reg, TCG_REG_X16);
+            if (data_reg != TCG_REG_X0) {
+                tcg_out_mov(s, data_type, data_reg, TCG_REG_X0);
+            }
             return;
         }
     }
@@ -2309,10 +2345,39 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
     }
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * With the stubs on, pin the address and the loaded value to X0 so the call
+ * site is a bare BL.  The knob queues a TB flush when it changes, so every
+ * block is generated under one setting and the constraint can never disagree
+ * with the code emitted for it.
+ *
+ * This applies to *every* access of the type, including the ~8% the stub
+ * rejects and emits inline: TCGOP_FLAGS carries only MO_SIZE, not the MemOpIdx,
+ * so the decision cannot be made per site here.  Those sites are merely
+ * constrained for nothing, not made incorrect.
+ */
+static TCGConstraintSetIndex cset_qemu_ld(TCGType type, unsigned flags)
+{
+    return g_ldst_stub ? C_O1_I1(k, k) : C_O1_I1(r, r);
+}
+
+static TCGConstraintSetIndex cset_qemu_st(TCGType type, unsigned flags)
+{
+    return g_ldst_stub ? C_O0_I2(j, k) : C_O0_I2(rz, r);
+}
+
+static const TCGOutOpQemuLdSt outop_qemu_ld = {
+    .base.static_constraint = C_Dynamic,
+    .base.dynamic_constraint = cset_qemu_ld,
+    .out = tgen_qemu_ld,
+};
+#else
 static const TCGOutOpQemuLdSt outop_qemu_ld = {
     .base.static_constraint = C_O1_I1(r, r),
     .out = tgen_qemu_ld,
 };
+#endif
 
 static void tgen_qemu_st(TCGContext *s, TCGType data_type, TCGReg data_reg,
                          TCGReg addr_reg, MemOpIdx oi)
@@ -2325,8 +2390,26 @@ static void tgen_qemu_st(TCGContext *s, TCGType data_type, TCGReg data_reg,
         tcg_insn_unit *stub = xemu_ldst_stub_for(s, oi, false);
 
         if (stub) {
-            tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X17, data_reg);
-            tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X16, addr_reg);
+            bool fixed = (addr_reg == TCG_REG_X0 && data_reg == TCG_REG_X1);
+            xemu_ldst_fixed_hit[0] += fixed;
+            xemu_ldst_fixed_miss[0] += !fixed;
+
+            /*
+             * Order matters when only one of the two is already in place:
+             * moving the address into X0 first would clobber a value that is
+             * still sitting in X0 waiting to become X1.
+             */
+            if (data_reg == TCG_REG_X0 && addr_reg != TCG_REG_X0) {
+                tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, data_reg);
+                tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X0, addr_reg);
+            } else {
+                if (addr_reg != TCG_REG_X0) {
+                    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X0, addr_reg);
+                }
+                if (data_reg != TCG_REG_X1) {
+                    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, data_reg);
+                }
+            }
             tcg_out_call_int(s, tcg_splitwx_to_rx(stub));
             return;
         }
@@ -2348,10 +2431,18 @@ static void tgen_qemu_st(TCGContext *s, TCGType data_type, TCGReg data_reg,
     }
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+static const TCGOutOpQemuLdSt outop_qemu_st = {
+    .base.static_constraint = C_Dynamic,
+    .base.dynamic_constraint = cset_qemu_st,
+    .out = tgen_qemu_st,
+};
+#else
 static const TCGOutOpQemuLdSt outop_qemu_st = {
     .base.static_constraint = C_O0_I2(rz, r),
     .out = tgen_qemu_st,
 };
+#endif
 
 static void tcg_out_qemu_ldst_i128(TCGContext *s, TCGReg datalo, TCGReg datahi,
                                    TCGReg addr_reg, MemOpIdx oi, bool is_ld)

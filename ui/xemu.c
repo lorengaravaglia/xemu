@@ -2391,6 +2391,8 @@ static void bench_tick(void)
             }
         }
         {
+            extern unsigned long long xemu_ldst_fixed_hit[2];
+            extern unsigned long long xemu_ldst_fixed_miss[2];
             extern unsigned long long xemu_ldst_reject[6];
             extern unsigned long long xemu_ldst_mmuidx_seen[16];
             static const char *why[6] = { "mmuidx>=8", "bswap/sign", "amask",
@@ -2401,6 +2403,24 @@ static void bench_tick(void)
             for (k = 0; k < 6; k++) {
                 off += snprintf(line + off, sizeof(line) - off, " %s=%llu",
                                 why[k], xemu_ldst_reject[k]);
+            }
+            {
+                unsigned long long lh = xemu_ldst_fixed_hit[1];
+                unsigned long long lm = xemu_ldst_fixed_miss[1];
+                unsigned long long sh = xemu_ldst_fixed_hit[0];
+                unsigned long long sm = xemu_ldst_fixed_miss[0];
+
+                /*
+                 * Whether the fixed-register constraint was actually honoured.
+                 * A miss means the allocator could not place the operand and
+                 * the call site had to emit the move anyway -- the move was
+                 * relocated, not removed, which is the failure mode this
+                 * change has to be checked against.
+                 */
+                ALOGI("bench: LDST FIXED ld hit=%llu miss=%llu (%.1f%%) | "
+                      "st hit=%llu miss=%llu (%.1f%%)",
+                      lh, lm, lh + lm ? 100.0 * lh / (lh + lm) : 0.0,
+                      sh, sm, sh + sm ? 100.0 * sh / (sh + sm) : 0.0);
             }
             for (k = 0; k < 16; k++) {
                 if (xemu_ldst_mmuidx_seen[k]) {

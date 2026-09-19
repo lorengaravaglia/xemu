@@ -10,6 +10,15 @@
  */
 REGS('r', ALL_GENERAL_REGS)
 REGS('w', ALL_VECTOR_REGS)
+/*
+ * Fixed registers for the out-of-lined memory-access stubs: the address (and
+ * a loaded value) live in X0, a stored value in X1.  Constraining the operands
+ * lets the call site be a bare BL with no register moves.  Selected
+ * dynamically -- see cset_qemu_ld/cset_qemu_st -- so the normal inline path is
+ * unconstrained when the stubs are off.
+ */
+REGS('k', 1u << TCG_REG_X0)
+REGS('j', 1u << TCG_REG_X1)
 
 /*
  * Define constraint letters for constants:
