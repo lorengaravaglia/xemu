@@ -2369,3 +2369,48 @@ because nothing had changed. Both traps are now in CLAUDE.md, including that
 doing so aborts at startup with `assertion "mutex->initialized" failed`, which
 reads like anything but a duplicate QOM registration.
 
+---
+
+## AK. GAMES DO CHANGE THE x87 ROUNDING MODE (2026-09-19)
+
+The native x87 path skips `gen_flcr()`, so guest rounding-mode changes are
+discarded, and the comment in `translate.c` justifying that said "this is not
+a regression". The softfloat path *does* honour the control word
+(`update_fp_status()` -> `set_x86_rounding_mode()`), so the claim rested
+entirely on the assumption that no game asks. Measured instead.
+
+**Method.** Count guest-initiated writes to the x87 control word -- `FLDCW`,
+`FLDENV`/`FRSTOR`, `FXRSTOR`, deliberately *not* QEMU's own reset -- bucketed
+by the RC field (bits 10-11), counting transitions rather than repeats so a
+program rewriting the same default does not register.
+
+| title | directed RC changes | modes |
+|---|---|---|
+| **Halo** | **2,378,791** | round-toward -inf |
+| **Tony Hawk's Pro Skater 2x** | **4,047,209** | 4,046,848 round-down + 361 round-toward-zero |
+| Jet Set Radio Future | 0 | — |
+| Metal Gear Solid 2 | 0 | — |
+
+**Half the sample does it, thousands of times a frame**, in the set-mode /
+operate / restore pattern that implements `floor()` and C float->int casts.
+THPS2x uses both idioms: round-down for flooring and round-toward-zero for
+truncating casts. `perf.hard_fpu` defaults to true, so every one of those
+requests is currently ignored and the operation runs round-to-nearest.
+
+**What this does not show.** Visible error. Both games play correctly today,
+and round-down and round-to-nearest agree on any value that is already
+integral -- which may be most of what these paths convert. Establishing
+impact needs an A/B against the softfloat path (`perf.hard_fpu = false`),
+which honours the control word; that is a separate experiment.
+
+**What it does show** is that the premise the omission rested on is false, so
+`flcr` is worth implementing rather than dismissing. The remap is a
+read-modify-write of FPCR (MRS, BFI RMode into bits 22-23, MSR), with x86 and
+ARM encoding the two directed modes in opposite order -- x86 01 is toward
+-inf, ARM 01 is toward +inf. The hazard to design around: FPCR is per-thread
+state shared with QEMU's own C code on the vCPU thread, so a TB that changes
+it changes the mode seen by everything else until something restores it.
+
+Instrumentation kept -- it is ~6.7k increments/frame in the heavy case -- so
+this is settled by counting rather than by argument.
+
