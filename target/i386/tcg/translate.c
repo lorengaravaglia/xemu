@@ -457,7 +457,22 @@ static int g_hard_fpu_no_ld80f;
  * Skipping it leaves guest rounding-mode changes unhonoured, which is exactly
  * what happens today: fpu_helper.c documents rounding-mode sync as unhandled,
  * and the __hard helpers do all their arithmetic in whatever mode the host
- * thread happens to be in.  So this is not a regression.
+ * thread happens to be in.
+ *
+ * This used to say "so this is not a regression".  That was wrong, and it has
+ * now been measured (FINDINGS section AK).  The softfloat path *does* honour
+ * the control word -- update_fp_status() reads env->fpuc and calls
+ * set_x86_rounding_mode() -- so the native path genuinely changed behaviour
+ * for any guest that selects a directed mode.  Counting guest writes to the
+ * x87 control word over four retail titles:
+ *
+ *   Halo                  2,378,791 selections of round-toward-minus-infinity
+ *   Tony Hawk's PS 2x     4,046,848 round-down, plus 361 round-toward-zero
+ *   Jet Set Radio Future  none
+ *   Metal Gear Solid 2    none
+ *
+ * Half the sample does the set-mode / operate / restore dance, thousands of
+ * times a frame, and every one of those requests is currently discarded.
  *
  * Doing it properly is a read-modify-write of FPCR (MRS, BFI the remapped
  * RMode into bits 22-23, MSR) -- but note that FPCR is per-thread state shared

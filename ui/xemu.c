@@ -2391,6 +2391,39 @@ static void bench_tick(void)
             }
         }
         {
+            extern unsigned long long xemu_fpuc_rc_writes[4];
+            extern unsigned long long xemu_fpuc_rc_changes[4];
+            extern uint32_t xemu_fpuc_rc_first_eip[4];
+            static const char *rc_name[4] = { "nearest", "down(-inf)",
+                                              "up(+inf)", "trunc(zero)" };
+            unsigned long long directed = 0;
+            int k;
+
+            for (k = 1; k < 4; k++) {
+                directed += xemu_fpuc_rc_changes[k];
+            }
+            /*
+             * Does any guest select a directed x87 rounding mode?  The hard
+             * FPU ignores the control word's RC field, so if this is zero the
+             * omission is invisible and flcr need not be implemented; if it is
+             * not zero, results are wrong wherever it fired.
+             */
+            ALOGI("bench: X87 RC writes n=%llu d=%llu u=%llu t=%llu | "
+                  "changes n=%llu d=%llu u=%llu t=%llu | directed=%llu",
+                  xemu_fpuc_rc_writes[0], xemu_fpuc_rc_writes[1],
+                  xemu_fpuc_rc_writes[2], xemu_fpuc_rc_writes[3],
+                  xemu_fpuc_rc_changes[0], xemu_fpuc_rc_changes[1],
+                  xemu_fpuc_rc_changes[2], xemu_fpuc_rc_changes[3], directed);
+            for (k = 1; k < 4; k++) {
+                if (xemu_fpuc_rc_changes[k]) {
+                    ALOGI("bench: X87 RC -> %s  %llu times, first near guest "
+                          "eip 0x%08x", rc_name[k], xemu_fpuc_rc_changes[k],
+                          xemu_fpuc_rc_first_eip[k]);
+                }
+            }
+        }
+
+        {
             extern unsigned long long xemu_ldst_fixed_hit[2];
             extern unsigned long long xemu_ldst_fixed_miss[2];
             extern unsigned long long xemu_ldst_reject[6];

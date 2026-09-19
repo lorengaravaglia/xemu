@@ -8662,6 +8662,20 @@ static bool cpuid_has_xsave_feature(CPUX86State *env, const ExtSaveArea *esa)
     return false;
 }
 
+
+/*
+ * x87 rounding-mode instrumentation.  The hard-FPU path ignores guest rounding
+ * mode changes (gen_flcr is skipped, and the __hard helpers carry a FIXME), so
+ * the question is whether any game actually selects a directed mode.  Counted
+ * here rather than argued about.
+ *
+ * Indexed by the RC field, x87 control word bits 10-11:
+ *   0 nearest (default)  1 down (-inf)  2 up (+inf)  3 toward zero (truncate)
+ */
+unsigned long long xemu_fpuc_rc_writes[4];
+unsigned long long xemu_fpuc_rc_changes[4];
+uint32_t xemu_fpuc_rc_first_eip[4];
+
 static void x86_cpu_reset_hold(Object *obj, ResetType type)
 {
     CPUState *cs = CPU(obj);

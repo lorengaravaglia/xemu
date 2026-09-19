@@ -1175,8 +1175,37 @@ void update_fp_status(CPUX86State *env)
 }
 #endif
 
+
+/*
+ * Record a guest-initiated write to the x87 control word.  Called before
+ * cpu_set_fpuc() so the previous rounding mode is still readable.
+ *
+ * Only guest paths are instrumented -- FLDCW, FLDENV/FRSTOR and FXRSTOR --
+ * not QEMU's own reset, so a non-zero count means a game really did select
+ * that mode.  env->eip is recorded as a locating hint only: inside a helper it
+ * has not necessarily been synced to the faulting instruction, so treat it as
+ * "near here", not exact.
+ */
+static void xemu_note_fpuc(CPUX86State *env, uint32_t val)
+{
+    extern unsigned long long xemu_fpuc_rc_writes[4];
+    extern unsigned long long xemu_fpuc_rc_changes[4];
+    extern uint32_t xemu_fpuc_rc_first_eip[4];
+    unsigned rc = (val >> FPU_RC_SHIFT) & 3;
+    unsigned old = (env->fpuc >> FPU_RC_SHIFT) & 3;
+
+    xemu_fpuc_rc_writes[rc]++;
+    if (rc != old) {
+        xemu_fpuc_rc_changes[rc]++;
+        if (rc != 0 && xemu_fpuc_rc_first_eip[rc] == 0) {
+            xemu_fpuc_rc_first_eip[rc] = (uint32_t)env->eip;
+        }
+    }
+}
+
 void helper_fldcw(CPUX86State *env, uint32_t val)
 {
+    xemu_note_fpuc(env, val);
     cpu_set_fpuc(env, val);
 }
 
@@ -2900,7 +2929,11 @@ static void do_fldenv(X86Access *ac, target_ulong ptr, int data32)
     int i, fpus, fptag;
     CPUX86State *env = ac->env;
 
-    cpu_set_fpuc(env, access_ldw(ac, ptr));
+    {
+        uint32_t v = access_ldw(ac, ptr);
+        xemu_note_fpuc(env, v);          /* FLDENV / FRSTOR */
+        cpu_set_fpuc(env, v);
+    }
     fpus = access_ldw(ac, ptr + (2 << data32));
     fptag = access_ldw(ac, ptr + (4 << data32));
 
@@ -3204,6 +3237,7 @@ static void do_xrstor_fpu(X86Access *ac, target_ulong ptr)
     fpuc = access_ldw(ac, ptr + XO(legacy.fcw));
     fpus = access_ldw(ac, ptr + XO(legacy.fsw));
     fptag = access_ldw(ac, ptr + XO(legacy.ftw));
+    xemu_note_fpuc(env, fpuc);           /* FXRSTOR */
     cpu_set_fpuc(env, fpuc);
     cpu_set_fpus(env, fpus);
 
