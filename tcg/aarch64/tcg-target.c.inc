@@ -2085,22 +2085,35 @@ unsigned long long xemu_ldst_badop[256];
 unsigned long long xemu_ldst_expect;
 
 #define XEMU_STUB_MMU_MAX 8
-static tcg_insn_unit *xemu_ldst_stub[2][XEMU_STUB_MMU_MAX][4];
+/*
+ * One stub per (is_ld, mmu_idx, size, atomicity).
+ *
+ * Atomicity is part of the key so the MemOpIdx can be baked into the stub
+ * rather than passed in X3 at every call site.  Section AC baked a *masked*
+ * oi and required the site to match, which rejected 92% of accesses: MemOp
+ * carries MO_ATOM_* above bit 8, and the diagnostic masked with 0xff so the
+ * mismatch was invisible.  Keying on those bits instead makes the baked value
+ * exact, and removes one instruction from every access.
+ */
+#define XEMU_STUB_ATOM_MAX 8
+static tcg_insn_unit *xemu_ldst_stub[2][XEMU_STUB_MMU_MAX][4][XEMU_STUB_ATOM_MAX];
 
 static void xemu_emit_one_ldst_stub(TCGContext *s, bool is_ld,
-                                    unsigned mem_index, MemOp size)
+                                    unsigned mem_index, MemOp size,
+                                    unsigned atom)
 {
     const TCGReg ADDR = TCG_REG_X16;   /* in: guest address; out: value */
     const TCGReg VAL  = TCG_REG_X17;   /* in: value to store */
-    const TCGReg OI   = TCG_REG_X3;    /* in: MemOpIdx, preserved by fast path */
     TCGType addr_type = s->addr_type;
-    MemOp opc = size | (is_ld ? MO_LE : MO_LE);
+    MemOp opc = size | (unsigned)(atom << MO_ATOM_SHIFT);
+    /* Baked, not passed: the site is accepted only if its oi equals this. */
+    MemOpIdx stub_oi = make_memop_idx(opc, mem_index);
     unsigned s_mask = (1u << size) - 1;
     uint64_t compare_mask;
     tcg_insn_unit *slow_br;
     HostAddress h = { 0 };
 
-    xemu_ldst_stub[is_ld][mem_index][size] = s->code_ptr;
+    xemu_ldst_stub[is_ld][mem_index][size][atom] = s->code_ptr;
 
     /* Load CPUTLBDescFast.{mask,table}. */
     tcg_out_insn(s, 3314, LDP, TCG_REG_X0, TCG_REG_X1, TCG_AREG0,
@@ -2151,15 +2164,16 @@ static void xemu_emit_one_ldst_stub(TCGContext *s, bool is_ld,
     reloc_pc19(slow_br, tcg_splitwx_to_rx(s->code_ptr));
     tcg_out_insn(s, 3314, STP, TCG_REG_LR, TCG_REG_LR, TCG_REG_SP, -16, 1, 1);
     if (is_ld) {
-        /* helper_ld*_mmu(env, addr, oi, retaddr): oi arrives in X3. */
-        tcg_out_mov(s, TCG_TYPE_I32, TCG_REG_X2, OI);
+        /* helper_ld*_mmu(env, addr, oi, retaddr). */
+        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X2, stub_oi);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X3, TCG_REG_LR);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, ADDR);
         tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
         tcg_out_call_int(s, qemu_ld_helpers[size]);
         tcg_out_mov(s, TCG_TYPE_I64, ADDR, TCG_REG_X0);
     } else {
-        /* helper_st*_mmu(env, addr, val, oi, retaddr): oi already in X3. */
+        /* helper_st*_mmu(env, addr, val, oi, retaddr). */
+        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, stub_oi);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X4, TCG_REG_LR);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X2, VAL);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, ADDR);
@@ -2185,8 +2199,11 @@ static void xemu_emit_ldst_stubs(TCGContext *s)
     }
     for (mi = 0; mi < XEMU_STUB_MMU_MAX; mi++) {
         for (size = MO_8; size <= MO_64; size++) {
-            xemu_emit_one_ldst_stub(s, true, mi, size);
-            xemu_emit_one_ldst_stub(s, false, mi, size);
+            unsigned atom;
+            for (atom = 0; atom < XEMU_STUB_ATOM_MAX; atom++) {
+                xemu_emit_one_ldst_stub(s, true, mi, size, atom);
+                xemu_emit_one_ldst_stub(s, false, mi, size, atom);
+            }
         }
     }
 }
@@ -2228,7 +2245,20 @@ static tcg_insn_unit *xemu_ldst_stub_for(TCGContext *s, MemOpIdx oi,
         xemu_ldst_stub_missed++;
         return NULL;      /* alignment participates in the compare */
     }
-    stub = xemu_ldst_stub[is_ld][mem_index][size];
+    /*
+     * The stub bakes its own oi, so it may only be used where that value is
+     * exactly this site's.  Everything outside size|atomicity has been
+     * excluded above except MO_SIGN on a store, which is meaningless to the
+     * access but would still make the baked oi differ from the guest's --
+     * so reject rather than hand the helper an oi it did not ask for.
+     */
+    if (opc & ~(MemOp)(MO_SIZE | MO_ATOM_MASK)) {
+        xemu_ldst_reject[5]++;
+        xemu_ldst_stub_missed++;
+        return NULL;
+    }
+    stub = xemu_ldst_stub[is_ld][mem_index][size]
+                         [(opc & MO_ATOM_MASK) >> MO_ATOM_SHIFT];
     if (!stub) {
         xemu_ldst_reject[3]++;
         xemu_ldst_stub_missed++;
@@ -2257,7 +2287,6 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
 
         if (stub) {
             tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X16, addr_reg);
-            tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, oi);
             tcg_out_call_int(s, tcg_splitwx_to_rx(stub));
             tcg_out_mov(s, data_type, data_reg, TCG_REG_X16);
             return;
@@ -2298,7 +2327,6 @@ static void tgen_qemu_st(TCGContext *s, TCGType data_type, TCGReg data_reg,
         if (stub) {
             tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X17, data_reg);
             tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X16, addr_reg);
-            tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, oi);
             tcg_out_call_int(s, tcg_splitwx_to_rx(stub));
             return;
         }
