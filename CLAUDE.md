@@ -88,6 +88,47 @@ Things to avoid:
 - `ninja -C build "libqemu-i386-softmmu.a.p/hw_xbox_nv2a_nv2a.c.o"` — only updates the `.o`, not the `.a`
 - Skipping step 2 — causes the `cpu` type double-registration crash on startup
 
+### ⚠️ Not every core file lives in `libqemu-i386-softmmu.a` — check first
+
+`tcg/tcg.c` (and therefore `tcg/aarch64/tcg-target.c.inc`, which it `#include`s)
+compiles into **`libsystem.a.p/tcg_tcg.c.o`**, not
+`libqemu-i386-softmmu.a.p/`. The two-step procedure above will happily
+recompile the object and rebuild the wrong archive, and **the build then
+succeeds and runs with the old code** — no error, no warning, just a binary
+that silently does not contain the change. A whole measurement was taken
+against unchanged code this way.
+
+Find the real owner before rebuilding:
+
+```bash
+grep -n "tcg_tcg.c.o:" build/build.ninja     # => libsystem.a.p/
+ls build/libqemu-i386-softmmu.a.p/ | grep tcg_tcg   # => absent
+```
+
+For a file owned by `libsystem.a`, `ninja -C build libsystem.a` usually cannot
+relink (the `libvfio-user.h` objects fail), but it *does* recompile the object.
+Update the archive by **replacing that single member** — never rebuild it:
+
+```bash
+ninja -C build libsystem.a          # expect it to fail at link; the .o is built
+"$LLVM_AR" r build/libsystem.a build/libsystem.a.p/tcg_tcg.c.o
+```
+
+**Do not add back objects that CMake compiles itself.** `ui/xemu.c`,
+`ui/xemu-input.c`, `ui/xemu-snapshots.c` and the rest of the `ui_xemu-*` list in
+`fixup_archives.sh` are compiled directly by CMake; `fixup_archives.sh` deletes
+them from `libsystem.a` for that reason. Putting one back with `llvm-ar r`
+double-registers its QOM types and aborts at startup with
+`assertion "mutex->initialized" failed` in `qemu_mutex_lock_impl` — which looks
+nothing like a duplicate-registration error and sends you hunting the wrong bug.
+Edits to those files need no archive work at all: CMake picks them up.
+
+Verify the change actually shipped rather than assuming:
+
+```bash
+"$LLVM_NM" build/libsystem.a | grep ' B my_new_symbol'
+```
+
 ### ⚠️ CRITICAL: Never apply the slim-archive procedure to `libsystem.a`
 
 The slim-archive `llvm-ar rcs` procedure above applies **ONLY to `libqemu-i386-softmmu.a`**. Never apply it to `libsystem.a` or any other Meson archive.
