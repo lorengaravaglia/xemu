@@ -52,8 +52,13 @@ pkg_check_modules(SAMPLERATE REQUIRED samplerate)
 
 set(XEMU_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../..")
 
-# Custom Vulkan driver loading via libadrenotools (Mesa Turnip etc.)
-set(ADRENOTOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../libs/libadrenotools")
+# Custom Vulkan driver loading via libadrenotools (Mesa Turnip etc.).
+#
+# The submodule lives at android/app/libs/, which is three levels up from this
+# file -- it previously pointed at ../libs (app/src/main/libs), a path that has
+# never existed, so the `else()` branch below silently took effect and custom
+# drivers could not load no matter what was configured in settings.
+set(ADRENOTOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/libadrenotools")
 if(EXISTS "${ADRENOTOOLS_DIR}/CMakeLists.txt")
     add_subdirectory(${ADRENOTOOLS_DIR} ${CMAKE_CURRENT_BINARY_DIR}/libadrenotools)
     add_definitions(-DHAVE_ADRENOTOOLS=1)
