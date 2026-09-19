@@ -2218,9 +2218,14 @@ before treating either number as the current truth.
 **Consequence for HLE:** its biggest absolute saving is the NV2A thread, which
 HLE largely deletes -- but the vCPU does not block on it, so that does not
 convert to frame rate. What it would buy on a handheld is sustained clocks and
-battery. There is also a plausible indirect path worth testing: NV2A spends
-7.7% of the process in `memcpy_opt` plus ~6.7% in CAS atomics, and the vCPU is
-memory-stall-bound, so contention for bandwidth may be coupling them.
+battery. An indirect path via memory-bandwidth contention -- NV2A spends 7.7% of the
+process in `memcpy_opt` plus ~6.7% in CAS atomics, and the vCPU is
+memory-stall-bound -- **is already ruled out**, twice, and this section should
+not have re-raised it. `debug.xemu.surface_scale` multiplies NV2A pixel work
+while leaving guest work identical, and vCPU IPC is flat across frame weights
+(1.69/1.67, 1.85/1.90, 1.86/1.90). If GPU traffic were evicting the vCPU's
+working set, heavier frames would show lower IPC. They do not. See section 5
+and "L3 contention from the GPU: directly tested, and it is not there".
 
 ### Verdict
 
