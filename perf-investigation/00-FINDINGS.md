@@ -2151,3 +2151,151 @@ steady-state work the barriers were taxing.  Live combat adds input-driven
 bursts -- AI, projectiles, particles, extra voices -- that the barriers were
 never the limit on.  The benchmark number is the ceiling for this change; 33%
 is what it is worth in the case that actually prompted the work.
+
+---
+
+## AH. WHAT HLE COULD ACTUALLY BUY (2026-09-18)
+
+Question: could an Xbox emulator built on HLE (Cxbx-Reloaded's approach, or
+the Winlator/Box64 stack) beat this LLE design on Android? Bounded by
+measurement instead of argument.
+
+**Method.** `debug.xemu.guest_map=1` records host-JIT-range -> guest-PC for
+every TB; simpleperf samples cpu-cycles across the deterministic slot-5
+benchmark (1200 frames, 32.35 ms/frame vCPU, reproduced to 0.04 ms of the
+prior run); each sample is mapped back to a guest PC and bucketed by **XBE
+section**, whose virtual address ranges come from the section table
+(`XisoReader`'s parser, reused). `.text` is the game; `D3D`/`DSOUND`/`XPP` are
+Xbox libraries statically linked into the XBE; guest PCs >= 0x80000000 are the
+Xbox kernel.
+
+**Two traps, both hit.** The vCPU is *not* the busiest thread on this scene --
+picking by sample volume attributed the entire profile to the NV2A thread and
+produced zero JIT hits. Select the thread with generated-code samples instead.
+And the top `.text` PC is `0x000bb0df`, the section-M clock spin at 22.6% of
+vCPU samples (section M said ~23%) -- that is the game *idling*, so it is
+reported separately rather than counted as game work.
+
+### vCPU thread, 12242 samples, 85.8% inside generated code
+
+| bucket | incl. spin | excl. spin |
+|---|---|---|
+| game `.text` (real work) | 44.7% | **57.8%** |
+| Xbox kernel | 10.5% | 13.5% |
+| `D3D` | 6.6% | 8.5% |
+| `DSOUND` | 1.0% | 1.3% |
+| `XPP` | 0.3% | 0.4% |
+| QEMU C (dispatch, helpers, devices) | 14.2% | 18.3% |
+| **HLE-replaceable (libraries + kernel)** | **18.3%** | **23.7%** |
+
+**The bound: HLE can reach ~18% of vCPU time** (24% of non-idle work). At
+32.35 ms/frame that is -5.9 ms if the native replacement were free, and it is
+not -- a real D3D8->Vulkan layer still tracks state and issues calls on the
+same thread. Halve it and the honest figure is **~3 ms/frame, ~9%**.
+
+The other 58% is the game's own logic. It still needs x86->AArch64
+translation on ARM, and it carries the 54% backend stall on guest data that
+sections Y and Z showed is unreachable by any codegen change. **HLE's decisive
+advantage on x86 -- that guest code runs natively, with no dynarec at all --
+does not exist on this host.**
+
+### The unexpected result: NV2A now costs more than the vCPU
+
+Cycle shares of the whole process on this scene:
+
+| thread | share | composition |
+|---|---|---|
+| NV2A/pgraph (29658) | **38.6%** | libxemu 13.9%, libc 11.3% (`memcpy_opt` 7.7%), **`vulkan.adreno.so` 10.5%**, kernel 2.5% |
+| vCPU (29648) | 34.9% | JIT 30.1%, libxemu 4.2% |
+| others | ~26% | |
+
+This contradicts the 67.7 / 20.4 split recorded earlier in this document.
+Different scene and a much faster vCPU since -- the TSO barrier elision
+(section AE) removed a large slice of vCPU work, which would shift the ratio
+this way. **Hypothesis, not established**; worth re-measuring the old scene
+before treating either number as the current truth.
+
+**Consequence for HLE:** its biggest absolute saving is the NV2A thread, which
+HLE largely deletes -- but the vCPU does not block on it, so that does not
+convert to frame rate. What it would buy on a handheld is sustained clocks and
+battery. There is also a plausible indirect path worth testing: NV2A spends
+7.7% of the process in `memcpy_opt` plus ~6.7% in CAS atomics, and the vCPU is
+memory-stall-bound, so contention for bandwidth may be coupling them.
+
+### Verdict
+
+**Do not rewrite.** ~9% realistic on the pacing thread, bought with per-title
+D3D8 signature matching, a from-scratch x86->AArch64 dynarec, and the accuracy
+regression that has kept Cxbx-Reloaded behind xemu since 2003.
+
+**But this reprices Turnip.** The prior estimate had the Adreno driver at ~5.3%
+of process CPU on a thread that did not matter. It is **10.5%**, on the
+single largest thread. That does not make it a frame-rate lever -- the vCPU
+still does not wait on it -- but it is a much larger thermal target than
+assumed, and `libadrenotools` support is already wired into CMake and settings
+(`libs/libadrenotools` is simply not vendored).
+
+---
+
+## AI. TURNIP DRIVER COMPARISON (2026-09-18)
+
+Six user-supplied Vulkan drivers vs the system Adreno driver, deterministic
+slot-5 benchmark, 1200 frames, two passes in the same order.
+
+**First: custom drivers had never been able to load.** CMake looked for
+libadrenotools at `app/src/main/libs`; the submodule is at `android/app/libs`.
+`HAVE_ADRENOTOOLS` was therefore never defined and
+`xemu_android_get_vk_proc_addr()` compiled to `return NULL` whatever settings
+said. The nested `linkernsbypass` submodule had also never been initialised.
+Fixed in 26c14cd838; the feature has existed and been dead since May.
+
+**The harness reproduces to 0.01 ms.** Baseline 32.18 / 32.17 ms across passes
+separated by 14 intervening runs, procCPU identical, 29->31 C. That is far
+tighter than the +-0.3 ms replay noise floor, so sub-0.2 ms differences are
+real here.
+
+| driver | vcpu ms | spread | vs base | fps | procCPU | vs base |
+|---|---|---|---|---|---|---|
+| system (none) | 32.17 | 0.01 | — | 29.62 | 158% | — |
+| Turnip v26.2.0 R4 | 32.00 | 0.00 | -0.17 | 29.71 | 154% | -4 |
+| **Turnip v26.3.0-R3** | **31.95** | 0.00 | **-0.22** | **29.77** | **153%** | **-5** |
+| Turnip v26.3.0-R5 | 31.99 | 0.02 | -0.18 | 29.80 | 153% | -5 |
+| mrpurple T23 | 31.68 | 0.10 | -0.49 | 29.56 | 152% | -6 |
+| mrpurple T24 | 31.96 | 0.02 | -0.21 | 29.75 | 154% | -4 |
+| mrpurple T30 | 31.95 | 0.05 | -0.22 | 29.77 | 155% | -3 |
+| Qualcomm Adreno 840 | 33.47 | **2.17** | **+1.29** | 28.54 | 160% | +2 |
+
+**Result: the prediction held.** No meaningful frame-rate change — the vCPU
+does not block on the NV2A thread, so moving driver work does not move fps.
+Every Turnip build is 0.2-0.5 ms better on vCPU and 3-6 points lower on process
+CPU, consistent across both passes. In fps terms that is nothing; as a thermal
+figure it is ~3%.
+
+**Reconciling with section AH's 10.5%.** That was the share of process cycles
+inside `vulkan.adreno.so`. Turnip does not remove that work, it *replaces* the
+implementation — so the measurable delta is the difference between two drivers
+(~3%), not the whole 10.5%. The earlier framing overstated the available win,
+and this corrects it.
+
+**Turnip shifts ~1 ms from CPU to GPU wait.** The overlay reads `GPU wait: 0 ms`
+on the system driver and `1 ms` on both R3 and T23. Consistent with slightly
+less CPU-side driver work and slightly more waiting on the hardware.
+
+**The Adreno 840 package is the one to avoid.** It loads and renders on a 740,
+but is the only config that does not reproduce: 32.38 then 34.55 ms, a 2.17 ms
+spread against 0.01-0.10 for everything else, pushing the frame past the 33.3 ms
+budget and fps to 27.51.
+
+**Visual check, honestly inconclusive.** Frames are not synchronised between
+runs, so a pixel comparison is not possible; R3 and T23 both render the scene
+with correct geometry, textures, decals and HUD in the frames captured. Subtle
+or intermittent glitches need play-testing, not screenshots. An initial read
+that T23 was "skipping work" (lowest vCPU, lowest fps) did not survive: its
+0.06 fps deficit is inside fps noise, and the GPU-wait change it showed is
+shared with R3.
+
+**Verdict.** Keep the system driver as the default. Turnip is worth having as
+the user-supplied option it now is — best measured pick **v26.3.0-R3 or R5**
+(lowest CPU with the highest fps of the set) — but the honest sell is a few
+percent of CPU and thermal headroom, not frame rate.
+
