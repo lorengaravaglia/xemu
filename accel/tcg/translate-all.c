@@ -372,9 +372,21 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
      * in RAM and then reads the data it announces depends on load-load
      * ordering, which x86 guarantees and AArch64 does not; dropping DMB ISHLD
      * would let the data load be hoisted above the poll and return stale
-     * memory.  Measured, keeping it costs little: dropping both directions
-     * reached 32.35 ms/frame against 32.65 for the store side alone, and the
-     * difference is mostly invisible because the guest paces itself at 30 fps.
+     * memory.
+     *
+     * Re-measured 2026-09-20, and keeping it is not merely cheap -- dropping
+     * it is a regression.  Slot 5, 1200 frames, both orderings:
+     *
+     *   load barriers kept   32.29 ms/frame   182.2 M host insns/frame
+     *   no barriers at all   32.74 ms/frame   403.2 M host insns/frame
+     *
+     * Removing them emits *less* code (25.25 -> 24.32 MB) and then executes
+     * 2.21x the instructions, so the extra work is the guest's, not codegen's:
+     * without load-load ordering the notifier poll reads stale memory and the
+     * guest spins.  An earlier note here claimed dropping both directions
+     * reached 32.35 against 32.65 for the store side alone, i.e. that the load
+     * side cost 0.3 ms.  That no longer reproduces; it costs nothing and
+     * removing it costs 1.4%.
      *
      * debug.xemu.tso_stores=1 restores the store barriers.
      */
