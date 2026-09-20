@@ -2414,3 +2414,68 @@ it changes the mode seen by everything else until something restores it.
 Instrumentation kept -- it is ~6.7k increments/frame in the heavy case -- so
 this is settled by counting rather than by argument.
 
+---
+
+## AL. WHAT FEX TEACHES US (2026-09-20)
+
+Read FEX-Emu's "The scourge of x86 emulation" (2026-09-17) and their tree,
+looking for anything transferable. The comparison is unusually clean: **their
+central problem is one we do not have, for a structural reason.**
+
+### Their hard problem is free for us
+
+The whole article is about paying for x86-TSO on every memory access. FEX
+emulates multi-threaded Linux programs, so guest threads observe each other's
+stores and the ordering can never be dropped. The Xbox has one CPU, so
+`max_cpus == 1`, and section AE deleted the store side outright. That was the
+single biggest win of this project and it is not available to them.
+
+The same fact quietly covers two more of their chapters. Their table of 19
+`LOCK` ops mapped to ARMv8.1 atomics, and the patchpoint/fault-handler
+machinery for split-locks, exist because unaligned atomic RMW must stay atomic
+against other guest threads. QEMU derives `CF_PARALLEL` from
+`max_cpus > 1` (`tcg-accel-ops-mttcg.c`), so ours is never set, and
+`tcg-op-ldst.c` then forces `MO_ATOM_NONE` -- every guest atomic degrades to a
+plain read-modify-write. We get their worst correctness problem for nothing.
+
+### The load side is not a cost to recover -- removing it is a 1.4% regression
+
+We keep load-load ordering deliberately (device -> guest notifier polling).
+The old note claimed that cost ~0.3 ms. Re-measured, slot 5, 1200 frames,
+both orderings:
+
+| | vcpu ms | host insns/frame | code |
+|---|---|---|---|
+| load barriers kept | **32.29** (spread 0.14) | 182.2 M | 25.25 MB |
+| no barriers at all | **32.74** (spread 0.02) | **403.2 M** | 24.32 MB |
+
+Removing them emits *less* code and executes **2.21x** the instructions. Fewer
+generated, 221 M more executed: the extra work is guest-side. Without
+load-load ordering the notifier poll reads stale memory and the guest spins --
+the hazard the comment predicted, now visible as a number. The earlier 0.3 ms
+figure does not reproduce and has been corrected in place.
+
+### The one transferable idea, and why it is still unpriced
+
+FEX's answer to load ordering is `LDAPR` (FEAT_LRCPC): an RCpc load giving the
+same load-load guarantee in *one* instruction, at plain-load speed on modern
+cores. QEMU has no notion of this -- `tcg_gen_req_mo()` only emits `DMB`. The
+Thor supports everything required: `lrcpc`, `ilrcpc` (LRCPC2) and `uscat`
+(LSE2, which keeps unaligned ordered loads atomic within a 16-byte granule and
+so removes most of what forced FEX into patchpoints).
+
+**The A/B above cannot price it.** `mb_mode=2` removes the *ordering*, not just
+the barrier, so the guest diverges and the comparison measures spinning rather
+than barrier cost. Pricing `LDAPR` means implementing it, because it is the
+only configuration that removes the instruction while keeping the guarantee.
+
+Rough shape of the upside: at ~3.3 M guest loads per frame there are ~3.3 M
+`DMB ISHLD` in 182 M instructions (~1.8%). Whether that is worth 1% or 5%
+depends entirely on what a `DMB ISHLD` costs on an X3 when there is nothing
+outstanding to order, which is not something this harness can isolate.
+
+**Implementation note if it is attempted:** `LDAPR` has no register-offset
+addressing. The softmmu fast path loads from `addend + guest_addr`, so the
+address must be materialised first -- the trade is one `ADD` for one
+`DMB ISHLD`, not a free removal.
+
