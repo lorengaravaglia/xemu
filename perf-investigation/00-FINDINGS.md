@@ -2469,6 +2469,40 @@ the barrier, so the guest diverges and the comparison measures spinning rather
 than barrier cost. Pricing `LDAPR` means implementing it, because it is the
 only configuration that removes the instruction while keeping the guarantee.
 
+### Built it. It faults on unaligned access, exactly as the article warns
+
+Implemented behind `debug.xemu.ldapr` (commit 53f2b87571). It boots, renders
+the slot-5 scene correctly, and then kills the emulator about a second into
+real gameplay.
+
+ARM's ordered loads require natural alignment. FEAT_LSE2 (`uscat`, present
+here) relaxes that only *within* a 16-byte granule; an unaligned access
+crossing one still faults. x86 code crosses those boundaries freely.
+
+Bisected with diagnostic modes rather than assumed:
+
+| mode | result |
+|---|---|
+| LDAPR every size, barrier kept | **dies** |
+| LDAPR byte loads only, barrier kept | survives |
+| no LDAPR (control) | survives |
+
+Byte loads cannot be misaligned and take the identical `ADD` + `LDAPR` path,
+which rules out the address composition and the barrier suppression and leaves
+only alignment. Note the process dies with **no signal in logcat** -- worth
+knowing, because it looks like a silent disappearance rather than a fault.
+
+**So the idea is blocked, not disproven.** Making it usable needs the machinery
+FEX built for this exact reason: a patchpoint at every ordered load, a SIGBUS
+handler that rewrites the faulting site to `DMB` + plain load, and cache
+maintenance. Until that exists the barrier cost stays unmeasured, because no
+knob can isolate it -- removing the ordering changes what the guest does.
+
+**Judgement:** that is a large, subtle mechanism (self-modifying code under a
+signal handler, concurrent with execution) for an upside nobody has been able
+to bound. Against a project record of four rejected ideas in the 1-2% range,
+it should stay unbuilt unless something else raises the expected value.
+
 Rough shape of the upside: at ~3.3 M guest loads per frame there are ~3.3 M
 `DMB ISHLD` in 182 M instructions (~1.8%). Whether that is worth 1% or 5%
 depends entirely on what a `DMB ISHLD` costs on an X3 when there is nothing
