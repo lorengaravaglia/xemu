@@ -2542,11 +2542,46 @@ inconsistently run to run (519 to 11,177 us slept per frame) and swamps
 everything; one baseline run under it read 36.17 ms / 25.50 fps against a true
 32.33 / 29.5.
 
-**Where it could still go:** removing the NOP, by demoting through
-retranslation instead of in-place patching. That makes it two instructions
-against two and leaves only the DMB-versus-ADD difference, which the spin-loop
-evidence suggests is positive but small. Kept default off
-(`debug.xemu.ldapr`, modes 0-5 including size bisects).
+### Removed the slot. Still inconclusive, and now the harness is the limit
+
+The NOP went away by rewriting *both* words on demotion: `ADD + LDAPR` becomes
+`DMB + LDR` with the original index addressing, which needs no scratch. Two
+instructions against two. No side table is needed -- the ADD already encodes
+base, index and extension, the LDAPR encodes size and destination.
+
+**The model predicted the move correctly.** Slotted was +0.19 ms; one fewer
+instruction per load is ~0.15 ms at section AA's 0.133 cyc/insn, and the first
+clean pair came out 32.20 vs 32.21 -- dead even.
+
+Over six runs it does not resolve:
+
+| | vcpu ms | spread | fps |
+|---|---|---|---|
+| DMB + LDR | **32.22** | 0.03 | 29.59 |
+| ADD + LDAPR | **32.54** | 0.53 | **29.71** |
+
+The two metrics disagree, and they disagree *for a known reason*: Halo's clock
+spin absorbs anything freed. It waits on wall-clock, so cheaper iterations mean
+more of them -- inflating vcpu (which is wall time) while nudging fps toward
+the 30 fps pace. LDAPR's spread is 18x the baseline's for the same reason.
+
+**The session drift now exceeds the effect.** One unchanged baseline run came
+in at 34.33 ms against 32.20/32.23 for the same config. Adjacent pairs give
++0.01, +0.51 and -1.65 ms. That is not a measurement any more.
+
+**Verdict: neutral, and not worth shipping on this evidence.** The weak signal
+(fps +0.4%, plus the spin loop proving LDAPR is cheaper per access) is far
+below what would justify self-modifying code driven from a signal handler,
+against a project that has rejected several 1-2% ideas outright.
+
+**What would settle it** is a workload without the spin -- the confound is not
+noise, it is a systematic bias that converts saved work into idle time. Until
+such a benchmark exists this cannot be measured properly, whatever the
+mechanism does.
+
+Kept default off (`debug.xemu.ldapr`, modes 0-5 including size bisects). The
+SIGBUS unblock in `qemu_thread_create()` stays regardless: it is an independent
+bug fix, without which no hardware SIGBUS in the emulator is reportable.
 
 Rough shape of the upside: at ~3.3 M guest loads per frame there are ~3.3 M
 `DMB ISHLD` in 182 M instructions (~1.8%). Whether that is worth 1% or 5%
