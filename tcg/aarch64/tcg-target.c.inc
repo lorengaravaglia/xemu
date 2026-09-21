@@ -1977,11 +1977,81 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
     return ldst;
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <signal.h>
+#include <ucontext.h>
+
+unsigned long long xemu_ldapr_patched;      /* sites demoted to DMB + LDR */
+unsigned long long xemu_ldapr_faults;       /* handler entries, any cause */
+unsigned long long xemu_ldapr_foreign;      /* faults that were not ours */
+
 /*
- * KNOWN BROKEN FOR GENERAL USE -- see the alignment note below.  Kept behind
- * debug.xemu.ldapr, default off, as the starting point for a patchpoint
- * implementation, not as a usable option.
+ * An LDAPR of any size, ignoring the size field (31-30) and the registers
+ * (9-0).  All four encodings differ only in those.
+ */
+#define LDAPR_SIG_MASK  0x3ffffc00u
+#define LDAPR_SIG       0x38bfc000u
+
+/* Same size and registers, but the plain unsigned-offset-zero load. */
+static inline uint32_t xemu_ldapr_to_ldr(uint32_t insn)
+{
+    return (insn & 0xc0000000u) | 0x39400000u | (insn & 0x3ffu);
+}
+
+/*
+ * SIGBUS handler for unaligned ordered loads.
  *
+ * ARM requires natural alignment for LDAPR; FEAT_LSE2 relaxes that only
+ * within a 16-byte granule, and x86 code crosses those boundaries freely.
+ * Rather than give up the instruction everywhere for the minority of sites
+ * that actually straddle, each site is demoted the first time it faults --
+ * the same approach FEX takes, for the same reason.
+ *
+ * The pair is rewritten barrier-first.  A concurrent execution of this site
+ * can therefore observe LDAPR+DMB (correct, merely redundant) or LDR+DMB
+ * (correct), but never LDR+NOP, which would be a load with no ordering at all.
+ */
+bool xemu_ldapr_try_patch(void *uc_void);
+bool xemu_ldapr_try_patch(void *uc_void)
+{
+    ucontext_t *uc = (ucontext_t *)uc_void;
+    uint32_t *rx = (uint32_t *)(uintptr_t)uc->uc_mcontext.pc;
+    uint32_t *rw;
+
+    xemu_ldapr_faults++;
+
+    /* The pc is an RX address; in_code_gen_buffer() works on RW.  Same dance
+     * as tc_ptr_to_region_tree(), which exists for exactly this reason. */
+    if (rx && !in_code_gen_buffer(rx) && tcg_splitwx_diff) {
+        rx = (uint32_t *)((uintptr_t)rx - tcg_splitwx_diff);
+    }
+
+    if (!rx || !in_code_gen_buffer(rx) ||
+        (rx[0] & LDAPR_SIG_MASK) != LDAPR_SIG || rx[1] != NOP) {
+        xemu_ldapr_foreign++;
+        return false;   /* not ours; caller handles it as it would have */
+    }
+
+    rw = (uint32_t *)tcg_splitwx_to_rw(rx);
+    rw[1] = DMB_ISH | DMB_LD;
+    __builtin___clear_cache((char *)(rx + 1), (char *)(rx + 2));
+    rw[0] = xemu_ldapr_to_ldr(rx[0]);
+    __builtin___clear_cache((char *)rx, (char *)(rx + 1));
+
+    xemu_ldapr_patched++;
+    return true;   /* returning re-executes the address, now a plain load */
+}
+
+/*
+ * No sigaction here on purpose.  qemu_init_sigbus() in system/cpus.c installs
+ * the process's SIGBUS handler after this runs and would overwrite ours, and
+ * its handler re-raises anything that is not a machine check -- which is why
+ * an unaligned ordered load previously killed the process with no crash dump
+ * at all.  That handler calls xemu_ldapr_try_patch() first instead.
+ */
+#endif
+
+/*
  * Ordered guest load via LDAPR, replacing the DMB ISHLD that tcg_out_mb()
  * would otherwise have emitted just before this.
  *
@@ -1994,7 +2064,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
  * There are no sign-extending LDAPR forms, so a signed load is done unsigned
  * and extended afterwards.  Those are ~1.4% of accesses.
  *
- * WHY THIS DOES NOT WORK AS WRITTEN.  ARM's ordered loads require natural
+ * ALIGNMENT, AND HOW IT IS HANDLED.  ARM's ordered loads require natural
  * alignment.  FEAT_LSE2 (`uscat`, present here) relaxes that only within a
  * 16-byte granule -- an unaligned access crossing one still faults.  x86 code
  * is entirely happy to load across such a boundary, and Halo does, so enabling
@@ -2010,10 +2080,15 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
  * out the address composition and the barrier suppression and leaves only
  * alignment.
  *
- * Making it usable needs what FEX built for the same reason: a patchpoint at
- * every ordered load, a SIGBUS handler that rewrites the faulting site to
- * DMB + plain load, and the cache maintenance to go with it.  That is the
- * cost of admission, and it has to be paid before any of this can be measured.
+ * So each site carries a NOP patch slot and is demoted the first time it
+ * actually faults -- see xemu_ldapr_sigbus() above.  Sites that never straddle
+ * a granule keep the cheap form; the ones that do pay a one-off fault and
+ * then run as DMB + LDR forever.  This is what FEX does, for this reason.
+ *
+ * The cost of admission is that slot: an ordered load is ADD + LDAPR + NOP
+ * against DMB + LDR for the plain form, so this only wins if a DMB ISHLD is
+ * dearer than an ADD plus a NOP.  That is the open question the measurement
+ * exists to answer.
  */
 static void tcg_out_qemu_ld_ordered(TCGContext *s, MemOp memop, TCGType ext,
                                     TCGReg data_r, HostAddress h)
@@ -2034,31 +2109,48 @@ static void tcg_out_qemu_ld_ordered(TCGContext *s, MemOp memop, TCGType ext,
 
     switch (memop & MO_SSIZE) {
     case MO_UB:
-        tcg_out_ldapr(s, I3313_LDAPRB, data_r, base);
-        break;
     case MO_SB:
         tcg_out_ldapr(s, I3313_LDAPRB, data_r, base);
-        tcg_out_sxt(s, ext ? TCG_TYPE_I64 : TCG_TYPE_I32, MO_8, data_r, data_r);
         break;
     case MO_UW:
-        tcg_out_ldapr(s, I3313_LDAPRH, data_r, base);
-        break;
     case MO_SW:
         tcg_out_ldapr(s, I3313_LDAPRH, data_r, base);
-        tcg_out_sxt(s, ext ? TCG_TYPE_I64 : TCG_TYPE_I32, MO_16, data_r, data_r);
         break;
     case MO_UL:
-        tcg_out_ldapr(s, I3313_LDAPRW, data_r, base);
-        break;
     case MO_SL:
         tcg_out_ldapr(s, I3313_LDAPRW, data_r, base);
-        tcg_out_sxt(s, TCG_TYPE_I64, MO_32, data_r, data_r);
         break;
     case MO_UQ:
         tcg_out_ldapr(s, I3313_LDAPRX, data_r, base);
         break;
     default:
         g_assert_not_reached();
+    }
+
+    /*
+     * The patch slot, always exactly one word after the load so the fault
+     * handler can find it without decoding anything else.  If this access
+     * ever faults on alignment, xemu_ldapr_patch() rewrites the pair to
+     * LDR + DMB ISHLD in place.
+     *
+     * A *trailing* barrier is as good as a leading one here because every
+     * ordered load has one: a later load cannot rise above its own
+     * predecessor's DMB, and therefore cannot rise above that predecessor.
+     */
+    tcg_out32(s, NOP);
+
+    switch (memop & MO_SSIZE) {
+    case MO_SB:
+        tcg_out_sxt(s, ext ? TCG_TYPE_I64 : TCG_TYPE_I32, MO_8, data_r, data_r);
+        break;
+    case MO_SW:
+        tcg_out_sxt(s, ext ? TCG_TYPE_I64 : TCG_TYPE_I32, MO_16, data_r, data_r);
+        break;
+    case MO_SL:
+        tcg_out_sxt(s, TCG_TYPE_I64, MO_32, data_r, data_r);
+        break;
+    default:
+        break;
     }
 }
 
@@ -2067,8 +2159,16 @@ static void tcg_out_qemu_ld_direct(TCGContext *s, MemOp memop, TCGType ext,
 {
 #if defined(__ANDROID__) || defined(ANDROID)
     if (unlikely(g_ldapr)) {
-        /* Mode 3: only byte loads, which cannot be misaligned. */
-        bool ok = (g_ldapr != 3) || (memop & MO_SIZE) == MO_8;
+        /*
+         * Size bisect.  3 = byte only, 4 = up to 16-bit, 5 = up to 32-bit,
+         * 1/2 = every size.  Byte loads can never be misaligned; wider ones
+         * increasingly can.
+         */
+        MemOp sz = memop & MO_SIZE;
+        bool ok = (g_ldapr == 1 || g_ldapr == 2) ||
+                  (g_ldapr == 3 && sz == MO_8) ||
+                  (g_ldapr == 4 && sz <= MO_16) ||
+                  (g_ldapr == 5 && sz <= MO_32);
 
         if (ok && !(memop & MO_BSWAP)) {
             tcg_out_qemu_ld_ordered(s, memop, ext, data_r, h);
@@ -4473,6 +4573,7 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
 
 static void tcg_target_init(TCGContext *s)
 {
+
     tcg_target_available_regs[TCG_TYPE_I32] = 0xffffffffu;
     tcg_target_available_regs[TCG_TYPE_I64] = 0xffffffffu;
     tcg_target_available_regs[TCG_TYPE_V64] = ALL_VECTOR_REGS;

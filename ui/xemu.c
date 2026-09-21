@@ -2391,6 +2391,23 @@ static void bench_tick(void)
             }
         }
         {
+            extern unsigned long long xemu_ldapr_patched;
+            extern unsigned long long xemu_ldapr_foreign;
+            extern int g_ldapr;
+
+            if (g_ldapr || xemu_ldapr_patched) {
+                /*
+                 * How many ordered loads had to be demoted because they
+                 * straddled a 16-byte granule.  A small number means the
+                 * patchpoint is doing its job; a large one means most sites
+                 * are unaligned and the cheap form is not worth its slot.
+                 */
+                ALOGI("bench: LDAPR mode=%d patched=%llu foreign-sigbus=%llu",
+                      g_ldapr, xemu_ldapr_patched, xemu_ldapr_foreign);
+            }
+        }
+
+        {
             extern unsigned long long xemu_fpuc_rc_writes[4];
             extern unsigned long long xemu_fpuc_rc_changes[4];
             extern uint32_t xemu_fpuc_rc_first_eip[4];

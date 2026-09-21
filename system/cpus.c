@@ -379,6 +379,27 @@ static void sigbus_reraise(void)
 
 static void sigbus_handler(int n, siginfo_t *siginfo, void *ctx)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    /*
+     * Give the TCG backend first refusal on an alignment fault.  It emits
+     * LDAPR for guest loads to carry x86's load-load ordering, and ARM's
+     * ordered loads fault when they straddle a 16-byte granule -- which x86
+     * code does freely.  The backend demotes that one site to DMB + plain
+     * load and we retry.
+     *
+     * This has to live here rather than in a handler of our own: this
+     * function owns SIGBUS for the process, and it re-raises everything that
+     * is not a machine check, so a handler installed earlier is both
+     * overwritten and unreachable.
+     */
+    {
+        extern bool xemu_ldapr_try_patch(void *ctx);
+
+        if (siginfo->si_code == BUS_ADRALN && xemu_ldapr_try_patch(ctx)) {
+            return;
+        }
+    }
+#endif
     if (siginfo->si_code != BUS_MCEERR_AO && siginfo->si_code != BUS_MCEERR_AR) {
         sigbus_reraise();
     }
@@ -408,6 +429,7 @@ static void qemu_init_sigbus(void)
     action.sa_flags = SA_SIGINFO;
     action.sa_sigaction = sigbus_handler;
     sigaction(SIGBUS, &action, NULL);
+
 
     prctl(PR_MCE_KILL, PR_MCE_KILL_SET, PR_MCE_KILL_EARLY, 0, 0);
 }

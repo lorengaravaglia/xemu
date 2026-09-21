@@ -422,7 +422,15 @@ void qemu_thread_create(QemuThread *thread, const char *name,
     sigdelset(&set, SIGSEGV);
     sigdelset(&set, SIGFPE);
     sigdelset(&set, SIGILL);
-    /* TODO avoid SIGBUS loss on macOS */
+    /*
+     * SIGBUS belongs in that list for the same reason: it is delivered
+     * synchronously by the hardware, and a blocked synchronous fault forces
+     * the default action, killing the process with no handler run and no
+     * crash dump -- which is exactly what an unaligned LDAPR from generated
+     * code did here before this line existed.  The TODO this replaces noted
+     * the loss on macOS; it is not macOS-specific.
+     */
+    sigdelset(&set, SIGBUS);
     pthread_sigmask(SIG_SETMASK, &set, &oldset);
 
     qemu_thread_args = g_new0(QemuThreadArgs, 1);
