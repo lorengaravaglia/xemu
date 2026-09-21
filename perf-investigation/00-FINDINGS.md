@@ -2498,10 +2498,55 @@ handler that rewrites the faulting site to `DMB` + plain load, and cache
 maintenance. Until that exists the barrier cost stays unmeasured, because no
 knob can isolate it -- removing the ordering changes what the guest does.
 
-**Judgement:** that is a large, subtle mechanism (self-modifying code under a
-signal handler, concurrent with execution) for an upside nobody has been able
-to bound. Against a project record of four rejected ideas in the 1-2% range,
-it should stay unbuilt unless something else raises the expected value.
+### Built the patchpoint. It works, and it is neutral
+
+**The blocker was never LDAPR.** `qemu_thread_create()` masks every signal
+except SIGSEGV, SIGFPE and SIGILL, above a comment saying blocking them is
+undefined behaviour, plus `TODO avoid SIGBUS loss on macOS`. SIGBUS is in that
+same class, so a hardware alignment fault on the vCPU thread was *blocked*, the
+kernel forced the default action, and the process died with **no handler run
+and no crash dump** -- which is why every diagnostic came back empty. The TODO
+is not macOS-specific. Unblocking it is worth keeping regardless: before this,
+any hardware SIGBUS in the emulator was unreportable.
+
+Two other things had to be right first, both found by measurement rather than
+reasoning: a 20-line native probe showed unaligned LDAPR returns correct data
+at offsets 1-7 and faults only across a 16-byte granule (14, 15, 31); and
+`system/cpus.c` owns SIGBUS for the process and re-raises anything that is not
+a machine check, so a handler installed elsewhere is both overwritten and
+unreachable. The patcher is called from inside it.
+
+**Mechanism:** `ADD + LDAPR + NOP` per ordered load; on `BUS_ADRALN` the site
+is rewritten in place to `LDR + DMB`, barrier first so a concurrent execution
+sees `LDAPR+DMB` or `LDR+DMB`, never a load with no ordering. 105-115 sites
+demote on slot 5, zero foreign faults -- the vast majority of sites never
+straddle, which is what makes the approach viable at all.
+
+**Result:**
+
+| | vcpu ms | spread | fps | host insns |
+|---|---|---|---|---|
+| DMB + LDR | **32.33** | 0.04 | 29.53 | 180.9 M |
+| ADD + LDAPR | **32.52** | 0.38 | 29.64 | 382.6 M |
+
+The instruction doubling is **Halo's clock spin, not extra work**: that loop
+waits on wall-clock, so cheaper iterations simply mean more of them. Eliding
+the spin in both configs converges them at 160.2 M against 161.0 M.
+
+That is real evidence LDAPR is cheaper per access than DMB + LDR -- and also
+that the `ADD` plus the patchpoint `NOP` cost back slightly more than the
+barrier saves. Two instructions for two, plus a slot.
+
+**Do not use the spin-elision harness for A/B work.** Elision engages
+inconsistently run to run (519 to 11,177 us slept per frame) and swamps
+everything; one baseline run under it read 36.17 ms / 25.50 fps against a true
+32.33 / 29.5.
+
+**Where it could still go:** removing the NOP, by demoting through
+retranslation instead of in-place patching. That makes it two instructions
+against two and leaves only the DMB-versus-ADD difference, which the spin-loop
+evidence suggests is positive but small. Kept default off
+(`debug.xemu.ldapr`, modes 0-5 including size bisects).
 
 Rough shape of the upside: at ~3.3 M guest loads per frame there are ~3.3 M
 `DMB ISHLD` in 182 M instructions (~1.8%). Whether that is worth 1% or 5%
