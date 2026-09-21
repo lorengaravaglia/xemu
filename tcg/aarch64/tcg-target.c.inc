@@ -1992,6 +1992,17 @@ unsigned long long xemu_ldapr_foreign;      /* faults that were not ours */
 #define LDAPR_SIG_MASK  0x3ffffc00u
 #define LDAPR_SIG       0x38bfc000u
 
+/*
+ * The ADD immediately before it, which composed base+index into a scratch.
+ * Masking off Rm (20-16), Rn (9-5) and Rd (4-0) leaves the opcode, and the
+ * two forms are distinguishable: extended (UXTW, 32-bit guest address) or
+ * shifted by zero (64-bit).  Everything needed to rebuild an indexed load is
+ * encoded right there, so no side table has to be kept.
+ */
+#define ADDR_SIG_MASK   0xffe0fc00u
+#define ADDR_SIG_UXTW   0x8b204000u
+#define ADDR_SIG_LSL    0x8b000000u
+
 /* Same size and registers, but the plain unsigned-offset-zero load. */
 static inline uint32_t xemu_ldapr_to_ldr(uint32_t insn)
 {
@@ -2016,30 +2027,70 @@ bool xemu_ldapr_try_patch(void *uc_void)
 {
     ucontext_t *uc = (ucontext_t *)uc_void;
     uint32_t *rx = (uint32_t *)(uintptr_t)uc->uc_mcontext.pc;
+    uint32_t ldapr, addi, ldr;
+    unsigned mo, rt, rn, rm, ext;
     uint32_t *rw;
 
     xemu_ldapr_faults++;
 
-    /* The pc is an RX address; in_code_gen_buffer() works on RW.  Same dance
-     * as tc_ptr_to_region_tree(), which exists for exactly this reason. */
+    /* The pc is an RX address; in_code_gen_buffer() works on RW. */
     if (rx && !in_code_gen_buffer(rx) && tcg_splitwx_diff) {
         rx = (uint32_t *)((uintptr_t)rx - tcg_splitwx_diff);
     }
-
-    if (!rx || !in_code_gen_buffer(rx) ||
-        (rx[0] & LDAPR_SIG_MASK) != LDAPR_SIG || rx[1] != NOP) {
+    if (!rx || !in_code_gen_buffer(rx) || !in_code_gen_buffer(rx - 1)) {
         xemu_ldapr_foreign++;
-        return false;   /* not ours; caller handles it as it would have */
+        return false;
     }
 
+    ldapr = rx[0];
+    addi = rx[-1];
+    if ((ldapr & LDAPR_SIG_MASK) != LDAPR_SIG) {
+        xemu_ldapr_foreign++;
+        return false;
+    }
+    if ((addi & ADDR_SIG_MASK) == ADDR_SIG_UXTW) {
+        ext = 0;                       /* 32-bit guest address, UXTW */
+    } else if ((addi & ADDR_SIG_MASK) == ADDR_SIG_LSL) {
+        ext = 1;                       /* 64-bit, LSL #0 */
+    } else {
+        xemu_ldapr_foreign++;
+        return false;
+    }
+    /* The ADD must be the one that produced this load's base register. */
+    if ((addi & 0x1f) != ((ldapr >> 5) & 0x1f)) {
+        xemu_ldapr_foreign++;
+        return false;
+    }
+
+    mo = ldapr >> 30;                  /* size, in the same field as I3312 */
+    rt = ldapr & 0x1f;
+    rn = (addi >> 5) & 0x1f;           /* original base  */
+    rm = (addi >> 16) & 0x1f;          /* original index */
+
+    /* LDR <rt>, [<rn>, <rm>, uxtw|lsl] -- the index form needs no scratch. */
+    ldr = (0x38000000u | (1u << 22) | (mo << 30)) | I3312_TO_I3310 |
+          (rm << 16) | 0x4000u | (ext << 13) | (rn << 5) | rt;
+
     rw = (uint32_t *)tcg_splitwx_to_rw(rx);
-    rw[1] = DMB_ISH | DMB_LD;
-    __builtin___clear_cache((char *)(rx + 1), (char *)(rx + 2));
-    rw[0] = xemu_ldapr_to_ldr(rx[0]);
+    /*
+     * Load first.  After this word the access no longer depends on the
+     * scratch the ADD produced, so replacing the ADD in the next step cannot
+     * leave a load reading a register nothing wrote.
+     */
+    rw[0] = ldr;
     __builtin___clear_cache((char *)rx, (char *)(rx + 1));
+    rw[-1] = DMB_ISH | DMB_LD;
+    __builtin___clear_cache((char *)(rx - 1), (char *)rx);
+
+    /*
+     * Rewind one instruction so the barrier that just replaced the ADD is
+     * actually executed on this pass; resuming at the load would skip it
+     * exactly once.
+     */
+    uc->uc_mcontext.pc -= 4;
 
     xemu_ldapr_patched++;
-    return true;   /* returning re-executes the address, now a plain load */
+    return true;
 }
 
 /*
@@ -2080,15 +2131,15 @@ bool xemu_ldapr_try_patch(void *uc_void)
  * out the address composition and the barrier suppression and leaves only
  * alignment.
  *
- * So each site carries a NOP patch slot and is demoted the first time it
- * actually faults -- see xemu_ldapr_sigbus() above.  Sites that never straddle
- * a granule keep the cheap form; the ones that do pay a one-off fault and
- * then run as DMB + LDR forever.  This is what FEX does, for this reason.
+ * So a site is demoted the first time it faults, by rewriting *both* words:
+ * ADD + LDAPR becomes DMB + LDR using the original index addressing, which
+ * needs no scratch.  Two instructions in, two out, so there is no patch slot
+ * to pay for -- an earlier version carried a NOP for that purpose and the slot
+ * cost more than the barrier it removed.
  *
- * The cost of admission is that slot: an ordered load is ADD + LDAPR + NOP
- * against DMB + LDR for the plain form, so this only wins if a DMB ISHLD is
- * dearer than an ADD plus a NOP.  That is the open question the measurement
- * exists to answer.
+ * Everything the rewrite needs is already in those two words: the ADD carries
+ * base, index and whether the index is extended; the LDAPR carries size and
+ * destination.  No side table, nothing to keep in sync.
  */
 static void tcg_out_qemu_ld_ordered(TCGContext *s, MemOp memop, TCGType ext,
                                     TCGReg data_r, HostAddress h)
@@ -2096,6 +2147,11 @@ static void tcg_out_qemu_ld_ordered(TCGContext *s, MemOp memop, TCGType ext,
     TCGReg base;
 
     if (h.index == TCG_REG_XZR) {
+        /*
+         * Unreachable for softmmu, where prepare_host_addr() always leaves the
+         * guest address in an index register.  Guarded at the call site too:
+         * with no ADD to rewrite, a faulting site could not be demoted.
+         */
         base = h.base;
     } else {
         base = TCG_REG_TMP2;
@@ -2127,18 +2183,6 @@ static void tcg_out_qemu_ld_ordered(TCGContext *s, MemOp memop, TCGType ext,
         g_assert_not_reached();
     }
 
-    /*
-     * The patch slot, always exactly one word after the load so the fault
-     * handler can find it without decoding anything else.  If this access
-     * ever faults on alignment, xemu_ldapr_patch() rewrites the pair to
-     * LDR + DMB ISHLD in place.
-     *
-     * A *trailing* barrier is as good as a leading one here because every
-     * ordered load has one: a later load cannot rise above its own
-     * predecessor's DMB, and therefore cannot rise above that predecessor.
-     */
-    tcg_out32(s, NOP);
-
     switch (memop & MO_SSIZE) {
     case MO_SB:
         tcg_out_sxt(s, ext ? TCG_TYPE_I64 : TCG_TYPE_I32, MO_8, data_r, data_r);
@@ -2165,10 +2209,12 @@ static void tcg_out_qemu_ld_direct(TCGContext *s, MemOp memop, TCGType ext,
          * increasingly can.
          */
         MemOp sz = memop & MO_SIZE;
-        bool ok = (g_ldapr == 1 || g_ldapr == 2) ||
-                  (g_ldapr == 3 && sz == MO_8) ||
-                  (g_ldapr == 4 && sz <= MO_16) ||
-                  (g_ldapr == 5 && sz <= MO_32);
+        /* Demotion rewrites the composing ADD, so there must be one. */
+        bool ok = h.index != TCG_REG_XZR &&
+                  ((g_ldapr == 1 || g_ldapr == 2) ||
+                   (g_ldapr == 3 && sz == MO_8) ||
+                   (g_ldapr == 4 && sz <= MO_16) ||
+                   (g_ldapr == 5 && sz <= MO_32));
 
         if (ok && !(memop & MO_BSWAP)) {
             tcg_out_qemu_ld_ordered(s, memop, ext, data_r, h);
