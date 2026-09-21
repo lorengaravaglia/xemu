@@ -495,6 +495,20 @@ typedef enum {
     I3406_ADRP      = 0x90000000,
 
     /* Add/subtract extended register instructions. */
+    /*
+     * Load-Acquire RCpc (FEAT_LRCPC).  One instruction that both loads and
+     * forbids being reordered with other loads, which is exactly the
+     * load-load ordering x86-TSO promises and AArch64 does not.  Used to
+     * replace the DMB ISHLD that would otherwise precede every guest load.
+     *
+     * Base register only -- no index, no offset -- so the address has to be
+     * composed first, the same restriction LDP has in the i128 path below.
+     */
+    I3313_LDAPRB    = 0x38bfc000,
+    I3313_LDAPRH    = 0x78bfc000,
+    I3313_LDAPRW    = 0xb8bfc000,
+    I3313_LDAPRX    = 0xf8bfc000,
+
     I3501_ADD       = 0x0b200000,
 
     /* Add/subtract shifted register instructions (without a shift).  */
@@ -829,6 +843,13 @@ static void tcg_out_insn_3406(TCGContext *s, AArch64Insn insn,
                               TCGReg rd, int64_t disp)
 {
     tcg_out32(s, insn | (disp & 3) << 29 | (disp & 0x1ffffc) << (5 - 2) | rd);
+}
+
+/* LDAPR Rt, [Rn] -- base register only, no offset field to encode. */
+static inline void tcg_out_ldapr(TCGContext *s, AArch64Insn insn,
+                                 TCGReg rt, TCGReg rn)
+{
+    tcg_out32(s, insn | rn << 5 | rt);
 }
 
 static inline void tcg_out_insn_3501(TCGContext *s, AArch64Insn insn,
@@ -1746,7 +1767,7 @@ static void tcg_out_mb(TCGContext *s, unsigned a0)
      * and why its prediction came out wrong.  Mode 2 then prices the
      * instruction and byte saving on top.
      */
-    if (unlikely(g_mb_mode)) {
+    if (unlikely(g_mb_mode || g_ldapr)) {
         /*
          * Modes 3 and 4 split the two directions, which have different safety
          * arguments.
@@ -1768,6 +1789,15 @@ static void tcg_out_mb(TCGContext *s, unsigned a0)
          */
         bool store_side = (a0 & TCG_MO_ST_ST) != 0;
 
+        if (g_ldapr == 1 && !store_side) {
+            /*
+             * Every guest load is an LDAPR, so load-load ordering already
+             * holds globally and this barrier is redundant.  A guest LFENCE
+             * lands here too and is redundant for the same reason; MFENCE and
+             * friends set ST_ST and are left alone.
+             */
+            return;
+        }
         if (g_mb_mode == 3 && !store_side) {
             tcg_out32(s, sync[a0 & TCG_MO_ALL]);   /* keep load barriers */
             return;
@@ -1947,9 +1977,115 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
     return ldst;
 }
 
+/*
+ * KNOWN BROKEN FOR GENERAL USE -- see the alignment note below.  Kept behind
+ * debug.xemu.ldapr, default off, as the starting point for a patchpoint
+ * implementation, not as a usable option.
+ *
+ * Ordered guest load via LDAPR, replacing the DMB ISHLD that tcg_out_mb()
+ * would otherwise have emitted just before this.
+ *
+ * LDAPR addresses a base register only, so the indexed address has to be
+ * composed into a scratch first -- trading one ADD for one DMB rather than
+ * removing an instruction outright.  TMP2 is dead here: prepare_host_addr()
+ * leaves the addend in TMP1 and the guest address in addr_reg, and the i128
+ * path below relies on the same fact for the same reason.
+ *
+ * There are no sign-extending LDAPR forms, so a signed load is done unsigned
+ * and extended afterwards.  Those are ~1.4% of accesses.
+ *
+ * WHY THIS DOES NOT WORK AS WRITTEN.  ARM's ordered loads require natural
+ * alignment.  FEAT_LSE2 (`uscat`, present here) relaxes that only within a
+ * 16-byte granule -- an unaligned access crossing one still faults.  x86 code
+ * is entirely happy to load across such a boundary, and Halo does, so enabling
+ * this kills the emulator within a second of real gameplay.
+ *
+ * Bisected rather than guessed:
+ *
+ *   LDAPR every size, barrier kept        -> dies
+ *   LDAPR byte loads only, barrier kept   -> survives
+ *   no LDAPR                              -> survives
+ *
+ * Byte loads cannot be misaligned and share this exact code path, which rules
+ * out the address composition and the barrier suppression and leaves only
+ * alignment.
+ *
+ * Making it usable needs what FEX built for the same reason: a patchpoint at
+ * every ordered load, a SIGBUS handler that rewrites the faulting site to
+ * DMB + plain load, and the cache maintenance to go with it.  That is the
+ * cost of admission, and it has to be paid before any of this can be measured.
+ */
+static void tcg_out_qemu_ld_ordered(TCGContext *s, MemOp memop, TCGType ext,
+                                    TCGReg data_r, HostAddress h)
+{
+    TCGReg base;
+
+    if (h.index == TCG_REG_XZR) {
+        base = h.base;
+    } else {
+        base = TCG_REG_TMP2;
+        if (h.index_ext == TCG_TYPE_I32) {
+            tcg_out_insn(s, 3501, ADD, TCG_TYPE_I64, base,
+                         h.base, h.index, MO_32, 0);
+        } else {
+            tcg_out_insn(s, 3502, ADD, 1, base, h.base, h.index);
+        }
+    }
+
+    switch (memop & MO_SSIZE) {
+    case MO_UB:
+        tcg_out_ldapr(s, I3313_LDAPRB, data_r, base);
+        break;
+    case MO_SB:
+        tcg_out_ldapr(s, I3313_LDAPRB, data_r, base);
+        tcg_out_sxt(s, ext ? TCG_TYPE_I64 : TCG_TYPE_I32, MO_8, data_r, data_r);
+        break;
+    case MO_UW:
+        tcg_out_ldapr(s, I3313_LDAPRH, data_r, base);
+        break;
+    case MO_SW:
+        tcg_out_ldapr(s, I3313_LDAPRH, data_r, base);
+        tcg_out_sxt(s, ext ? TCG_TYPE_I64 : TCG_TYPE_I32, MO_16, data_r, data_r);
+        break;
+    case MO_UL:
+        tcg_out_ldapr(s, I3313_LDAPRW, data_r, base);
+        break;
+    case MO_SL:
+        tcg_out_ldapr(s, I3313_LDAPRW, data_r, base);
+        tcg_out_sxt(s, TCG_TYPE_I64, MO_32, data_r, data_r);
+        break;
+    case MO_UQ:
+        tcg_out_ldapr(s, I3313_LDAPRX, data_r, base);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
 static void tcg_out_qemu_ld_direct(TCGContext *s, MemOp memop, TCGType ext,
                                    TCGReg data_r, HostAddress h)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (unlikely(g_ldapr)) {
+        /* Mode 3: only byte loads, which cannot be misaligned. */
+        bool ok = (g_ldapr != 3) || (memop & MO_SIZE) == MO_8;
+
+        if (ok && !(memop & MO_BSWAP)) {
+            tcg_out_qemu_ld_ordered(s, memop, ext, data_r, h);
+            return;
+        }
+        /*
+         * Falling through to the plain indexed load below.  In mode 1 the
+         * barrier that would have ordered it was suppressed in tcg_out_mb(),
+         * so put one back rather than silently losing the guarantee; the
+         * diagnostic modes never suppressed it and need nothing.
+         */
+        if (g_ldapr == 1) {
+            tcg_out32(s, DMB_ISH | DMB_LD);
+        }
+    }
+#endif
+
     switch (memop & MO_SSIZE) {
     case MO_UB:
         tcg_out_ldst_r(s, I3312_LDRB, data_r, h.base, h.index_ext, h.index);
@@ -2017,6 +2153,7 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
 extern int g_ldst_pad_bytes;
 extern int g_reserve_x15;
 extern int g_ldst_stub;
+extern int g_ldapr;
 extern int g_mb_mode;
 
 static void xemu_ldst_pad(TCGContext *s)
@@ -2247,6 +2384,15 @@ static tcg_insn_unit *xemu_ldst_stub_for(TCGContext *s, MemOpIdx oi,
     xemu_ldst_opc_hist[is_ld][opc & 0xff]++;
 
     if (!g_ldst_stub || !tcg_use_softmmu) {
+        return NULL;
+    }
+    /*
+     * Mutually exclusive with LDAPR: the ordered load composes its address
+     * into TMP2, which inside a stub is the return address.  The stubs are a
+     * closed experiment (FINDINGS AJ) so there is nothing to gain from making
+     * the two cooperate.
+     */
+    if (g_ldapr) {
         return NULL;
     }
     if (mem_index < 16) {

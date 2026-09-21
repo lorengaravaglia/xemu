@@ -152,6 +152,14 @@ int g_reserve_x15;    /* debug.xemu.reserve_x15, stub prerequisite */
  * zero.  See section AC.  Enable with debug.xemu.ldst_stub=1.
  */
 int g_ldst_stub;
+/*
+ * debug.xemu.ldapr: give guest loads their load-load ordering with a
+ * Load-Acquire RCpc instruction (FEAT_LRCPC) instead of a preceding
+ * DMB ISHLD.  Same guarantee, one instruction instead of two -- but LDAPR
+ * takes no index register, so the address must be composed first and the
+ * real trade is one ADD for one DMB.
+ */
+int g_ldapr;
 int g_mb_mode;        /* debug.xemu.mb_mode, measurement only */
 int g_keep_tso_stores; /* debug.xemu.tso_stores=1 restores them */
 unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];
