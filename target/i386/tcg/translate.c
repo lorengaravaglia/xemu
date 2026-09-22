@@ -278,15 +278,22 @@ void x86_refresh_fpu_mode(void)
         {
             extern int g_ldapr;
             char av[PROP_VALUE_MAX] = { 0 };
-            /* 0 off, 1 LDAPR + barrier suppressed, 2 LDAPR + barrier kept,
-             * 3 LDAPR for byte loads only + barrier kept (alignment bisect). */
-            int wanta = __system_property_get("debug.xemu.ldapr", av) > 0
-                        ? (av[0] >= '0' && av[0] <= '5' ? av[0] - '0' : 0) : 0;
+            /*
+             * 0 off, 1 LDAPR + barrier suppressed, 2 LDAPR + barrier kept,
+             * 3-5 size bisects (see tcg-target.c.inc).
+             *
+             * Only an explicitly set property overrides.  Writing 0 back when
+             * it is absent would stamp on the Advanced-settings toggle, which
+             * owns this knob for anyone not driving it from adb.
+             */
+            if (__system_property_get("debug.xemu.ldapr", av) > 0) {
+                int wanta = (av[0] >= '0' && av[0] <= '5') ? av[0] - '0' : 0;
 
-            if (wanta != g_ldapr) {
-                g_ldapr = wanta;
-                if (first_cpu) {
-                    queue_tb_flush(first_cpu);
+                if (wanta != g_ldapr) {
+                    g_ldapr = wanta;
+                    if (first_cpu) {
+                        queue_tb_flush(first_cpu);
+                    }
                 }
             }
         }

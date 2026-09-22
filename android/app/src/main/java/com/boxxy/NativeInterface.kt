@@ -110,6 +110,8 @@ object NativeInterface {
      */
     external fun setAccurateMemoryOrdering(enabled: Boolean)
 
+    external fun setLdapr(enabled: Boolean)
+
     /**
      * Save current VM state to a named snapshot inside the qcow2 HDD image.
      * Slot name convention: "slot_1" … "slot_8".

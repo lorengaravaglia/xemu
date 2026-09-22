@@ -1438,6 +1438,10 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
          * in Advanced settings. */
         NativeInterface.setAccurateMemoryOrdering(
             mainPrefs.getBoolean("accurate_mem_ordering", false))
+
+        /* On by default; see SettingsViewModel.setFastOrderedLoads. */
+        NativeInterface.setLdapr(
+            mainPrefs.getBoolean("fast_ordered_loads", true))
     }
 
     /** Read overlay settings from main_prefs and apply position + visibility. */

@@ -173,6 +173,22 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         NativeInterface.setAccurateMemoryOrdering(value)
     }
 
+    /*
+     * Default ON is deliberate: measured -53.7% frames over 50 ms on a heavy
+     * combat scene (FINDINGS AL).  The safety valve is here rather than the
+     * default because the mechanism rewrites generated code from a signal
+     * handler, so anyone hitting trouble can switch it off without adb.
+     */
+    private val _fastOrderedLoads =
+        MutableStateFlow(prefs.getBoolean("fast_ordered_loads", true))
+    val fastOrderedLoads: StateFlow<Boolean> = _fastOrderedLoads
+
+    fun setFastOrderedLoads(value: Boolean) {
+        _fastOrderedLoads.value = value
+        prefs.edit().putBoolean("fast_ordered_loads", value).apply()
+        NativeInterface.setLdapr(value)
+    }
+
     fun setHrtf(value: Boolean) {
         _hrtf.value = value
         prefs.edit().putBoolean("audio_hrtf", value).apply()

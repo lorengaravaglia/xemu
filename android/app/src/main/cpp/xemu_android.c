@@ -649,6 +649,27 @@ void xemu_android_set_accurate_mem_ordering(bool enabled) {
                                                  : "off (stores elided)");
 }
 
+/*
+ * Ordered guest loads via LDAPR instead of a DMB before every load.  Worth
+ * about half the sub-20fps frames on a heavy scene (FINDINGS AL); costs a
+ * one-off SIGBUS per load site that straddles a 16-byte granule, which is
+ * caught and demoted to DMB + LDR in place.
+ *
+ * Changing it invalidates every translated block, so flush.
+ */
+void xemu_android_set_ldapr(bool enabled) {
+    extern int g_ldapr;
+
+    if (g_ldapr == (int)enabled) {
+        return;
+    }
+    g_ldapr = (int)enabled;
+    if (first_cpu) {
+        queue_tb_flush(first_cpu);
+    }
+    LOGI("ordered loads: %s", enabled ? "LDAPR" : "DMB + LDR");
+}
+
 unsigned int xemu_android_get_surface_scale(void) {
     return g_surface_scale;
 }

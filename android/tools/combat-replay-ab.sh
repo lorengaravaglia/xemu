@@ -22,6 +22,16 @@ run() {
   adb shell "am broadcast -a com.boxxy.action.LOAD_STATE --ei slot $SLOT >/dev/null 2>&1"
   sleep 9
   adb shell "am broadcast -a com.boxxy.action.PLAY_RECORDING --es recording_name $REC >/dev/null 2>&1"
+  sleep 2
+  # Verify the replay actually engaged.  PLAY_RECORDING fails silently to the
+  # log -- a wrong extra name gives PLAYBACK_REJECTED and the guest simply
+  # idles, which reads as a believable light workload rather than an error.
+  # Two complete A/B runs were measured that way before anyone noticed.
+  if ! adb logcat -d 2>/dev/null | grep -q "PLAYBACK_START"; then
+    echo "ldapr=$1 ABORT: replay did not start -- $(adb logcat -d 2>/dev/null | grep -oE 'PLAYBACK_REJECTED reason=[a-z_]+' | tail -1)" | tee -a $OUT
+    adb shell am force-stop com.boxxy
+    return
+  fi
   adb shell "am broadcast -a com.boxxy.action.BENCHMARK --ei frames $FRAMES >/dev/null 2>&1"
   for i in $(seq 1 50); do adb logcat -d 2>/dev/null | grep -q "bench: RESULT" && break; sleep 3; done
   local L=$(adb logcat -d 2>/dev/null)

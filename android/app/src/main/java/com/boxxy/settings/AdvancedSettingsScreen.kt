@@ -18,6 +18,7 @@ fun AdvancedSettingsScreen(
 ) {
     val context = LocalContext.current
     val accurateMemOrdering by settingsViewModel.accurateMemOrdering.collectAsState()
+    val fastOrderedLoads by settingsViewModel.fastOrderedLoads.collectAsState()
 
     // Compute shader cache stats on composition
     val shaderDir = remember { File(context.filesDir, "shaders") }
@@ -56,6 +57,23 @@ fun AdvancedSettingsScreen(
                                    "expect a brief pause.",
                         checked = accurateMemOrdering,
                     ) { settingsViewModel.setAccurateMemOrdering(it) }
+                }
+            }
+
+            SettingsSectionLabel("Performance")
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    SettingsSwitchRow(
+                        label = "Fast ordered loads",
+                        subtitle = "Uses a newer ARM instruction that carries " +
+                                   "memory ordering itself instead of adding a " +
+                                   "separate barrier before every read. Roughly " +
+                                   "halves the worst frame drops in busy scenes. " +
+                                   "Turn it off if you see graphical corruption " +
+                                   "or crashes. Reloads translated code, so " +
+                                   "expect a brief pause.",
+                        checked = fastOrderedLoads,
+                    ) { settingsViewModel.setFastOrderedLoads(it) }
                 }
             }
 

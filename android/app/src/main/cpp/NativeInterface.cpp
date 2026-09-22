@@ -159,6 +159,12 @@ Java_com_boxxy_NativeInterface_setAccurateMemoryOrdering(JNIEnv *env, jclass cla
 }
 
 JNIEXPORT void JNICALL
+Java_com_boxxy_NativeInterface_setLdapr(JNIEnv *env, jclass clazz,
+                                        jboolean enabled) {
+    xemu_android_set_ldapr((bool)enabled);
+}
+
+JNIEXPORT void JNICALL
 Java_com_boxxy_NativeInterface_setSurfaceScale(JNIEnv *env, jclass clazz, jint scale) {
     xemu_android_set_surface_scale((unsigned int)scale);
 }

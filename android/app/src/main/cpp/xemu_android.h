@@ -128,6 +128,7 @@ int xemu_android_get_compiled_shader_count(void);
  * Valid values: 1 (native), 2 (2×), 3 (3×). */
 void xemu_android_set_surface_scale(unsigned int scale);
 void xemu_android_set_accurate_mem_ordering(bool enabled);
+void xemu_android_set_ldapr(bool enabled);
 unsigned int xemu_android_get_surface_scale(void);
 
 /* Returns the current Xbox rumble motor intensities (0–65535 each).
