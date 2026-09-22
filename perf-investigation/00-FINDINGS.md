@@ -2624,3 +2624,73 @@ addressing. The softmmu fast path loads from `addend + guest_addr`, so the
 address must be materialised first -- the trade is one `ADD` for one
 `DMB ISHLD`, not a free removal.
 
+---
+
+## AM. MEASURING THE TAIL, AND WHAT IT REOPENS (2026-09-21)
+
+Section AL's correction -- that slot 5 hid a 53% tail improvement -- raises two
+questions: how to measure the tail reliably, and which rejected ideas were
+rejected on the wrong metric.
+
+### Building a tail benchmark: what each ingredient actually controls
+
+| workload | intensity | repeatability |
+|---|---|---|
+| slot 5, no input | low | excellent |
+| slot 2 + synthetic input | low | **excellent** (6/6 frames >50 ms, matching histograms) |
+| slot 5 + synthetic input | **variable: 12, 26, 71** | poor on the tail |
+| slot 2 + recorded combat | high | positional drift |
+
+**Repeatability comes from the input.** A hand-played recording drifts, because
+replay is wall-clock scheduled: if the configurations run at different speeds
+the inputs land on different guest frames and the player ends up elsewhere.
+Synthetic input fixes this -- rotation plus forward is a closed circular path,
+so position stays bounded. `android/tools/make-synthetic-recording.py`.
+
+**Intensity comes from the save state, and cannot be synthesised.** The same
+synthetic input is light from slot 2 and variable from slot 5. Stick-waggling
+does not create load; being somewhere busy does.
+
+**A single heavy reading is not a heavy benchmark.** slot 5 + synthetic gave
+71 frames over 50 ms once and 12 and 26 later under identical settings. The
+first was taken back-to-back after another batch, the others after 25 s
+cooldowns -- so that tail was substantially *thermal*. This is the same class
+of error as section AL: reading one number without checking it reproduces.
+**A tail metric needs a state saved inside sustained action**; none of the
+existing states qualifies.
+
+### Which rejections were made on the wrong metric
+
+Everything below was judged on slot-5 mean frame time, which section AL showed
+cannot see a tail effect. Re-examined:
+
+| idea | rejected because | does the tail change the verdict? |
+|---|---|---|
+| **ld/st out-of-lining** (AC, AJ) | +0.15 ms on slot 5; BL/RET floor | **Worth retesting.** It cut code size 29% and L1I misses 27.7% and paid for it in instructions. Heavy frames are where I-cache pressure is highest and where the fetch saving is worth most, so the trade could invert exactly where it matters. The strongest candidate. |
+| SRA / register allocation (K) | 2-4% ceiling from TB-boundary cost | Unlikely. Boundary sync is a per-block constant, not concentrated in heavy frames. |
+| fastmem (AG) | +12.5% regression | No. Its cost is fault and flush machinery, which gets *worse* under load. |
+| LSE atomics | no measurable effect | No, and moot: CF_PARALLEL is never set, so guest atomics are already plain RMW. |
+| spin elision (M, N) | headroom, not frame rate | No -- and now demonstrated harmful: with detection on but not engaging, a baseline run cost +3.8 ms for the machinery alone. |
+| AOT / HLE (8, AH) | 54% backend stall unreachable | No. Memory stalls do not care which metric is used. |
+
+### Pushing LDAPR further
+
+An ordered load is `ADD + LDAPR` against `DMB + LDR`. Ideas, roughly by
+expected value:
+
+1. **Skip ordering for provably private loads.** Load-load ordering exists for
+   one reason here: a guest polling an NV2A notifier in RAM. Loads that cannot
+   observe device memory need neither LDAPR nor a barrier. Stack-relative
+   accesses are the obvious candidate and are a large share of all loads.
+   Correctness argument required before any of this is attempted -- "devices do
+   not DMA into the guest stack" is an assumption, not a proof.
+2. **Let TCG eliminate the ADD.** The address composition is emitted opaquely
+   in the backend, so the optimiser never sees it. Expressed in the IR, repeated
+   `base+index` for consecutive accesses to the same page would be common
+   subexpression eliminated.
+3. **Combine with out-of-lining.** Currently mutually exclusive (the stub uses
+   TMP2, which the ordered load also wants). If the stub is revived by the item
+   above, the two address the same instruction stream from opposite ends --
+   fetch and ordering -- and might compound.
+4. Hardware TSO mode -- Apple Silicon only, nothing to do on Snapdragon.
+
