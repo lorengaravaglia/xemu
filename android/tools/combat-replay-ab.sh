@@ -48,4 +48,6 @@ run() {
 }
 : > $OUT
 for cfg in "$@"; do run $cfg; done
-adb shell setprop debug.xemu.ldapr 0
+# Leave the knob to the Advanced-settings toggle rather than pinning it off:
+# a leftover property silently overrides the UI on the next run.
+adb shell setprop debug.xemu.ldapr 1
