@@ -2569,15 +2569,46 @@ the 30 fps pace. LDAPR's spread is 18x the baseline's for the same reason.
 in at 34.33 ms against 32.20/32.23 for the same config. Adjacent pairs give
 +0.01, +0.51 and -1.65 ms. That is not a measurement any more.
 
-**Verdict: neutral, and not worth shipping on this evidence.** The weak signal
-(fps +0.4%, plus the spin loop proving LDAPR is cheaper per access) is far
-below what would justify self-modifying code driven from a signal handler,
-against a project that has rejected several 1-2% ideas outright.
+### That verdict was wrong. On combat it is a large win
 
-**What would settle it** is a workload without the spin -- the confound is not
-noise, it is a systematic bias that converts saved work into idle time. Until
-such a benchmark exists this cannot be measured properly, whatever the
-mechanism does.
+The "neutral" conclusion above came entirely from the slot-5 benchmark, and
+that benchmark cannot see this effect. Slot 5 lets the guest idle: ~1400 of
+1999 frames sit in the 33-36 ms band and the clock spin swallows anything
+saved. The frames that matter are the *heavy* ones, where there is no slack to
+absorb a saving -- and slot 5 barely has any.
+
+Built the workload that was missing: load slot 2, replay a recorded 29 s
+combat section (21,784 input events), measure 800 frames. Deterministic, and
+genuinely heavy -- 9% of frames over 50 ms against slot 5's ~1%.
+
+| | baseline | LDAPR | change |
+|---|---|---|---|
+| mean frame time | 35.45 ms | 34.25 ms | **-3.4%** |
+| vcpu ms/frame | 33.02 | 32.60 | -1.3% |
+| fps | 28.23 | **29.23** | **+3.5%** |
+| **frames > 50 ms (sub-20fps)** | **82** | **38** | **-53.7%** |
+| frames > 66 ms (sub-15fps) | 18 | 12.5 | -30.6% |
+
+**Two independent measurements agree.** Live manual play gave -54.7% on frames
+over 50 ms; the deterministic replay gives -53.7%. The individual runs do not
+overlap either (LDAPR 32 and 44, baseline 73 and 91), and the ordering was
+0,1,1,0 with the *last* baseline the worst of the four, so drift pushed against
+LDAPR rather than for it.
+
+This is the same shape as the TSO barrier elision (section AE), which earned
+its place on exactly this metric.
+
+**The lesson is about the harness, not the instruction.** A benchmark on a
+self-pacing scene measures the wrong thing: it reports mean frame time while
+the guest converts every saving into idle spin. Six careful runs on slot 5
+resolved nothing because the effect is not in the mean -- it is in the tail,
+and slot 5 has almost no tail. Any future change aimed at frame-time relief
+should be measured on the combat replay, not slot 5.
+
+**Still default off** pending play-testing: the mechanism is self-modifying
+code driven from a signal handler, and while it has been clean across every
+run so far (zero foreign faults, correct rendering, ~110-140 sites demoted) it
+deserves soak time before becoming the default.
 
 Kept default off (`debug.xemu.ldapr`, modes 0-5 including size bisects). The
 SIGBUS unblock in `qemu_thread_create()` stays regardless: it is an independent
