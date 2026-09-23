@@ -3646,6 +3646,10 @@ static void *qemu_main(void *opaque)
 {
 #if defined(__ANDROID__) || defined(ANDROID)
     pthread_setname_np(pthread_self(), "qemu_main");
+    /* Name every QEMU thread (vCPU, nv2a.pfifo, mcpx.apu...).  The overlay's
+     * per-thread CPU readout finds them by name in /proc/self/task; unnamed,
+     * they all inherit "qemu_main" and are indistinguishable. */
+    qemu_thread_naming(true);
     GMainContext *ctx = g_main_context_new();
     g_main_context_push_thread_default(ctx);
 #endif

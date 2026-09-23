@@ -21,6 +21,7 @@ fun OverlaySettingsScreen(
     val overlayShowFrametime by settingsViewModel.overlayShowFrametime.collectAsState()
     val overlayShowMemory    by settingsViewModel.overlayShowMemory.collectAsState()
     val overlayShowShaders   by settingsViewModel.overlayShowShaders.collectAsState()
+    val overlayShowUsage     by settingsViewModel.overlayShowUsage.collectAsState()
 
     SettingsSubScreenScaffold("Overlay", navController) { padding ->
         Column(
@@ -59,6 +60,12 @@ fun OverlaySettingsScreen(
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                     SettingsSwitchRow("FPS", checked = overlayShowFps) {
                         settingsViewModel.setOverlayShowFps(it)
+                    }
+                    HorizontalDivider()
+                    SettingsSwitchRow("CPU / GPU Usage",
+                        subtitle = "Emulator thread load per core, and Adreno GPU busy",
+                        checked = overlayShowUsage) {
+                        settingsViewModel.setOverlayShowUsage(it)
                     }
                     HorizontalDivider()
                     SettingsSwitchRow("Frame Time",

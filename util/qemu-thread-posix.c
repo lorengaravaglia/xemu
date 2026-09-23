@@ -362,7 +362,14 @@ static void *qemu_thread_start(void *args)
      * we're not going to fail if we can't set it.
      */
     if (name_threads && qemu_thread_args->name) {
-# if defined(CONFIG_PTHREAD_SETNAME_NP_W_TID)
+# if defined(__ANDROID__)
+        /* Linux caps thread names at 15 chars.  glibc truncates; bionic
+         * rejects the whole name with ERANGE, so "nv2a.pfifo_thread" would
+         * silently stay unnamed.  Truncate it ourselves. */
+        char short_name[16];
+        g_strlcpy(short_name, qemu_thread_args->name, sizeof(short_name));
+        pthread_setname_np(pthread_self(), short_name);
+# elif defined(CONFIG_PTHREAD_SETNAME_NP_W_TID)
         pthread_setname_np(pthread_self(), qemu_thread_args->name);
 # elif defined(CONFIG_PTHREAD_SETNAME_NP_WO_TID)
         pthread_setname_np(qemu_thread_args->name);

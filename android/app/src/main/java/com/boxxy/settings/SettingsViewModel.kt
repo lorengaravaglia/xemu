@@ -313,6 +313,9 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val _overlayShowShaders = MutableStateFlow(prefs.getBoolean("overlay_show_shaders", false))
     val overlayShowShaders: StateFlow<Boolean> = _overlayShowShaders
 
+    private val _overlayShowUsage = MutableStateFlow(prefs.getBoolean("overlay_show_usage", false))
+    val overlayShowUsage: StateFlow<Boolean> = _overlayShowUsage
+
     fun setOverlayPosition(value: String) {
         _overlayPosition.value = value
         prefs.edit().putString("overlay_position", value).apply()
@@ -332,6 +335,10 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun setOverlayShowShaders(value: Boolean) {
         _overlayShowShaders.value = value
         prefs.edit().putBoolean("overlay_show_shaders", value).apply()
+    }
+    fun setOverlayShowUsage(value: Boolean) {
+        _overlayShowUsage.value = value
+        prefs.edit().putBoolean("overlay_show_usage", value).apply()
     }
 
     /** Remove the installed custom driver and revert to the system Vulkan loader. */

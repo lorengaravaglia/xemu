@@ -156,6 +156,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private lateinit var pgraphLine: TextView
     private lateinit var memoryLine: TextView
     private lateinit var shadersLine: TextView
+    private lateinit var cpuLine: TextView
+    private lateinit var gpuLine: TextView
+    private val usageSampler = UsageSampler()
     private val fpsHandler = Handler(Looper.getMainLooper())
     private var lastFrameCount = 0
     private var lastFpsTime = 0L
@@ -191,6 +194,14 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             if (shadersLine.visibility == View.VISIBLE) {
                 val n = NativeInterface.getCompiledShaderCount()
                 shadersLine.text = "Shaders: $n"
+            }
+            if (cpuLine.visibility == View.VISIBLE) {
+                val t = usageSampler.sampleThreads()
+                cpuLine.text = "CPU: x86 ${t?.vcpuPct?.let { "$it%" } ?: "--"}" +
+                               " · NV2A ${t?.nv2aPct?.let { "$it%" } ?: "--"}"
+                val g = usageSampler.sampleGpu()
+                gpuLine.text = if (g == null) "GPU: n/a"
+                               else "GPU: ${g.busyPct}%" + (g.mhz?.let { " @ $it MHz" } ?: "")
             }
             lastFrameCount = count
             lastFpsTime = now
@@ -405,6 +416,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         pgraphLine    = overlayLine()
         memoryLine    = overlayLine()
         shadersLine   = overlayLine()
+        cpuLine       = overlayLine()
+        gpuLine       = overlayLine()
         frameTimeGraph = FrameTimeBarView(this).apply {
             visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(200.dp, 40.dp)
@@ -418,6 +431,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             background = rectDrawable(Color.argb(160, 20, 20, 20))
             setPadding(10.dp, 6.dp, 10.dp, 6.dp)
             addView(fpsLine)
+            addView(cpuLine)
+            addView(gpuLine)
             addView(frametimeLine)
             addView(frameTimeGraph)
             addView(pgraphLine)
@@ -504,6 +519,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (!userPaused) NativeInterface.resumeEmulation()
         inputManager.registerInputDeviceListener(this, null)
         lastFpsTime = 0L
+        usageSampler.reset()
         fpsHandler.post(fpsRunnable)
         rumbleHandler.post(rumbleRunnable)
         // Exported (not RECEIVER_NOT_EXPORTED) so `adb shell am broadcast` (uid=shell)
@@ -1450,6 +1466,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val showFrametime = mainPrefs.getBoolean("overlay_show_frametime", false)
         val showMemory    = mainPrefs.getBoolean("overlay_show_memory", false)
         val showShaders   = mainPrefs.getBoolean("overlay_show_shaders", false)
+        val showUsage     = mainPrefs.getBoolean("overlay_show_usage", false)
 
         fpsLine.visibility       = if (showFps)       View.VISIBLE else View.GONE
         frametimeLine.visibility = if (showFrametime) View.VISIBLE else View.GONE
@@ -1457,8 +1474,10 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         pgraphLine.visibility    = if (showFrametime) View.VISIBLE else View.GONE
         memoryLine.visibility    = if (showMemory)    View.VISIBLE else View.GONE
         shadersLine.visibility   = if (showShaders)   View.VISIBLE else View.GONE
+        cpuLine.visibility       = if (showUsage)     View.VISIBLE else View.GONE
+        gpuLine.visibility       = if (showUsage)     View.VISIBLE else View.GONE
 
-        val anyVisible = showFps || showFrametime || showMemory || showShaders
+        val anyVisible = showFps || showFrametime || showMemory || showShaders || showUsage
         overlayContainer.visibility = if (anyVisible) View.VISIBLE else View.GONE
 
         val position = mainPrefs.getString("overlay_position", "TOP_LEFT") ?: "TOP_LEFT"
