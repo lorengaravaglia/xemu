@@ -387,6 +387,7 @@ From the heavy-frames agent, not yet measured:
 | Return-address-stack prediction | our mispredict rate is 0.10%; X3 already solves it |
 | Hardware-assisted guest MMU (Captive) | requires EL2, unavailable to an Android app |
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
+| ADPF performance hint session | **MEASURED 2026-09-23, section AO:** wins 1 of 4 interleaved pairs; the vCPU core and NV2A cluster are already at max clock without it. Kept off, `debug.xemu.adpf`. |
 | Out-of-lining memory access as built | -23% code, -19.5% L1I, but +15% instructions cancels it — section AC |
 | Eliminating CC helper calls | 97% removed, 1.1% fewer host insns, ZERO cycles saved — section W |
 | Trusting absolute PMU figures from before section U | counters were multiplexed to 9-29%; understated 3-11x |
@@ -2738,3 +2739,42 @@ shader is seen *per install* rather than per session.
 
 Log line: `vk-cache:` under `xemu-stdout`, every 10 s while pipelines are
 being created, and on each save.
+
+---
+
+## AO. ADPF HINT SESSION: nothing to ask for on this device (2026-09-23)
+
+Built an `APerformanceHint` session (`android/app/src/main/cpp/xemu_adpf.c`,
+dlsym'd since minSdk is 28) over the vCPU and `nv2a.pfifo` threads, reporting
+each guest-frame interval against a pace-following target (16.7 or 33.3 ms).
+The platform accepts it: `dumpsys performance_hint` shows HAL support true,
+both tids, target 33.3 ms, `SessionAllowed: true`.
+
+**A/B, in one process, property toggled live.** Slot 2 + `combat2` replay,
+800 frames, order 0,1,1,0,0,1,1,0, 20 s cooldowns. Engagement checked per run:
+ADPF reports +0 on every off run, +799 on every on run.
+
+| pair | off: >50 ms | on: >50 ms |
+|---|---|---|
+| 1 | 12 | 21 |
+| 2 | 38 | 33 |
+| 3 | 27 | 35 |
+| 4 | 29 | 73 (22 over 66 ms) |
+
+On wins 1 of 4. The device climbed 57 -> 68 C across the batch; the 73 is
+most likely thermal and is **not** established as harm, but there is no
+benefit to set against it.
+
+**Mechanism: there is no clock left to request.** Sampled during the replay,
+12 samples each way: the X3 (cpu7, where the vCPU is pinned) sat at its
+3187 MHz maximum in every sample *without* ADPF, and the A715/A710 cluster
+running `nv2a.pfifo` at its 2803 MHz maximum. Identical with ADPF on. A
+pinned thread at ~100% utilisation already holds schedutil at the top;
+ADPF can only raise a floor that is already at the ceiling, and cannot lift a
+thermal cap.
+
+**Disposition:** kept, off, property-only (`setprop debug.xemu.adpf 1`) --
+no settings toggle, since it would promise nothing. The case where it could
+matter is a phone whose governor downclocks eagerly or does not pin; this
+makes that a one-line test. Side result: the tail on this replay is now
+12-38 frames over 50 ms at baseline (LDAPR on), against 82 in section AL.

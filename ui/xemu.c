@@ -1823,6 +1823,8 @@ static uint64_t s_bench_saved_vblank_ns;
 static unsigned long long s_bench_start_tb;
 static unsigned long long s_bench_start_insn;
 static uint64_t s_bench_start_cycles;
+extern unsigned long long xemu_adpf_reports, xemu_adpf_over_target;
+static unsigned long long s_bench_start_adpf, s_bench_start_adpf_over;
 
 /* Per-frame cost, bucketed against the engine's 33.3 ms budget.
  *
@@ -1975,6 +1977,8 @@ void xemu_android_benchmark_start(int frames)
                           &s_bench_start_elide);
     bench_open_cycles();
     s_bench_start_cycles = bench_read_cycles();
+    s_bench_start_adpf = xemu_adpf_reports;
+    s_bench_start_adpf_over = xemu_adpf_over_target;
     s_bench_prev_cycles = s_bench_start_cycles;
     memset(s_bench_frame_buckets, 0, sizeof(s_bench_frame_buckets));
     s_bench_worst_cycles = 0;
@@ -2728,6 +2732,14 @@ static void bench_tick(void)
           ms, s_bench_frames_total * 1000.0 / ms,
           cpu_ms * 100.0 / ms, insns, tbs);
 
+    /* Proves whether the hint session engaged for this run: 0 reports means
+     * it was off or refused, whatever the frame times say. */
+    ALOGI("bench: ADPF reports +%llu (over target +%llu) | ABSOLUTE "
+          "reports=%llu over=%llu",
+          xemu_adpf_reports - s_bench_start_adpf,
+          xemu_adpf_over_target - s_bench_start_adpf_over,
+          xemu_adpf_reports, xemu_adpf_over_target);
+
     {
         uint64_t cyc = bench_read_cycles() - s_bench_start_cycles;
 
@@ -2956,6 +2968,8 @@ static void gl_render_frame(struct xemu_console *scon)
              */
             {
                 int64_t gnow = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+                xemu_adpf_on_guest_frame();
 
                 if (s_last_guest_frame_ms != 0) {
                     int ft = (int)(gnow - s_last_guest_frame_ms);
