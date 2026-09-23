@@ -156,6 +156,17 @@ typedef struct ShaderModuleInfo {
     ShaderUniformLayout push_constants;
 } ShaderModuleInfo;
 
+/* Cumulative since process start; see glsl.c and draw.c. */
+typedef struct PGRAPHVkCacheStats {
+    uint64_t glsl_gen_us;
+    uint64_t spv_compiles, spv_compile_us;
+    uint64_t spv_disk_hits, spv_disk_us;
+    uint64_t pipelines, pipeline_us;
+    uint64_t pipeline_cache_saves, pipeline_cache_save_us;
+    uint64_t pipeline_cache_bytes;
+} PGRAPHVkCacheStats;
+extern PGRAPHVkCacheStats pgraph_vk_cache_stats;
+
 typedef struct ShaderModuleCacheKey {
     VkShaderStageFlagBits kind;
     union {
@@ -376,6 +387,8 @@ typedef struct PGRAPHVkState {
 
     Lru pipeline_cache;
     VkPipelineCache vk_pipeline_cache;
+    bool pipeline_cache_dirty;
+    int64_t pipeline_cache_last_new_us;
     PipelineBinding *pipeline_cache_entries;
     PipelineBinding *pipeline_binding;
     bool pipeline_binding_changed;
@@ -594,6 +607,7 @@ typedef enum FinishReason {
 
 // draw.c
 void pgraph_vk_init_pipelines(PGRAPHState *pg);
+void pgraph_vk_pipeline_cache_tick(PGRAPHState *pg);
 void pgraph_vk_finalize_pipelines(PGRAPHState *pg);
 void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter);
 void pgraph_vk_draw_begin(NV2AState *d);

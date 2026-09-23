@@ -2694,3 +2694,47 @@ expected value:
    fetch and ordering -- and might compound.
 4. Hardware TSO mode -- Apple Silicon only, nothing to do on Snapdragon.
 
+
+---
+
+## AN. SHADER AND PIPELINE CACHES PERSISTED (2026-09-22)
+
+The Vulkan renderer kept both of its caches in memory only: SPIR-V in an LRU,
+and a `VkPipelineCache` created empty every launch and never saved. The GL
+renderer's disk cache did not carry over when the port moved to Vulkan, so
+every session paid every first-seen shader again.
+
+**Built:** SPIR-V keyed on the generated GLSL text (`vk/glsl.c`), so a
+generator change can never serve stale code; the full text is compared, so a
+hash collision is a miss. Pipeline cache loaded at init if vendor, device and
+`pipelineCacheUUID` match (a Turnip build starts clean), saved from the
+per-frame sync once new pipelines have been quiet for 3 s. The snapshot is
+taken on the pfifo thread (<1 ms) and written on a detached thread. Only a
+pipeline creation over 2 ms dirties the cache, so warm sessions never re-save.
+
+**Measured:** cold (both caches deleted) vs warm, interleaved, same process
+sequence, slot 5, 300-frame benchmark started 1 s after the state load so
+first-seen shaders fall inside the window. Absolute counters from each run:
+
+| | cold (x3) | warm (x3, fully cached) |
+|---|---|---|
+| SPIR-V compiled | 94, 75, 94 — 350-440 ms | **0** (96 disk hits, 4 ms) |
+| pipelines created | 76-90 — **1.5-1.8 s** | 90 in **37 ms** |
+| GLSL generation | 14-17 ms | 13 ms |
+| worst frame | **2105-2241 ms** (one 166) | **63-65 ms** |
+| frames > 66 ms | 4-6 | **0** |
+| frames >= 80 ms | 3-4 | **0** |
+| mean frame time | 34.0-34.3 ms | 33.3-33.4 ms |
+
+**The driver is the bigger half.** Pipeline creation — Adreno compiling SPIR-V
+to ISA — costs 4x what glslang does, so the `VkPipelineCache` matters more than
+the SPIR-V cache. GLSL generation is negligible, which is what made keying on
+the text free.
+
+This is a stutter fix, not a throughput one: frames > 50 ms are unchanged
+(they are the scene's own heavy frames, section S), and the mean moves only
+because the multi-second compile stall is gone. It affects the first time a
+shader is seen *per install* rather than per session.
+
+Log line: `vk-cache:` under `xemu-stdout`, every 10 s while pipelines are
+being created, and on each save.

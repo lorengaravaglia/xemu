@@ -19,6 +19,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
+#include "qemu/atomic.h"
+#include "ui/xemu-settings.h"
 #include "renderer.h"
 #include <math.h>
 
@@ -121,19 +123,185 @@ static bool pipeline_cache_entry_compare(Lru *lru, LruNode *node,
     return memcmp(&snode->key, key, sizeof(PipelineKey));
 }
 
+/*
+ * VkPipelineCache persistence.
+ *
+ * The driver compiles SPIR-V to GPU ISA at pipeline creation; the pipeline
+ * cache holds those results.  It used to start empty every launch.  Loaded
+ * here, saved from pgraph_vk_pipeline_cache_tick() once new pipelines settle,
+ * because the Android build leaves via _exit() and never reaches finalize.
+ *
+ * The blob is only offered back to the same driver: the header's vendor,
+ * device and pipelineCacheUUID must match, so switching to a Turnip build (a
+ * different UUID) starts clean instead of handing one driver another's data.
+ */
+#define PIPELINE_CACHE_SETTLE_US (3 * G_USEC_PER_SEC)
+
+static char *pipeline_cache_path(void)
+{
+    return g_strdup_printf("%s/vk_pipeline_cache.bin",
+                           xemu_settings_get_base_path());
+}
+
+static bool pipeline_cache_header_matches(PGRAPHVkState *r, const char *buf,
+                                          gsize len)
+{
+    VkPipelineCacheHeaderVersionOne h;
+    if (len < sizeof(h)) {
+        return false;
+    }
+    memcpy(&h, buf, sizeof(h));
+    return h.headerSize >= sizeof(h) &&
+           h.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+           h.vendorID == r->device_props.vendorID &&
+           h.deviceID == r->device_props.deviceID &&
+           !memcmp(h.pipelineCacheUUID, r->device_props.pipelineCacheUUID,
+                   VK_UUID_SIZE);
+}
+
+typedef struct PipelineCacheWrite {
+    void *data;
+    size_t size;
+} PipelineCacheWrite;
+
+/* The ~1 MB file write runs on its own thread; only the snapshot is taken on
+ * the pfifo thread.  A second save cannot overlap the first: saves are
+ * seconds apart and each is one write + rename. */
+static void *pipeline_cache_write_thread(void *opaque)
+{
+    PipelineCacheWrite *w = opaque;
+    g_autofree char *path = pipeline_cache_path();
+    g_file_set_contents(path, w->data, w->size, NULL);
+    g_free(w->data);
+    g_free(w);
+    return NULL;
+}
+
+static void save_pipeline_cache(PGRAPHVkState *r)
+{
+    int64_t t0 = g_get_monotonic_time();
+    size_t size = 0;
+    if (vkGetPipelineCacheData(r->device, r->vk_pipeline_cache, &size, NULL) !=
+            VK_SUCCESS || size == 0) {
+        return;
+    }
+    PipelineCacheWrite *w = g_new0(PipelineCacheWrite, 1);
+    w->data = g_malloc(size);
+    if (vkGetPipelineCacheData(r->device, r->vk_pipeline_cache, &size,
+                               w->data) != VK_SUCCESS) {
+        g_free(w->data);
+        g_free(w);
+        return;
+    }
+    w->size = size;
+    QemuThread thread;
+    qemu_thread_create(&thread, "vk.pcache_write", pipeline_cache_write_thread,
+                       w, QEMU_THREAD_DETACHED);
+
+    qatomic_inc(&pgraph_vk_cache_stats.pipeline_cache_saves);
+    qatomic_add(&pgraph_vk_cache_stats.pipeline_cache_save_us,
+                g_get_monotonic_time() - t0);
+    qatomic_set(&pgraph_vk_cache_stats.pipeline_cache_bytes, size);
+}
+
+static void log_cache_stats(void)
+{
+    PGRAPHVkCacheStats *s = &pgraph_vk_cache_stats;
+    fprintf(stderr,
+            "vk-cache: glsl gen %" PRIu64 " ms | spv compiled %" PRIu64 " (%" PRIu64 " ms)"
+            " disk-hit %" PRIu64 " (%" PRIu64 " ms)"
+            " | pipelines %" PRIu64 " (%" PRIu64 " ms)"
+            " | pcache saves %" PRIu64 " (%" PRIu64 " ms, %" PRIu64 " KB)\n",
+            s->glsl_gen_us / 1000,
+            s->spv_compiles, s->spv_compile_us / 1000,
+            s->spv_disk_hits, s->spv_disk_us / 1000,
+            s->pipelines, s->pipeline_us / 1000,
+            s->pipeline_cache_saves, s->pipeline_cache_save_us / 1000,
+            s->pipeline_cache_bytes / 1024);
+}
+
+/* Called once per frame on the pfifo thread, after the display is released. */
+void pgraph_vk_pipeline_cache_tick(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    static uint64_t logged_pipelines;
+    static int64_t last_log_us;
+    int64_t now = g_get_monotonic_time();
+
+    /* Stats line whenever pipelines were created, at most every 10 s. */
+    uint64_t pipelines = qatomic_read(&pgraph_vk_cache_stats.pipelines);
+    if (pipelines != logged_pipelines &&
+        now - last_log_us >= 10 * G_USEC_PER_SEC) {
+        logged_pipelines = pipelines;
+        last_log_us = now;
+        log_cache_stats();
+    }
+
+    /* Save once a burst of new pipelines has settled, not during it. */
+    if (!r->pipeline_cache_dirty ||
+        now - r->pipeline_cache_last_new_us < PIPELINE_CACHE_SETTLE_US) {
+        return;
+    }
+    r->pipeline_cache_dirty = false;
+    if (g_config.perf.cache_shaders) {
+        save_pipeline_cache(r);
+        log_cache_stats();
+    }
+}
+
+/*
+ * A pipeline served from the cache takes well under a millisecond; one the
+ * driver had to compile takes ~20 ms (measured: 90 in 1789 ms cold, 76 in
+ * 32 ms warm).  Only the slow ones add anything worth saving, so only they
+ * dirty the cache -- otherwise every warm session re-saves an identical blob.
+ */
+#define PIPELINE_COMPILED_THRESHOLD_US 2000
+
+static void pipeline_created(PGRAPHVkState *r, int64_t start_us)
+{
+    int64_t now = g_get_monotonic_time();
+    qatomic_inc(&pgraph_vk_cache_stats.pipelines);
+    qatomic_add(&pgraph_vk_cache_stats.pipeline_us, now - start_us);
+    if (now - start_us >= PIPELINE_COMPILED_THRESHOLD_US) {
+        r->pipeline_cache_dirty = true;
+        r->pipeline_cache_last_new_us = now;
+    }
+}
+
 static void init_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    g_autofree char *data = NULL;
+    gsize size = 0;
+    if (g_config.perf.cache_shaders) {
+        g_autofree char *path = pipeline_cache_path();
+        if (g_file_get_contents(path, &data, &size, NULL) &&
+            !pipeline_cache_header_matches(r, data, size)) {
+            fprintf(stderr, "vk-cache: pipeline cache is from another "
+                            "driver, starting empty\n");
+            size = 0;
+        }
+    }
+
     VkPipelineCacheCreateInfo cache_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
         .flags = 0,
-        .initialDataSize = 0,
-        .pInitialData = NULL,
+        .initialDataSize = size,
+        .pInitialData = size ? data : NULL,
         .pNext = NULL,
     };
-    VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
-                                   &r->vk_pipeline_cache));
+    if (vkCreatePipelineCache(r->device, &cache_info, NULL,
+                              &r->vk_pipeline_cache) != VK_SUCCESS) {
+        /* The driver is allowed to refuse a blob; fall back to empty. */
+        cache_info.initialDataSize = 0;
+        cache_info.pInitialData = NULL;
+        VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
+                                       &r->vk_pipeline_cache));
+        size = 0;
+    }
+    fprintf(stderr, "vk-cache: pipeline cache loaded %zu KB\n",
+            (size_t)size / 1024);
 
     const size_t pipeline_cache_size = 2048;
     lru_init(&r->pipeline_cache);
@@ -597,8 +765,10 @@ static void create_clear_pipeline(PGRAPHState *pg)
     };
 
     VkPipeline pipeline;
+    int64_t create_start_us = g_get_monotonic_time();
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_info, NULL, &pipeline));
+    pipeline_created(r, create_start_us);
 
     snode->pipeline = pipeline;
     snode->layout = layout;
@@ -1005,8 +1175,10 @@ static void create_pipeline(PGRAPHState *pg)
         .basePipelineHandle = VK_NULL_HANDLE,
     };
     VkPipeline pipeline;
+    int64_t create_start_us = g_get_monotonic_time();
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_create_info, NULL, &pipeline));
+    pipeline_created(r, create_start_us);
 
     snode->pipeline = pipeline;
     snode->layout = layout;

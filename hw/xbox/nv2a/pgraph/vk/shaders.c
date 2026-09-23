@@ -19,6 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
+#include "qemu/atomic.h"
 #include "qemu/mstring.h"
 #include "renderer.h"
 
@@ -328,6 +329,7 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
     memcpy(&module->key, key, sizeof(ShaderModuleCacheKey));
 
     MString *code;
+    int64_t gen_start_us = g_get_monotonic_time();
 
     switch (module->key.kind) {
     case VK_SHADER_STAGE_VERTEX_BIT:
@@ -346,6 +348,9 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
         assert(!"Invalid shader module kind");
         code = NULL;
     }
+
+    qatomic_add(&pgraph_vk_cache_stats.glsl_gen_us,
+                g_get_monotonic_time() - gen_start_us);
 
     module->module_info = pgraph_vk_create_shader_module_from_glsl(
         r, module->key.kind, mstring_get_str(code));

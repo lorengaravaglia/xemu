@@ -17,6 +17,9 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
+#include "qemu/atomic.h"
+#include "qemu/fast-hash.h"
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 
@@ -364,14 +367,127 @@ static glslang_stage_t vk_shader_stage_to_glslang_stage(VkShaderStageFlagBits st
     }
 }
 
+PGRAPHVkCacheStats pgraph_vk_cache_stats;
+
+/*
+ * On-disk SPIR-V cache.
+ *
+ * Keyed by the generated GLSL text, not by the NV2A shader state: GLSL
+ * generation is cheap and glslang is what costs, and keying on the text means
+ * a change to the generators (psh.c, vsh.c...) can never serve stale SPIR-V --
+ * the new text simply misses.  The full GLSL is stored and compared, so a hash
+ * collision is a miss, never a wrong shader.
+ *
+ * File: header, GLSL bytes, SPIR-V words.  One file per shader under
+ * <base>/shaders_vk/, written atomically (tmp + rename) so a kill mid-write
+ * leaves either the old state or nothing.
+ */
+#define SPV_CACHE_MAGIC   0x53564b58u  /* "XKVS" */
+#define SPV_CACHE_VERSION 1u
+
+typedef struct SpvCacheHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t stage;
+    uint32_t glsl_len;
+    uint32_t spv_len;
+} SpvCacheHeader;
+
+static bool spv_disk_cache_enabled(void)
+{
+    /* Debug builds embed source and skip the optimiser; do not mix them. */
+    return g_config.perf.cache_shaders &&
+           !g_config.display.vulkan.debug_shaders;
+}
+
+static char *spv_cache_path(VkShaderStageFlagBits stage, const char *glsl,
+                            size_t glsl_len)
+{
+    uint64_t hash = fast_hash((const uint8_t *)glsl, glsl_len) ^ stage;
+    return g_strdup_printf("%s/shaders_vk/%016" PRIx64 ".spv",
+                           xemu_settings_get_base_path(), hash);
+}
+
+static GByteArray *spv_cache_load(VkShaderStageFlagBits stage,
+                                  const char *glsl, size_t glsl_len)
+{
+    g_autofree char *path = spv_cache_path(stage, glsl, glsl_len);
+    g_autofree char *buf = NULL;
+    gsize len = 0;
+
+    if (!g_file_get_contents(path, &buf, &len, NULL)) {
+        return NULL;
+    }
+
+    SpvCacheHeader h;
+    if (len < sizeof(h)) {
+        return NULL;
+    }
+    memcpy(&h, buf, sizeof(h));
+    if (h.magic != SPV_CACHE_MAGIC || h.version != SPV_CACHE_VERSION ||
+        h.stage != stage || h.glsl_len != glsl_len || h.spv_len < 4 ||
+        h.spv_len % 4 || len != sizeof(h) + (gsize)h.glsl_len + h.spv_len ||
+        memcmp(buf + sizeof(h), glsl, glsl_len)) {
+        return NULL;
+    }
+
+    const guint8 *spv = (const guint8 *)buf + sizeof(h) + h.glsl_len;
+    uint32_t spv_magic;
+    memcpy(&spv_magic, spv, 4);
+    if (spv_magic != 0x07230203) {
+        return NULL;
+    }
+    return g_byte_array_append(g_byte_array_sized_new(h.spv_len), spv,
+                               h.spv_len);
+}
+
+static void spv_cache_store(VkShaderStageFlagBits stage, const char *glsl,
+                            size_t glsl_len, const GByteArray *spv)
+{
+    g_autofree char *path = spv_cache_path(stage, glsl, glsl_len);
+    g_autofree char *dir = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0755);
+
+    SpvCacheHeader h = {
+        .magic = SPV_CACHE_MAGIC,
+        .version = SPV_CACHE_VERSION,
+        .stage = stage,
+        .glsl_len = glsl_len,
+        .spv_len = spv->len,
+    };
+    gsize len = sizeof(h) + glsl_len + spv->len;
+    g_autofree char *buf = g_malloc(len);
+    memcpy(buf, &h, sizeof(h));
+    memcpy(buf + sizeof(h), glsl, glsl_len);
+    memcpy(buf + sizeof(h) + glsl_len, spv->data, spv->len);
+    g_file_set_contents(path, buf, len, NULL);
+}
+
 ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     PGRAPHVkState *r, VkShaderStageFlagBits stage, const char *glsl)
 {
     ShaderModuleInfo *info = g_malloc0(sizeof(*info));
     info->refcnt = 0;
     info->glsl = strdup(glsl);
-    info->spirv = pgraph_vk_compile_glsl_to_spv(
-        vk_shader_stage_to_glslang_stage(stage), glsl);
+
+    size_t glsl_len = strlen(glsl);
+    bool use_disk = spv_disk_cache_enabled();
+    int64_t t0 = g_get_monotonic_time();
+    info->spirv = use_disk ? spv_cache_load(stage, glsl, glsl_len) : NULL;
+    int64_t t1 = g_get_monotonic_time();
+    if (info->spirv) {
+        qatomic_inc(&pgraph_vk_cache_stats.spv_disk_hits);
+        qatomic_add(&pgraph_vk_cache_stats.spv_disk_us, t1 - t0);
+    } else {
+        info->spirv = pgraph_vk_compile_glsl_to_spv(
+            vk_shader_stage_to_glslang_stage(stage), glsl);
+        int64_t t2 = g_get_monotonic_time();
+        qatomic_inc(&pgraph_vk_cache_stats.spv_compiles);
+        qatomic_add(&pgraph_vk_cache_stats.spv_compile_us, t2 - t1);
+        if (use_disk) {
+            spv_cache_store(stage, glsl, glsl_len, info->spirv);
+        }
+    }
     info->module = pgraph_vk_create_shader_module_from_spv(r, info->spirv);
     init_layout_from_spv(info);
     return info;

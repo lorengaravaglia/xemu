@@ -111,6 +111,9 @@ static void pgraph_vk_sync(NV2AState *d)
 
     qatomic_set(&d->pgraph.sync_pending, false);
     qemu_event_set(&d->pgraph.sync_complete);
+
+    /* After the event: a cache save must never hold up the display. */
+    pgraph_vk_pipeline_cache_tick(pg);
 }
 
 static void pgraph_vk_process_pending(NV2AState *d)

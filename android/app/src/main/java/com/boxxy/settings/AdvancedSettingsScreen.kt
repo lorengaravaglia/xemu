@@ -20,15 +20,21 @@ fun AdvancedSettingsScreen(
     val accurateMemOrdering by settingsViewModel.accurateMemOrdering.collectAsState()
     val fastOrderedLoads by settingsViewModel.fastOrderedLoads.collectAsState()
 
-    // Compute shader cache stats on composition
-    val shaderDir = remember { File(context.filesDir, "shaders") }
+    // Compute shader cache stats on composition.  shaders/ is the GL
+    // renderer's; the Vulkan renderer keeps SPIR-V in shaders_vk/ and the
+    // driver's compiled pipelines in vk_pipeline_cache.bin.
+    val shaderDirs = remember {
+        listOf("shaders", "shaders_vk").map { File(context.filesDir, it) }
+    }
+    val pipelineCache = remember { File(context.filesDir, "vk_pipeline_cache.bin") }
     var shaderCount by remember { mutableIntStateOf(0) }
     var shaderSizeKb by remember { mutableLongStateOf(0L) }
     var cleared by remember { mutableStateOf(false) }
 
     LaunchedEffect(cleared) {
-        shaderCount = shaderDir.listFiles()?.size ?: 0
-        shaderSizeKb = shaderDir.walkTopDown().filter { it.isFile }.sumOf { it.length() } / 1024
+        val files = shaderDirs.flatMap { d -> d.walkTopDown().filter { it.isFile }.toList() }
+        shaderCount = files.size
+        shaderSizeKb = (files.sumOf { it.length() } + pipelineCache.length()) / 1024
     }
 
     SettingsSubScreenScaffold("Advanced", navController) { padding ->
@@ -91,8 +97,8 @@ fun AdvancedSettingsScreen(
                     )
                     OutlinedButton(
                         onClick = {
-                            shaderDir.deleteRecursively()
-                            shaderDir.mkdirs()
+                            shaderDirs.forEach { it.deleteRecursively() }
+                            pipelineCache.delete()
                             cleared = !cleared
                         },
                         enabled = shaderCount > 0,
