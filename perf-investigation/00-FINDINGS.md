@@ -2778,3 +2778,28 @@ no settings toggle, since it would promise nothing. The case where it could
 matter is a phone whose governor downclocks eagerly or does not pin; this
 makes that a one-line test. Side result: the tail on this replay is now
 12-38 frames over 50 ms at baseline (LDAPR on), against 82 in section AL.
+
+---
+
+## AP. A REPEATABLE TAIL BENCHMARK: slot 7 + walk_fps_dip (2026-09-23)
+
+Saved by the user at a point where the frame rate reliably dips: walking into
+a health pack triggers a full-screen visual effect. Replayed with the
+recording `walk_fps_dip`, LDAPR on, 400 frames, 25 s cooldowns:
+
+| run | frames > 50 ms | 45-50 ms | 50-60 ms | mean |
+|---|---|---|---|---|
+| 1 | 16 | 10 | 11 | 34.2 ms |
+| 2 | 13 | 9 | 9 | 34.1 ms |
+| 3 | 15 | 10 | 12 | 34.2 ms |
+
+Spread +/-1.5 frames, against 12/26/71 for slot 5 + synthetic input (section
+AM). This is the first state that meets section AM's requirement, and it
+unblocks the tail retests (out-of-lining, LDAPR follow-ups, flcr cost).
+
+**Representativeness caveat, from the user:** the load is a full-screen effect,
+which likely stresses NV2A fill and whatever guest code drives the effect, not
+the AI/physics mix of a firefight. Real combat dips only 1-2 fps,
+intermittently, and could not be captured repeatably. So a change that helps
+here should be confirmed in live play before it is called a combat win --
+the same two-source standard section AL used.
