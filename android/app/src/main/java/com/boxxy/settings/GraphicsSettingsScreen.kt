@@ -26,6 +26,13 @@ fun GraphicsSettingsScreen(
     val aspectRatio   by settingsViewModel.aspectRatio.collectAsState()
     val surfaceScale  by settingsViewModel.surfaceScale.collectAsState()
     val filterNearest by settingsViewModel.filterNearest.collectAsState()
+    val dualScreen    by settingsViewModel.dualScreen.collectAsState()
+    /* Only offered where there is a second screen to use. */
+    val hasSecondScreen = remember {
+        context.getSystemService(android.hardware.display.DisplayManager::class.java)
+            .getDisplays(android.hardware.display.DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+            .any { it.displayId != android.view.Display.DEFAULT_DISPLAY }
+    }
 
     val driverPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -50,6 +57,24 @@ fun GraphicsSettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Spacer(Modifier.height(0.dp))
+
+            if (hasSecondScreen) {
+                SettingsSectionLabel("Dual Screen")
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        SettingsSwitchRow(
+                            label = "Use the second screen",
+                            subtitle = "While a game runs, the lower screen shows " +
+                                       "pause, save and load, screenshots and stats. " +
+                                       "Touching it never takes the controller from " +
+                                       "the game; hand the controller over from the " +
+                                       "panel when you want to use it there. When " +
+                                       "off, the lower screen stays yours.",
+                            checked = dualScreen,
+                        ) { settingsViewModel.setDualScreen(it) }
+                    }
+                }
+            }
 
             // Aspect Ratio
             SettingsSectionLabel("Aspect Ratio")

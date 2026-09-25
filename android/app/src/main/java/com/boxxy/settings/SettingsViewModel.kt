@@ -131,6 +131,14 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val _filterNearest = MutableStateFlow(prefs.getBoolean("filter_nearest", false))
     val filterNearest: StateFlow<Boolean> = _filterNearest
 
+    private val _dualScreen = MutableStateFlow(prefs.getBoolean("dual_screen", false))
+    val dualScreen: StateFlow<Boolean> = _dualScreen
+
+    fun setDualScreen(value: Boolean) {
+        _dualScreen.value = value
+        prefs.edit().putBoolean("dual_screen", value).apply()
+    }
+
     fun setAspectRatio(value: Int) {
         _aspectRatio.value = value
         prefs.edit().putInt("aspect_ratio", value).apply()

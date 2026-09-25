@@ -14,6 +14,7 @@ import android.graphics.Path
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
+import android.hardware.display.DisplayManager
 import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Bundle
@@ -99,6 +100,20 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private val lateSentKeycodes = mutableSetOf<Int>()         // pressed after the combo window
     private var quickSaveSlot = 1                              // 1–8, cycled via hotkey
     private var userPaused = false                             // user explicitly paused in-game
+
+    // ── Dual-screen mode (see DualScreen.kt) ──────────────────────────────────
+    private val panelState = BottomPanelState()
+    private var bottomScreen: BottomScreenPresentation? = null
+    /** Pause state to restore when the controller goes back to the game. */
+    private var pausedBeforePanel = false
+    private var panelHatX = 0f
+    private var panelHatY = 0f
+    private val displayManager by lazy { getSystemService(DisplayManager::class.java) }
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = refreshDualScreen()
+        override fun onDisplayRemoved(displayId: Int) = refreshDualScreen()
+        override fun onDisplayChanged(displayId: Int) {}
+    }
 
     // Triggers InputRecorder playback from `adb shell am broadcast` for automated
     // performance testing — see InputRecorder.kt.
@@ -195,13 +210,25 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 val n = NativeInterface.getCompiledShaderCount()
                 shadersLine.text = "Shaders: $n"
             }
+            /* Sampled once per tick and shared: the sampler works on deltas,
+             * so a second call in the same tick would read a ~0 ms window. */
+            val wantUsage = cpuLine.visibility == View.VISIBLE || bottomScreen != null
+            val t = if (wantUsage) usageSampler.sampleThreads() else null
+            val g = if (wantUsage) usageSampler.sampleGpu() else null
             if (cpuLine.visibility == View.VISIBLE) {
-                val t = usageSampler.sampleThreads()
                 cpuLine.text = "CPU: x86 ${t?.vcpuPct?.let { "$it%" } ?: "--"}" +
                                " · NV2A ${t?.nv2aPct?.let { "$it%" } ?: "--"}"
-                val g = usageSampler.sampleGpu()
                 gpuLine.text = if (g == null) "GPU: n/a"
                                else "GPU: ${g.busyPct}%" + (g.mhz?.let { " @ $it MHz" } ?: "")
+            }
+            if (bottomScreen != null && lastFpsTime != 0L && elapsed > 0) {
+                val fps = (count - lastFrameCount) * 1000f / elapsed
+                panelState.stats.value = buildString {
+                    append("%.1f fps".format(fps))
+                    t?.vcpuPct?.let { append("  ·  x86 $it%") }
+                    t?.nv2aPct?.let { append("  ·  NV2A $it%") }
+                    g?.let { append("  ·  GPU ${it.busyPct}%") }
+                }
             }
             lastFrameCount = count
             lastFpsTime = now
@@ -461,6 +488,19 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             Gravity.TOP or Gravity.END
         ).apply { topMargin = 16.dp; rightMargin = 16.dp })
 
+        /*
+         * Back with nothing open asks before leaving.  Without this the
+         * default finish()ed the activity mid-game: no confirmation, no
+         * flush-and-exit (exitToLibrary), and the emulation process left
+         * running with no window -- where QEMU cannot start another game.
+         * Registered first so the overlay callback, added after, wins while
+         * an overlay is open.
+         */
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (!isExiting) confirmExit()
+            }
+        })
         onBackPressedDispatcher.addCallback(this, overlayBackCallback)
 
         // ── Transient message surface (replaces Toast) ────────────────────────
@@ -545,6 +585,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         applyGraphicsSettings()
         applyAudioSettings()
         updateOverlayVisibility()
+        displayManager.registerDisplayListener(displayListener, null)
+        refreshDualScreen()
     }
 
     override fun onPause() {
@@ -555,6 +597,15 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         vibrator.cancel()
         NativeInterface.pauseEmulation()  // idempotent: safe even if already user-paused
         inputManager.unregisterInputDeviceListener(this)
+        displayManager.unregisterDisplayListener(displayListener)
+        /* The lower screen goes back to Android while we are not in front.
+         * Hand the controller back first, so onResume restores the pause
+         * state the player chose rather than the panel's. */
+        if (panelState.controllerHere.value) {
+            panelState.controllerHere.value = false
+            setUserPaused(pausedBeforePanel)
+        }
+        hideDualScreen()
     }
 
     override fun onDestroy() {
@@ -595,6 +646,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val isGamepad = (src and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD) ||
                         (src and InputDevice.SOURCE_DPAD == InputDevice.SOURCE_DPAD)
         if (!isGamepad) return super.dispatchKeyEvent(event)
+
+        if (panelState.controllerHere.value && bottomScreen != null) {
+            handlePanelKey(event)
+            return true
+        }
 
         val xboxBtn = mapping.getXboxButton(event.keyCode) ?: return super.dispatchKeyEvent(event)
         val keycode = event.keyCode
@@ -709,6 +765,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         }
         if (event.action != MotionEvent.ACTION_MOVE) return super.dispatchGenericMotionEvent(event)
 
+        if (panelState.controllerHere.value && bottomScreen != null) {
+            handlePanelHat(event)
+            return true
+        }
+
         // Standard analog axes.
         // xemu's internal convention: positive Y = up (matches keyboard mapping).
         // Android reports AXIS_Y / AXIS_RZ as negative when pushed up, so negate Y axes.
@@ -755,6 +816,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
      */
     private fun showMessage(text: String, isError: Boolean = false) {
         runOnUiThread {
+            panelState.status.value = text
+            panelState.statusIsError.value = isError
             messageHide?.let { messageView.removeCallbacks(it) }
             messageText.value = text
             messageIsError.value = isError
@@ -1255,7 +1318,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             ControllerMapping.HotkeyFunction.SLOT_PREV     -> changeQuickSaveSlot(-1)
             ControllerMapping.HotkeyFunction.SCREENSHOT    -> takeScreenshot()
             ControllerMapping.HotkeyFunction.TOGGLE_PAUSE  -> toggleUserPause()
-            ControllerMapping.HotkeyFunction.OPEN_MENU     -> showMenuPopup(menuBtn)
+            /* With the panel up, the menu hotkey hands it the controller; the
+             * full menu is one tile away there ("More…"). */
+            ControllerMapping.HotkeyFunction.OPEN_MENU     ->
+                if (bottomScreen != null) setPanelController(true)
+                else showMenuPopup(menuBtn)
             ControllerMapping.HotkeyFunction.CYCLE_OVERLAY -> cycleOverlayMode()
             ControllerMapping.HotkeyFunction.TOGGLE_FPS    -> toggleFpsOverlay()
         }
@@ -1327,19 +1394,206 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     private fun changeQuickSaveSlot(delta: Int) {
         quickSaveSlot = ((quickSaveSlot - 1 + delta + 8) % 8) + 1
+        panelState.quickSlot.intValue = quickSaveSlot
         showMessage("Quick-save slot: $quickSaveSlot")
     }
 
     private fun toggleUserPause() {
-        if (userPaused) {
-            NativeInterface.resumeEmulation()
-            userPaused = false
-            showMessage("Resumed")
-        } else {
-            NativeInterface.pauseEmulation()
-            userPaused = true
-            showMessage("Paused — press hotkey again to resume")
+        setUserPaused(!userPaused)
+        showMessage(if (userPaused) "Paused" else "Resumed")
+    }
+
+    private fun setUserPaused(paused: Boolean) {
+        if (paused == userPaused) return
+        if (paused) NativeInterface.pauseEmulation() else NativeInterface.resumeEmulation()
+        userPaused = paused
+        panelState.paused.value = paused
+    }
+
+    // ── Dual-screen mode ──────────────────────────────────────────────────────
+
+    /** The lower screen of a dual-screen device, if there is one. */
+    private fun companionDisplay(): Display? =
+        displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+            .firstOrNull { it.displayId != Display.DEFAULT_DISPLAY }
+
+    /** Show or hide the panel to match the setting and the displays present. */
+    private fun refreshDualScreen() {
+        val target = if (mainPrefs.getBoolean("dual_screen", false)) companionDisplay() else null
+        val current = bottomScreen
+        if (current != null && current.display.displayId != target?.displayId) {
+            hideDualScreen()
         }
+        if (target != null && bottomScreen == null) {
+            panelState.quickSlot.intValue = quickSaveSlot
+            panelState.paused.value = userPaused
+            val panel = BottomScreenPresentation(this, target, panelState, panelActions)
+            try {
+                panel.show()
+                bottomScreen = panel
+            } catch (e: WindowManager.InvalidDisplayException) {
+                Log.w("xemu-android", "dual screen: display ${target.displayId} went away", e)
+            }
+        }
+    }
+
+    private fun hideDualScreen() {
+        if (panelState.controllerHere.value) setPanelController(false)
+        bottomScreen?.dismiss()
+        bottomScreen = null
+        panelState.screen.value = BottomPanelState.Screen.HOME
+    }
+
+    /**
+     * Hand the controller to the panel, or back to the game.
+     *
+     * Taking it pauses the game -- nobody is driving it -- and returning it
+     * restores whatever pause state the player had before.  Everything held is
+     * released first, or a button down at the moment of switching would stay
+     * down in the guest until it was pressed again.
+     */
+    private fun setPanelController(here: Boolean) {
+        if (here == panelState.controllerHere.value || (here && bottomScreen == null)) return
+        releaseGuestInput()
+        if (here) {
+            pausedBeforePanel = userPaused
+            setUserPaused(true)
+            panelState.focus.intValue = 0
+        } else {
+            setUserPaused(pausedBeforePanel)
+        }
+        panelHatX = 0f
+        panelHatY = 0f
+        panelState.controllerHere.value = here
+    }
+
+    private fun releaseGuestInput() {
+        comboPendingDowns.values.forEach { comboHandler.removeCallbacks(it) }
+        comboPendingDowns.clear()
+        (heldGamepadKeycodes + lateSentKeycodes).forEach { kc ->
+            mapping.getXboxButton(kc)?.let { InputRecorder.sendButtonUp(it.mask) }
+        }
+        heldGamepadKeycodes.clear()
+        pendingGamepadKeycodes.clear()
+        suppressedGamepadKeycodes.clear()
+        lateSentKeycodes.clear()
+        ControllerMapping.DEFAULT_AXES.values.distinct().forEach {
+            InputRecorder.sendAxis(it.index, 0)
+        }
+        listOf(NativeInterface.BUTTON_DPAD_LEFT, NativeInterface.BUTTON_DPAD_RIGHT,
+               NativeInterface.BUTTON_DPAD_UP, NativeInterface.BUTTON_DPAD_DOWN)
+            .forEach { InputRecorder.sendButtonUp(it) }
+        lastHatX = 0f
+        lastHatY = 0f
+    }
+
+    /** Controller navigation while the panel has it.  Raw Android keycodes,
+     *  not the Xbox mapping: A confirms and B goes back, as everywhere else. */
+    private fun handlePanelKey(event: KeyEvent) {
+        if (event.action != KeyEvent.ACTION_DOWN) return
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT  -> panelState.moveFocus(-1, 0)
+            KeyEvent.KEYCODE_DPAD_RIGHT -> panelState.moveFocus(1, 0)
+            KeyEvent.KEYCODE_DPAD_UP    -> panelState.moveFocus(0, -1)
+            KeyEvent.KEYCODE_DPAD_DOWN  -> panelState.moveFocus(0, 1)
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER -> if (event.repeatCount == 0) activatePanelFocus()
+            KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BACK ->
+                if (event.repeatCount == 0) {
+                    if (panelState.screen.value != BottomPanelState.Screen.HOME) {
+                        panelActions.onBackToHome()
+                    } else {
+                        setPanelController(false)
+                    }
+                }
+            KeyEvent.KEYCODE_BUTTON_START ->
+                if (event.repeatCount == 0) setPanelController(false)
+        }
+    }
+
+    /** D-pads that report as a hat axis rather than as keys. */
+    private fun handlePanelHat(event: MotionEvent) {
+        val x = event.getAxisValue(MotionEvent.AXIS_HAT_X)
+        val y = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        if (x < -0.5f && panelHatX >= -0.5f) panelState.moveFocus(-1, 0)
+        if (x > 0.5f && panelHatX <= 0.5f) panelState.moveFocus(1, 0)
+        if (y < -0.5f && panelHatY >= -0.5f) panelState.moveFocus(0, -1)
+        if (y > 0.5f && panelHatY <= 0.5f) panelState.moveFocus(0, 1)
+        panelHatX = x
+        panelHatY = y
+    }
+
+    private fun activatePanelFocus() {
+        val i = panelState.focus.intValue
+        when (panelState.screen.value) {
+            BottomPanelState.Screen.HOME -> panelActions.onHomeTile(i)
+            else -> panelState.slots.value.getOrNull(i)?.let { panelActions.onSlot(it.number) }
+        }
+    }
+
+    private val panelActions = object : BottomPanelActions {
+        override fun onHomeTile(index: Int) {
+            when (index) {
+                BottomPanelState.TILE_PAUSE      -> toggleUserPause()
+                BottomPanelState.TILE_QUICK_SAVE -> executeQuickSave()
+                BottomPanelState.TILE_QUICK_LOAD -> executeQuickLoad()
+                BottomPanelState.TILE_QUICK_SLOT -> changeQuickSaveSlot(+1)
+                BottomPanelState.TILE_SAVE       -> openPanelSlots(isSave = true)
+                BottomPanelState.TILE_LOAD       -> openPanelSlots(isSave = false)
+                BottomPanelState.TILE_SCREENSHOT -> takeScreenshot()
+                BottomPanelState.TILE_MORE       -> if (overlayView == null) showMenuPopup(menuBtn)
+            }
+        }
+
+        override fun onSlot(number: Int) = panelSlotOp(number)
+
+        override fun onBackToHome() {
+            panelState.screen.value = BottomPanelState.Screen.HOME
+            panelState.activeSlot.value = null
+            panelState.focus.intValue = 0
+        }
+
+        override fun onToggleController() =
+            setPanelController(!panelState.controllerHere.value)
+    }
+
+    private fun refreshPanelSlots() {
+        val existing = NativeInterface.listStates().toSet()
+        panelState.slots.value = (1..8).map { n -> SlotInfo(n, "${gameId}_slot_$n" in existing) }
+    }
+
+    private fun openPanelSlots(isSave: Boolean) {
+        refreshPanelSlots()
+        panelState.activeSlot.value = null
+        panelState.focus.intValue = 0
+        panelState.screen.value = if (isSave) BottomPanelState.Screen.SAVE_SLOTS
+                                  else BottomPanelState.Screen.LOAD_SLOTS
+    }
+
+    /** Same blocking-call-off-the-UI-thread shape as the top-screen picker. */
+    private fun panelSlotOp(number: Int) {
+        val isSave = panelState.screen.value == BottomPanelState.Screen.SAVE_SLOTS
+        val slot = panelState.slots.value.firstOrNull { it.number == number } ?: return
+        if (panelState.busy.value || (!isSave && !slot.occupied)) return
+        panelState.busy.value = true
+        panelState.activeSlot.value = number
+        panelState.status.value = if (isSave) "Saving to slot $number\u2026" else "Loading slot $number\u2026"
+        panelState.statusIsError.value = false
+        val name = "${gameId}_slot_$number"
+        Thread {
+            val err = if (isSave) NativeInterface.saveState(name) else NativeInterface.loadState(name)
+            runOnUiThread {
+                panelState.busy.value = false
+                refreshPanelSlots()
+                if (err == null) {
+                    showMessage(if (isSave) "Saved to slot $number" else "Loaded slot $number")
+                    root.postDelayed({ panelActions.onBackToHome() }, 400)
+                } else {
+                    panelState.activeSlot.value = null
+                    showMessage(err, isError = true)
+                }
+            }
+        }.start()
     }
 
     private fun toggleFpsOverlay() {
