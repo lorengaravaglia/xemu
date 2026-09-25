@@ -2803,3 +2803,62 @@ the AI/physics mix of a firefight. Real combat dips only 1-2 fps,
 intermittently, and could not be captured repeatably. So a change that helps
 here should be confirmed in live play before it is called a combat win --
 the same two-source standard section AL used.
+
+---
+
+## AQ. #32 RETESTED ON THE TAIL: out-of-lining still buys nothing (2026-09-25)
+
+Section AM reopened ld/st out-of-lining on the argument that its fetch saving
+(-29% code, -27.7% L1I misses, section AJ) might pay off exactly in the heavy
+frames that slot 5's mean could not see. Retested on the section AP tail
+benchmark.
+
+### First, it crashed -- a latent bug from the LDAPR work
+
+With LDAPR on at startup (now the default), switching the stubs on killed the
+vCPU thread within a frame: `SEGV_ACCERR` with `pc == lr == x16 + 0x80035bdc`
+-- guest RAM's host base plus a kernel-space guest address. The stubs are
+generated once, in the prologue, by calling `tcg_out_qemu_ld_direct`, which
+consults `g_ldapr`; built with LDAPR on, their loads compose the address into
+TMP2 = X30, which inside a stub is the return address, so the `RET` jumped
+into the guest data just loaded. Section AJ measured before LDAPR existed, so
+never saw it. **Fixed:** `xemu_emit_ldst_stubs()` emits with LDAPR forced off,
+which is always the right body since stubs are refused while LDAPR is on.
+Verified: process survives the toggle, 39,163 sites stubbed, no crash through
+four full replays.
+
+### Result
+
+Slot 7 + `walk_fps_dip`, 400 frames, in one process, order ABCCBA ABCCBA,
+each toggle followed by a 20-frame throwaway bench so the TB flush falls
+outside the window. Engagement per run: LDAPR mode and demoted sites logged;
+stub sites (absolute) rose only in stub runs, apart from ~5k translated during
+the cooldown before the next flush.
+
+| config | frames > 50 ms | mean | > 66 ms | vcpu ms |
+|---|---|---|---|---|
+| A: LDAPR on (ships) | 17, 16, 21, 15 | **17.3** | 0, 6, 10, 9 | 32.59 |
+| B: LDAPR off | 18, 18, 21, 17 | **18.5** | 0, 3, 10, 10 | 32.26 |
+| C: LDAPR off + stubs | 23, 19, 20, 17 | **19.8** | 4, 4, 11, 6 | 32.25 |
+
+Out-of-lining against its own baseline (C vs adjacent B): worse in 2 pairs,
+better in 1, tied in 1; +1.25 frames. Against what ships (C vs A): +2.5
+frames. **No tail benefit, and it cannot coexist with LDAPR.** #32 is closed
+on both metrics now.
+
+### The benchmark's own calibration, which matters more than the verdict
+
+**LDAPR barely moves this scene: 17.3 vs 18.5 (-7%), against -53.7% on the
+slot-2 combat replay (section AL).** A change known to cut a heavy CPU tail in
+half registers as noise here. So slot 7's dip is largely *not* bound by
+vCPU memory-ordering cost -- consistent with the user's caveat that it is a
+full-screen effect, plausibly NV2A-side. **Use slot 7 for NV2A/GPU-side
+changes; do not read a null CPU-codegen result on it as a combat verdict.**
+C2 above is therefore "no benefit found where it could be tested", not
+"proven useless in combat" -- though with section AJ's mean-time result it has
+now failed on every workload available.
+
+**Heat.** The batch ran at 66-73 C (the calibration runs in AP were at 56 C),
+and frames over 66 ms rose from 0 to ~10 across it in *every* configuration.
+ABCCBA ordering balances that drift between configs; it does not remove it.
+Heat is the largest single effect in this table.

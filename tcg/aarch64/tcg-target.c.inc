@@ -2502,6 +2502,16 @@ static void xemu_emit_ldst_stubs(TCGContext *s)
     if (!tcg_use_softmmu) {
         return;
     }
+    /*
+     * Emit the bodies with LDAPR off, whatever the knob says now.  They are
+     * generated once, here, but the knob can change at any time; a body built
+     * while LDAPR was on composes its address into TMP2 -- X30, the stub's
+     * return address -- and the RET then jumps to the guest data it just
+     * loaded.  Stubs are only ever called while LDAPR is off (see
+     * xemu_ldst_stub_for), so this is always the right body.
+     */
+    int saved_ldapr = g_ldapr;
+    g_ldapr = 0;
     for (mi = 0; mi < XEMU_STUB_MMU_MAX; mi++) {
         for (size = MO_8; size <= MO_64; size++) {
             unsigned atom;
@@ -2511,6 +2521,7 @@ static void xemu_emit_ldst_stubs(TCGContext *s)
             }
         }
     }
+    g_ldapr = saved_ldapr;
 }
 
 /*
