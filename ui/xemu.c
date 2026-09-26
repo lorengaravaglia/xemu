@@ -409,7 +409,33 @@ static QEMUBH       *g_main_bh;
 static void main_thread_bh(void *opaque)
 {
     switch (g_main_req.op) {
+    /*
+     * Saving or loading while the user has paused.
+     *
+     * Devices prepare for a save or a load in their run-state handlers, keyed
+     * on RUN_STATE_SAVE_VM / RUN_STATE_RESTORE_VM -- and vm_stop() only
+     * notifies them when it actually stops a running VM.  From PAUSED it is a
+     * no-op, so the preparation silently never happened:
+     *
+     *   - TCG did not discard its translated code, so after a load the vCPU
+     *     ran blocks translated from the *old* RAM against the new state.  The
+     *     Xbox kernel caught the corruption and stopped itself (cli; hlt at
+     *     0x800151ef, IF=0): white screen, audio buffer looping.
+     *   - NV2A did not halt its FIFO before a load, and before a save did not
+     *     flush GPU-held surfaces into guest RAM -- and its post_save then
+     *     unlocked a FIFO lock that only the SAVE_VM handler takes.
+     *
+     * QEMU's run-state table forbids PAUSED -> SAVE_VM/RESTORE_VM, so rather
+     * than change the run state, deliver the notification the handlers are
+     * waiting for.  Every handler on this machine is safe to be told "stopped"
+     * again while stopped (TCG, NV2A, MCPX APU, audio; IDE ignores stops).
+     * The VM stays PAUSED; NV2A's FIFO halt is lifted by the RUNNING
+     * notification when the user resumes, as after any save or load.
+     */
     case MAIN_OP_SAVE:
+        if (!runstate_is_running()) {
+            vm_state_notify(false, RUN_STATE_SAVE_VM);
+        }
         /* save_snapshot()'s result was previously discarded, so a failed save
          * was indistinguishable from a successful one all the way up to the
          * UI, which reported "Saved" either way. */
@@ -421,6 +447,9 @@ static void main_thread_bh(void *opaque)
     case MAIN_OP_LOAD: {
         bool was_running = runstate_is_running();
         vm_stop(RUN_STATE_RESTORE_VM);
+        if (!was_running) {
+            vm_state_notify(false, RUN_STATE_RESTORE_VM);
+        }
         g_main_req.ok = load_snapshot(g_main_req.name, NULL, false, NULL,
                                       &g_main_req.err);
         if (g_main_req.ok && was_running) {
@@ -1378,9 +1407,17 @@ static void *vblank_timer_thread(void *opaque)
             if (frames % 300 == 0) {
                 CPUState *vcpu = first_cpu;
                 if (vcpu) {
-                    ALOGI("vCPU health: halted=%u running=%d stopped=%d irq_req=0x%x",
+                    extern void xemu_x86_irq_state(uint32_t *, uint32_t *,
+                                                   uint32_t *, uint32_t *);
+                    uint32_t ef, hf, hf2, eip;
+
+                    xemu_x86_irq_state(&ef, &hf, &hf2, &eip);
+                    ALOGI("vCPU health: halted=%u running=%d stopped=%d "
+                          "irq_req=0x%x | eflags=0x%x (IF=%d) hflags=0x%x "
+                          "hflags2=0x%x eip=0x%x",
                           vcpu->halted, (int)vcpu->running,
-                          (int)vcpu->stopped, (unsigned)vcpu->interrupt_request);
+                          (int)vcpu->stopped, (unsigned)vcpu->interrupt_request,
+                          ef, !!(ef & 0x200), hf, hf2, eip);
                 }
             }
 #endif

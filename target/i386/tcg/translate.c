@@ -132,6 +132,29 @@ uint64_t xemu_guest_reg_hash(void)
     return h;
 }
 
+/*
+ * Interrupt-gating state of the vCPU, for the "vCPU health" log.  A halted CPU
+ * with CPU_INTERRUPT_HARD pending should wake; if it does not, one of these
+ * says why (IF clear, GIF clear, interrupt shadow, virtual-interrupt mode).
+ */
+void xemu_x86_irq_state(uint32_t *eflags, uint32_t *hflags, uint32_t *hflags2,
+                        uint32_t *eip);
+void xemu_x86_irq_state(uint32_t *eflags, uint32_t *hflags, uint32_t *hflags2,
+                        uint32_t *eip)
+{
+    CPUX86State *env;
+
+    if (!first_cpu) {
+        *eflags = *hflags = *hflags2 = *eip = 0;
+        return;
+    }
+    env = cpu_env(first_cpu);
+    *eflags = env->eflags;
+    *hflags = env->hflags;
+    *hflags2 = env->hflags2;
+    *eip = env->eip;
+}
+
 void x86_refresh_fpu_mode(void);
 void x86_refresh_fpu_mode(void)
 {
