@@ -257,6 +257,17 @@ static void se_frame(MCPXAPUState *d)
         g_dbg.utilization = (double)d->frame_work_acc_us / (double)elapsed_us;
         g_dbg.frames_processed = (int)(d->frame_count * 1000000.0 / elapsed_us + 0.5);
         throttle_publish_debug(d);
+#if defined(__ANDROID__) || defined(ANDROID)
+        /* Normal is ~0.2 on a performance core.  Sustained high utilization
+         * means d->lock is held most of the time, and the vCPU's voice
+         * register writes queue behind it -- the signature of this thread
+         * landing on a little core (see mcpx_apu_frame_thread). */
+        if (g_dbg.utilization > 0.7) {
+            fprintf(stderr, "apu: utilization %.2f at %d frames/s -- vCPU "
+                    "will stall on voice writes\n",
+                    g_dbg.utilization, g_dbg.frames_processed);
+        }
+#endif
 
         d->frame_count_time_us = start_us;
         d->frame_count = 0;
@@ -280,6 +291,21 @@ static void se_frame(MCPXAPUState *d)
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    /*
+     * Keep the APU off the little cores, as pfifo_thread already does for
+     * NV2A.  Every pause sleeps this thread, the scheduler's estimate of its
+     * load decays, and on resume it was placed on an A510 (2.0 GHz, in-order)
+     * and left there for 15+ s.  Each frame then cost ~4x (utilization 0.2 ->
+     * 0.86), d->lock was held that much longer, and the vCPU -- whose voice
+     * register writes take d->lock -- spent 54% of its time blocked on it:
+     * 30 fps fell to ~24 after every pause, save or load.
+     */
+    extern void pin_to_big_cores(void);
+    pin_to_big_cores();
+#endif
+
     qemu_mutex_lock(&d->lock);
     while (!qatomic_read(&d->exiting)) {
         if (d->pause_requested) {

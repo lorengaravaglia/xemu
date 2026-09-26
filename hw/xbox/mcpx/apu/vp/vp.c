@@ -1608,6 +1608,12 @@ static void *voice_worker_thread(void *arg)
     MCPXAPUState *d = arg;
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* Same reason as mcpx_apu_frame_thread: the frame waits on these. */
+    extern void pin_to_big_cores(void);
+    pin_to_big_cores();
+#endif
+
     rcu_register_thread();
     qemu_mutex_lock(&vwd->lock);
 

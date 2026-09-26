@@ -2862,3 +2862,43 @@ now failed on every workload available.
 and frames over 66 ms rose from 0 to ~10 across it in *every* configuration.
 ABCCBA ordering balances that drift between configs; it does not remove it.
 Heat is the largest single effect in this table.
+
+---
+
+## AR. EVERY PAUSE DEMOTED THE APU TO A LITTLE CORE (2026-09-26)
+
+Reported by the user as "fps very bad after loading state 5". It was not the
+load: **any pause and resume** -- panel, pause hotkey, backgrounding --
+dropped slot 5 from 30.0 fps to ~24 for 15+ s. It surfaced now because the
+dual-screen panel makes pausing routine.
+
+**Chain, each link measured:**
+1. The slowdown is not vCPU work: vcpu ms/frame stayed ~31.5 while frames
+   took ~43 ms. The vCPU was *asleep* half the time (sampled thread state).
+2. Off-CPU profile of the vCPU: **54% blocked in `qemu_mutex_lock` under
+   `memory_region_dispatch_write` -> `voice_lock` (vp.c)** -- guest writes to
+   APU voice registers take the APU's global `d->lock`.
+3. APU frame rate stayed at a correct 1500/s, but **utilization rose from
+   ~0.2 to 0.86** and decayed over ~15 s -- every frame ~4x dearer, so
+   `d->lock` held ~4x longer. On-CPU samples 1300 -> 4957 per 4 s, spread
+   across VP *and* DSP, i.e. the whole thread slowed, not one component.
+4. **The thread moved cores**: cpu3-6 @ 2803 MHz before the pause, cpu0-2
+   (A510, in-order) @ 2016 MHz after, still there 10 s later. Sleeping through
+   the pause decays the scheduler's load estimate; on wake it is placed as a
+   light task on a little core and climbs back slowly.
+
+**Fix:** `mcpx_apu_frame_thread` and `voice_worker_thread` call
+`pin_to_big_cores()` at start, as `pfifo_thread` already did (which is why
+NV2A never showed this). Verified after a pause: APU on cpu3-6, utilization
+0.18, **30.05 fps / first 30 frames 32.9 ms** against a no-pause control of
+30.03 / 32.4; the user's scenario (panel controller mode, quick load, resume,
+slot-5 bench) **24.0 -> 30.0 fps, frames > 50 ms 163 -> 22**.
+
+A standing `apu: utilization > 0.7` warning (xemu-stdout) now flags the
+signature if it recurs.
+
+**Method note.** Three plausible theories were eliminated by measurement
+before this one (load path, input release, DSP cycle debt), and the
+"slowdown is permanent" reading was wrong -- the cumulative average hid a
+recovery. Per-segment frame times and absolute sample counts are what broke
+it open; percentages and averages did not.
