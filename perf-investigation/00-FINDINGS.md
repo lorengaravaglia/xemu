@@ -387,6 +387,7 @@ From the heavy-frames agent, not yet measured:
 | Return-address-stack prediction | our mispredict rate is 0.10%; X3 already solves it |
 | Hardware-assisted guest MMU (Captive) | requires EL2, unavailable to an Android app |
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
+| APU `voice_lock` contention at game startup | **MEASURED 2026-09-26:** the vCPU spends 19% of Halo's startup blocked on `d->lock` in `voice_lock`, but removing *all* voice-lock locking (unsafe ceiling build) moved tap-to-logo only 7.4 -> 7.3 s (3 launches each, interleaved). Off the critical path. A lock-free-unlock variant also failed to reach the logo once in 3 launches. Reverted. |
 | ADPF performance hint session | **MEASURED 2026-09-23, section AO:** wins 1 of 4 interleaved pairs; the vCPU core and NV2A cluster are already at max clock without it. Kept off, `debug.xemu.adpf`. |
 | Out-of-lining memory access as built | -23% code, -19.5% L1I, but +15% instructions cancels it — section AC |
 | Eliminating CC helper calls | 97% removed, 1.1% fewer host insns, ZERO cycles saved — section W |
@@ -2902,3 +2903,41 @@ before this one (load path, input release, DSP cycle debt), and the
 "slowdown is permanent" reading was wrong -- the cumulative average hid a
 recovery. Per-segment frame times and absolute sample counts are what broke
 it open; percentages and averages did not.
+
+---
+
+## AS. LAUNCH TIME: where the black screen goes, and 0.42 s of it removed (2026-09-26)
+
+Tap -> Halo title menu is 21.5 s: emulator ready ~2 s, Halo's own startup
+~5 s (black), Microsoft + Bungie intros ~14 s. Skip-boot-animation works.
+Quick Resume (-loadvm at startup) is the real lever and is queued (OPEN-WORK
+A6). Two smaller things were examined first.
+
+**Vulkan buffer allocation was 466 ms of every launch.** Timed per init step,
+then per buffer: upstream's generous sizes ("FIXME: Profile buffer sizes")
+totalled ~4.4 GB of device memory -- system RAM on the Thor. The two
+inline-vertex buffers alone were 1279 MB each (267 ms); the depth/stencil
+conversion buffers 800 MB each (sized for resolution scale 10).
+
+Measured need, Halo boot + slot 5 + slot 7 and slot 2 replays: inline peak
+**26 KB** of 1279 MB, index peak **777 KB** of 199 MB, zero flushes forced by
+lack of space. (JSRF/MGS2/THPS2x were launched but their numbers matched the
+common boot sequence; treat as untested.) Running out is already handled --
+`ensure_buffer_space` flushes and restarts -- so only one worst-case draw has to
+fit. On Android: conversion buffers sized for scale 4 (the Android clamp),
+inline for exactly one worst-case draw (128 MB), index for eight; surface.c
+now asserts the conversion-buffer fit.
+
+Result, 3 launches: device selection -> main loop **0.55 s -> 0.13 s** in all
+three; tap -> logo 7.4/7.4/7.6 s before, 6.8/6.8 s after (plus an 8.0 s first
+launch after install). Regression: scale 1 slot 5 30.02 fps, slot 7 replay
+29.12 fps / 15 frames > 50 ms (calibration 13-16); scale 4 runs both without
+tripping the new asserts.
+
+**Two misreadings, recorded so they are not repeated:**
+- *"The pipeline cache load costs 0.5 s."* Its log line happened to print at
+  the end of the slow stretch. A background-load rewrite then reported the
+  load itself at **1 ms** -- the time was buffer allocation. Reverted.
+- *"The vCPU is 19% blocked on the APU lock at startup."* True, and
+  irrelevant: removing all voice-lock locking moved tap-to-logo 7.4 -> 7.3 s
+  (dead-ends table). Off the critical path.

@@ -72,11 +72,38 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .buffer_size = r->storage_buffers[BUFFER_STAGING_DST].buffer_size,
     };
 
+    /*
+     * Buffer sizes on Android.
+     *
+     * Upstream sizes several buffers with generous multipliers ("FIXME:
+     * Profile buffer sizes").  On the Thor device memory is system RAM and
+     * each allocation is paid at launch: the set totalled ~4.4 GB and took
+     * 466 ms of every start, 267 ms of it the two inline-vertex buffers.
+     * Measured need (Halo: boot, slot 5 combat, slot 7 and slot 2 replays):
+     * inline peak 26 KB of 1279 MB, index peak 777 KB of 199 MB, and no
+     * flushes forced by lack of space.
+     *
+     * - Depth/stencil conversion: one surface at the resolution scale, which
+     *   Android clamps to 4 (xemu_android_set_surface_scale), not 10.
+     *   surface.c asserts the fit.
+     * - Inline vertices / indices: running out is already handled -- the
+     *   draw path flushes and starts over (ensure_buffer_space) -- so only a
+     *   single worst-case draw must fit.  Inline keeps exactly one (16 attrs x
+     *   max batch x 16 B = 128 MB); index keeps eight.
+     */
+#if defined(__ANDROID__) || defined(ANDROID)
+    const size_t max_surface_scale = 4;
+    const size_t inline_draws = 1, index_draws = 8;
+#else
+    const size_t max_surface_scale = 10;
+    const size_t inline_draws = 10, index_draws = 100;
+#endif
     r->storage_buffers[BUFFER_COMPUTE_DST] = (StorageBuffer){
         .alloc_info = device_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .buffer_size = (1024 * 10) * (1024 * 10) * 8,
+        .buffer_size = (1024 * max_surface_scale) *
+                       (1024 * max_surface_scale) * 8,
     };
 
     r->storage_buffers[BUFFER_COMPUTE_SRC] = (StorageBuffer){
@@ -90,7 +117,7 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .alloc_info = device_alloc_create_info,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        .buffer_size = sizeof(pg->inline_elements) * 100,
+        .buffer_size = sizeof(pg->inline_elements) * index_draws,
     };
 
     r->storage_buffers[BUFFER_INDEX_STAGING] = (StorageBuffer){
@@ -115,7 +142,7 @@ void pgraph_vk_init_buffers(NV2AState *d)
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         .buffer_size = NV2A_VERTEXSHADER_ATTRIBUTES * NV2A_MAX_BATCH_LENGTH *
-                       4 * sizeof(float) * 10,
+                       4 * sizeof(float) * inline_draws,
     };
 
     r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING] = (StorageBuffer){

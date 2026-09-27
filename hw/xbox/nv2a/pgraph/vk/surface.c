@@ -291,6 +291,14 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     int copy_buffer_idx = use_compute_to_convert_depth_stencil_format ?
                              BUFFER_COMPUTE_DST :
                              BUFFER_STAGING_DST;
+    /* The conversion buffers are sized for the maximum resolution scale
+     * (buffer.c); fail loudly rather than write past one. */
+    if (use_compute_to_convert_depth_stencil_format) {
+        unsigned int sw = surface->width, sh = surface->height;
+        pgraph_apply_scaling_factor(pg, &sw, &sh);
+        assert((size_t)surface->host_fmt.host_bytes_per_pixel * sw * sh <=
+               r->storage_buffers[BUFFER_COMPUTE_DST].buffer_size);
+    }
     VkBuffer copy_buffer = r->storage_buffers[copy_buffer_idx].buffer;
 
     {
@@ -1079,6 +1087,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         size_t unpacked_stencil_image_size = num_pixels;
         size_t unpacked_size =
             unpacked_depth_image_size + unpacked_stencil_image_size;
+        assert(unpacked_size <=
+               r->storage_buffers[BUFFER_COMPUTE_SRC].buffer_size);
 
         VkBufferMemoryBarrier post_copy_src_barrier = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
