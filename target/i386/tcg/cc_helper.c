@@ -161,6 +161,14 @@ target_ulong helper_cc_check_logicb(target_ulong inlined, target_ulong dst)
     return inlined;
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/* DIAGNOSTIC: CC_OP_EFLAGS returns CC_SRC unmasked; any bit outside the six
+ * arithmetic flags then lands in EFLAGS -- including TF, which bugchecked
+ * ~1 boot in 7.  Count and sample where it happens. */
+unsigned long long xemu_cc_garbage;
+#define XEMU_CC_BITS (CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C)
+#endif
+
 target_ulong helper_cc_compute_all(target_ulong dst, target_ulong src1,
                                    target_ulong src2, int op)
 {
@@ -186,6 +194,14 @@ target_ulong helper_cc_compute_all(target_ulong dst, target_ulong src1,
         return 0;
 
     case CC_OP_EFLAGS:
+#if defined(__ANDROID__) || defined(ANDROID)
+        if (src1 & ~XEMU_CC_BITS) {
+            if (xemu_cc_garbage++ < 8) {
+                fprintf(stderr, "cc-garbage: (helper) cc_src=%08x (stray %08x)\n",
+                        (uint32_t)src1, (uint32_t)(src1 & ~XEMU_CC_BITS));
+            }
+        }
+#endif
         return src1;
     case CC_OP_POPCNT:
         return dst ? 0 : CC_Z;
@@ -312,6 +328,15 @@ target_ulong helper_cc_compute_all(target_ulong dst, target_ulong src1,
 
 uint32_t cpu_cc_compute_all(CPUX86State *env)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (CC_OP == CC_OP_EFLAGS && (CC_SRC & ~XEMU_CC_BITS)) {
+        if (xemu_cc_garbage++ < 8) {
+            fprintf(stderr, "cc-garbage: eip=%08x cc_src=%08x (stray %08x)\n",
+                    (uint32_t)env->eip, (uint32_t)CC_SRC,
+                    (uint32_t)(CC_SRC & ~XEMU_CC_BITS));
+        }
+    }
+#endif
     return helper_cc_compute_all(CC_DST, CC_SRC, CC_SRC2, CC_OP);
 }
 

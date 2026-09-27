@@ -390,6 +390,7 @@ From the heavy-frames agent, not yet measured:
 | APU `voice_lock` contention at game startup | **MEASURED 2026-09-26:** the vCPU spends 19% of Halo's startup blocked on `d->lock` in `voice_lock`, but removing *all* voice-lock locking (unsafe ceiling build) moved tap-to-logo only 7.4 -> 7.3 s (3 launches each, interleaved). Off the critical path. A lock-free-unlock variant also failed to reach the logo once in 3 launches. Reverted. |
 | ADPF performance hint session | **MEASURED 2026-09-23, section AO:** wins 1 of 4 interleaved pairs; the vCPU core and NV2A cluster are already at max clock without it. Kept off, `debug.xemu.adpf`. |
 | Out-of-lining memory access as built | -23% code, -19.5% L1I, but +15% instructions cancels it — section AC |
+| Dead-flag elimination (hakuX port) | **UNSAFE, OFF (section AV):** neutral on speed (section J) and it caused ~1-in-7 boot bugchecks by leaving cc_op=EFLAGS over an operand in cc_src. |
 | Eliminating CC helper calls | 97% removed, 1.1% fewer host insns, ZERO cycles saved — section W |
 | Trusting absolute PMU figures from before section U | counters were multiplexed to 9-29%; understated 3-11x |
 | Dynamic spin detection (auto) | detects correctly, but the benchmark has no spin worth eliding; 0.2-0.6 ms/frame worse — section R |
@@ -3010,3 +3011,48 @@ on the next launch -- a strong hint the cause is an IDE async-I/O race.
 Do not ship mode 2 before this is understood: removing delays shortens every
 kernel timeout, and a boot that already races the IDE controller is exactly
 where that would bite.
+
+---
+
+## AV. THE BOOT CRASH WAS DEAD-FLAG ELIMINATION (2026-09-26)
+
+~1 boot in 7 (6/45 with all defaults) stuck on a black screen forever after
+the kernel's first 60 ATAPI commands.
+
+**Chain, each link measured:**
+1. Guest crash report (`guest-stuck`, one-shot on halted+IF=0): bugcheck
+   **0x1E KMODE_EXCEPTION_NOT_HANDLED, 0x80000004 STATUS_SINGLE_STEP**, at
+   0x80030e4d -- the second instruction of the kernel's clock ISR.
+2. #DB delivery ring (`guest-#DB`): the timer interrupt arrived in Halo's
+   DirectSound init (0x0019a8e8) with **EFLAGS 0x33a -- TF set, and reserved
+   bits 3 and 5 set**. That code has no pushf/popf; reserved bits are
+   impossible on hardware. EFLAGS was being built from garbage.
+3. The only unmasked source: `CC_OP_EFLAGS` returns `cc_src` as-is. A check
+   there (`cc-garbage`) caught it: **6 stray-bit reads per boot with defaults**
+   (cc_src=0x00000008 at 0x0018cd01), **0 with dfe=0**, 12 with the CC inline
+   paths off but DFE on (cc_src=0xfd000000 -- an address).
+4. Bisection by crash rate agreed: 0/20 with all Android CPU features off, 0/20
+   with the flags group off, 0/20 with cc_*/dfe off, 2/20 positive control.
+
+**Cause:** the DFE pass (section J, ported from hakuX's tier1-opt) resets CC
+liveness at labels, branches, calls and block ends -- not at guest memory
+ops, which can leave a TB mid-way (fault, MMIO exit, notdirty/SMC). State is
+restored at that instruction missing a cc write the pass deleted, so cc_op
+can say EFLAGS while cc_src holds an operand. When a stray bit is TF, the
+next iret single-steps the guest; a timer interrupt in that window
+bugchecks the kernel.
+
+**Fix:** DFE off by default (`g_xemu_dfe = 0`; `debug.xemu.dfe=1` to
+re-enable). It never bought speed (section J: within noise), so a correct
+version is not worth writing. Verified on the default build: stray bits
+**0**, and **0 crashes in 30 boots** with the crash-inducing procedure (was
+6/45; 30 clean at the old rate is ~1.5% likely by chance).
+
+**Note for the hakuX comparison:** hakuX ships this pass in its tier-1
+recompiler. Its boots may be exposed to the same fault.
+
+**Diagnostics left in place:** `guest-stuck` (register/stack dump when the
+guest halts with IF clear), `guest-#DB` (interrupt history on any #DB),
+`cc-garbage` (stray EFLAGS bits, first 8 logged, count in the vCPU health
+line). All cheap; together they turned a "black screen" into a bugcheck
+code in one reproduction.

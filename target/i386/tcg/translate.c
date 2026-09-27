@@ -155,6 +155,40 @@ void xemu_x86_irq_state(uint32_t *eflags, uint32_t *hflags, uint32_t *hflags2,
     *eip = env->eip;
 }
 
+/*
+ * One-shot crash report for a guest that has stopped itself: registers and
+ * the top of the stack, where a KeBugCheckEx's code and parameters sit.
+ * Called from the vCPU health log when the CPU is halted with IF clear.
+ */
+void xemu_x86_dump_stuck(void);
+void xemu_x86_dump_stuck(void)
+{
+    CPUX86State *env;
+    uint32_t stk[48];
+    int i;
+
+    if (!first_cpu) {
+        return;
+    }
+    env = cpu_env(first_cpu);
+    fprintf(stderr, "guest-stuck: eax=%08x ebx=%08x ecx=%08x edx=%08x "
+            "esi=%08x edi=%08x ebp=%08x esp=%08x eip=%08x\n",
+            (uint32_t)env->regs[R_EAX], (uint32_t)env->regs[R_EBX],
+            (uint32_t)env->regs[R_ECX], (uint32_t)env->regs[R_EDX],
+            (uint32_t)env->regs[R_ESI], (uint32_t)env->regs[R_EDI],
+            (uint32_t)env->regs[R_EBP], (uint32_t)env->regs[R_ESP],
+            (uint32_t)env->eip);
+    if (cpu_memory_rw_debug(first_cpu, env->regs[R_ESP], (uint8_t *)stk,
+                            sizeof(stk), 0) == 0) {
+        for (i = 0; i < 48; i += 8) {
+            fprintf(stderr, "guest-stuck: [esp+%03x] %08x %08x %08x %08x "
+                    "%08x %08x %08x %08x\n", i * 4, stk[i], stk[i + 1],
+                    stk[i + 2], stk[i + 3], stk[i + 4], stk[i + 5],
+                    stk[i + 6], stk[i + 7]);
+        }
+    }
+}
+
 void x86_refresh_fpu_mode(void);
 void x86_refresh_fpu_mode(void)
 {
@@ -414,8 +448,9 @@ void x86_refresh_fpu_mode(void)
     {
         extern int g_xemu_dfe;
         char dv[PROP_VALUE_MAX] = { 0 };
-        int want = !(__system_property_get("debug.xemu.dfe", dv) > 0 &&
-                     (dv[0] == '0' || dv[0] == 'n' || dv[0] == 'f'));
+        /* Off unless explicitly enabled: unsafe as built, see tcg.c. */
+        int want = __system_property_get("debug.xemu.dfe", dv) > 0 &&
+                   (dv[0] == '1' || dv[0] == 'y' || dv[0] == 't');
 
         if (want != g_xemu_dfe) {
             g_xemu_dfe = want;

@@ -1189,11 +1189,60 @@ static void do_interrupt_real(CPUX86State *env, int intno, int is_int,
  * the int instruction. next_eip is the env->eip value AFTER the interrupt
  * instruction. It is only relevant if is_int is TRUE.
  */
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * DIAGNOSTIC: ~1 boot in 5 bugchecks with KMODE_EXCEPTION_NOT_HANDLED /
+ * STATUS_SINGLE_STEP at the timer ISR's second instruction -- TF set inside
+ * an interrupt handler, which interrupt entry is supposed to make impossible.
+ * Keep the last few deliveries and dump them when a #DB is delivered.
+ */
+static struct {
+    int intno, is_int, is_hw;
+    uint32_t eip, eflags, next_eip;
+} xemu_int_ring[16];
+static unsigned xemu_int_head;
+#endif
+
 void do_interrupt_all(X86CPU *cpu, int intno, int is_int,
                       int error_code, target_ulong next_eip, int is_hw)
 {
     CPUX86State *env = &cpu->env;
     uint64_t last_pc = env->eip + env->segs[R_CS].base;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        unsigned h = xemu_int_head++ % 16;
+        xemu_int_ring[h].intno = intno;
+        xemu_int_ring[h].is_int = is_int;
+        xemu_int_ring[h].is_hw = is_hw;
+        xemu_int_ring[h].eip = env->eip;
+        xemu_int_ring[h].eflags = cpu_compute_eflags(env);
+        xemu_int_ring[h].next_eip = next_eip;
+        if (intno == 1) {
+            static int reported;
+            if (reported++ < 3) {
+                fprintf(stderr, "guest-#DB: at eip=%08x eflags=%08x (TF=%d) "
+                        "dr6=%08x dr7=%08x is_int=%d is_hw=%d hflags=%08x\n",
+                        (uint32_t)env->eip, cpu_compute_eflags(env),
+                        !!(cpu_compute_eflags(env) & TF_MASK),
+                        (uint32_t)env->dr[6], (uint32_t)env->dr[7], is_int,
+                        is_hw, env->hflags);
+                for (unsigned i = 1; i <= 16; i++) {
+                    unsigned k = (xemu_int_head - i) % 16;
+                    if (i > xemu_int_head) {
+                        break;
+                    }
+                    fprintf(stderr, "guest-#DB:  -%u vec=%02x int=%d hw=%d "
+                            "eip=%08x eflags=%08x next=%08x\n", i - 1,
+                            xemu_int_ring[k].intno, xemu_int_ring[k].is_int,
+                            xemu_int_ring[k].is_hw, xemu_int_ring[k].eip,
+                            xemu_int_ring[k].eflags,
+                            xemu_int_ring[k].next_eip);
+                }
+            }
+        }
+    }
+#endif
 
     if (qemu_loglevel_mask(CPU_LOG_INT)) {
         if ((env->cr[0] & CR0_PE_MASK)) {

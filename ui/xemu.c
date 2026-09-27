@@ -1413,16 +1413,27 @@ static void *vblank_timer_thread(void *opaque)
 
                     extern unsigned long long xemu_stall_iters_elided,
                                               xemu_stall_ns_waited;
+                    extern unsigned long long xemu_cc_garbage;
                     xemu_x86_irq_state(&ef, &hf, &hf2, &eip);
+                    {
+                        /* Halted with interrupts off: the guest stopped
+                         * itself (bugcheck).  Report once. */
+                        extern void xemu_x86_dump_stuck(void);
+                        static bool dumped;
+                        if (vcpu->halted && !(ef & 0x200) && !dumped) {
+                            dumped = true;
+                            xemu_x86_dump_stuck();
+                        }
+                    }
                     ALOGI("vCPU health: halted=%u running=%d stopped=%d "
                           "irq_req=0x%x | eflags=0x%x (IF=%d) hflags=0x%x "
                           "hflags2=0x%x eip=0x%x | stall elided %llu iters, "
-                          "waited %llu ms",
+                          "waited %llu ms | cc-garbage %llu",
                           vcpu->halted, (int)vcpu->running,
                           (int)vcpu->stopped, (unsigned)vcpu->interrupt_request,
                           ef, !!(ef & 0x200), hf, hf2, eip,
                           xemu_stall_iters_elided,
-                          xemu_stall_ns_waited / 1000000);
+                          xemu_stall_ns_waited / 1000000, xemu_cc_garbage);
                 }
             }
 #endif
@@ -3712,6 +3723,14 @@ static void *qemu_main(void *opaque)
     ALOGI("qemu_main thread starting (thread %ld)...", (long)gettid());
     qemu_init(gArgc, gArgv);
     ALOGI("qemu_main: qemu_init returned. Starting main loop...");
+    {
+        /* Apply the debug.xemu.* CPU switches now, not only when a benchmark
+         * starts, so a boot-time behaviour can be bisected with them. */
+        extern void x86_refresh_fpu_mode(void);
+        extern void jc_refresh_property(void);
+        x86_refresh_fpu_mode();
+        jc_refresh_property();
+    }
     exit_status = qemu_main_loop();
     ALOGI("qemu_main: main loop returned status %d", exit_status);
     qatomic_set(&qemu_exiting, true);

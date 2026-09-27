@@ -7021,7 +7021,20 @@ static void tcg_out_st_helper_args(TCGContext *s, const TCGLabelQemuLdst *ldst,
  * are side-effect free.  The counter below exists to answer that before any
  * conclusion is drawn about speed.  debug.xemu.dfe=0 disables.
  */
-int g_xemu_dfe = 1;
+/*
+ * OFF BY DEFAULT -- UNSAFE AS BUILT (2026-09-26, FINDINGS AV).
+ *
+ * The walk resets liveness at labels, branches, calls and block ends, but not
+ * at guest memory ops, which can leave the TB mid-way (page fault, MMIO exit,
+ * notdirty/SMC).  State is then restored at the faulting instruction with a
+ * cc write this pass deleted, so cc_op can read CC_OP_EFLAGS while cc_src
+ * holds an operand -- and CC_OP_EFLAGS returns cc_src unmasked into EFLAGS.
+ * Measured: stray bits in 6-12 flag reads per Halo boot with it on, 0 with it
+ * off; when the stray bit is TF, the kernel bugchecks (0x1E /
+ * STATUS_SINGLE_STEP in the timer ISR), ~1 boot in 7.  It never bought any
+ * speed (section J), so it stays off; debug.xemu.dfe=1 re-enables.
+ */
+int g_xemu_dfe = 0;
 unsigned long long xemu_dfe_removed, xemu_dfe_tbs, xemu_dfe_ops_seen;
 
 #define XEMU_CC_N 4
