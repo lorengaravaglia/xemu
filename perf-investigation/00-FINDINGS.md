@@ -2941,3 +2941,31 @@ tripping the new asserts.
 - *"The vCPU is 19% blocked on the APU lock at startup."* True, and
   irrelevant: removing all voice-lock locking moved tap-to-logo 7.4 -> 7.3 s
   (dead-ends table). Off the critical path.
+
+---
+
+## AT. hakuX BOOTS HALO ~1 s FASTER; NOT THE DRIVER, IMAGE OR DRIVE (2026-09-26)
+
+Tap -> Microsoft logo, same device, same brightness probe:
+hakuX Debug 0.3.1 **5.4 / 5.4 / 5.8 s**; Boxxy **6.8 / 6.8 s** (Qualcomm),
+**6.8 / 6.5 s** (Turnip). The hakuX release build crashes launching Halo here.
+
+Host startup is level: first frame 0.76 s after tap for hakuX, ~0.8 s for us
+since section AS (hakuX had already capped the same oversized Vulkan buffers --
+it logs a `memory_budget`). The gap is guest time: kernel boot + Halo's own
+startup.
+
+Eliminated, one at a time:
+- **GPU driver.** Turnip on Boxxy: 6.8 / 6.5 s (Turnip left enabled; it was
+  installed but switched off since section AI).
+- **Disc image.** Both apps load the same `.xiso.iso` file.
+- **HDD image.** Boxxy on a byte-exact copy of hakuX's 315 MB drive:
+  **6.6 / 6.6 / 6.6 s**. User's drive backed up and restored, md5 identical.
+
+What remains is hakuX's translator (+734 lines in the AArch64 backend, a
+tier-1 recompile of hot blocks at threshold 64, pinned guest-RAM base
+registers -- section H). Its persisted TB cache is not the reason: it loaded
+0 hints, and startup prewarm is disabled on Android in its changelog.
+**Before porting anything, measure how much of the startup window is
+translation (tcg_gen_code) versus execution** -- startup is dominated by
+first-seen code, which our steady-state benchmarks never exercise.
