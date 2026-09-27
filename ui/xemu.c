@@ -1411,13 +1411,18 @@ static void *vblank_timer_thread(void *opaque)
                                                    uint32_t *, uint32_t *);
                     uint32_t ef, hf, hf2, eip;
 
+                    extern unsigned long long xemu_stall_iters_elided,
+                                              xemu_stall_ns_waited;
                     xemu_x86_irq_state(&ef, &hf, &hf2, &eip);
                     ALOGI("vCPU health: halted=%u running=%d stopped=%d "
                           "irq_req=0x%x | eflags=0x%x (IF=%d) hflags=0x%x "
-                          "hflags2=0x%x eip=0x%x",
+                          "hflags2=0x%x eip=0x%x | stall elided %llu iters, "
+                          "waited %llu ms",
                           vcpu->halted, (int)vcpu->running,
                           (int)vcpu->stopped, (unsigned)vcpu->interrupt_request,
-                          ef, !!(ef & 0x200), hf, hf2, eip);
+                          ef, !!(ef & 0x200), hf, hf2, eip,
+                          xemu_stall_iters_elided,
+                          xemu_stall_ns_waited / 1000000);
                 }
             }
 #endif

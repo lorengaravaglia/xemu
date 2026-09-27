@@ -2969,3 +2969,44 @@ registers -- section H). Its persisted TB cache is not the reason: it loaded
 **Before porting anything, measure how much of the startup window is
 translation (tcg_gen_code) versus execution** -- startup is dominated by
 first-seen code, which our steady-state benchmarks never exercise.
+
+---
+
+## AU. STARTUP IS THE KERNEL'S DELAY LOOP -- AND 1 BOOT IN ~5 CRASHES (2026-09-26)
+
+**Translation is not the startup cost.** vCPU profile over the black-screen
+window: `tb_gen_code` inclusive **4.5%**. Guest-PC attribution (guest_map):
+**72% of generated-code time is one block, 0x800153d0**, Xbox kernel.
+
+It is `KeStallExecutionProcessor(us)` (decoded from `dump_pc`):
+`mov eax,[0x8003aff0]; mul ecx; L: sub eax,1; jnz L` -- a delay expressed in
+loop iterations, 0x16f = **367 per microsecond** (2 cycles/iteration on the
+733 MHz P3). Halo's boot requests **1,417,174,095 iterations = 3.865 s** of
+stalls up to the logo.
+
+`debug.xemu.stall_hle` (translate.c recognises the bytes `83 e8 01 75 fb`,
+misc_helper.c `helper_xemu_stall`; default 0 = off):
+| mode | tap -> logo |
+|---|---|
+| 0 current | 6.7 s |
+| 1 faithful (real-time wait, 1 ms chunks) | 7.7, 7.9 s |
+| 2 no delay | 3.7 s |
+
+So **our translated loop already runs faster than a real P3** and shortens the
+kernel's delays by ~1.1 s; hakuX's is faster still, which is the ~1 s it
+leads by (section AT). Eliding the delays entirely saves ~3 s.
+
+**The boot crash, found while testing mode 2.** Interleaved 5x mode 0 vs 5x
+mode 2, checked at 16 s: failures **1/5 (mode 0) and 2/5 (mode 2)**, all with
+the same signature; a further 6 mode-0 launches reproduced it once, stuck >60 s.
+Signature: stuck after exactly **60 ATAPI commands** (the kernel's first disc
+burst), vCPU `halted=1 IF=0 eip=0x800151ef` -- the kernel's `cli; hlt`
+bugcheck -- with the IDE interrupt count jumping to 400+ in ~20 ms (normal
+boots total ~210). **Pre-existing, not caused by stall elision** (n too small
+to say whether mode 2 raises the rate). hakuX logs `Inline AIO enabled from
+crash marker`, i.e. it detects a crash of this kind and runs disk I/O inline
+on the next launch -- a strong hint the cause is an IDE async-I/O race.
+
+Do not ship mode 2 before this is understood: removing delays shortens every
+kernel timeout, and a boot that already races the IDE controller is exactly
+where that would bite.

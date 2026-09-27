@@ -5166,6 +5166,44 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     }
 #endif
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* KeStallExecutionProcessor idiom: see helper_xemu_stall(). */
+    {
+        extern int g_xemu_stall_mode;
+        static bool mode_read, logged_match;
+        target_ulong pc = dc->base.pc_next;
+        static const uint8_t idiom[5] = { 0x83, 0xe8, 0x01, 0x75, 0xfb };
+
+        if (!mode_read) {
+            char v[PROP_VALUE_MAX] = { 0 };
+            g_xemu_stall_mode =
+                __system_property_get("debug.xemu.stall_hle", v) > 0 ?
+                atoi(v) : 0;
+            mode_read = true;
+            fprintf(stderr, "stall_hle: mode %d\n", g_xemu_stall_mode);
+        }
+
+        if (g_xemu_stall_mode && CODE32(dc) && !CODE64(dc) &&
+            (pc & ~TARGET_PAGE_MASK) <= TARGET_PAGE_SIZE - sizeof(idiom)) {
+            int i;
+            for (i = 0; i < sizeof(idiom); i++) {
+                if (translator_ldub(cpu_env(cpu), &dc->base, pc + i) !=
+                    idiom[i]) {
+                    break;
+                }
+            }
+            if (i == sizeof(idiom)) {
+                if (!logged_match) {
+                    logged_match = true;
+                    fprintf(stderr, "stall_hle: idiom at 0x%lx\n",
+                            (unsigned long)pc);
+                }
+                gen_helper_xemu_stall(tcg_env);
+            }
+        }
+    }
+#endif
+
     switch (sigsetjmp(dc->jmpbuf, 0)) {
     case 0:
         disas_insn(dc, cpu);

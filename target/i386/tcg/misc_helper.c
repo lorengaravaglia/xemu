@@ -23,6 +23,8 @@
 #include "exec/helper-proto.h"
 #include "exec/cputlb.h"
 #include "helper-tcg.h"
+#include "qemu/timer.h"
+#include "qemu/atomic.h"
 
 /*
  * NOTE: the translator must set DisasContext.cc_op to CC_OP_EFLAGS
@@ -156,4 +158,50 @@ target_ulong HELPER(rdpid)(CPUX86State *env)
 #else
     return 0;
 #endif
+}
+
+/*
+ * `sub eax,1; jnz $-3` -- the Xbox kernel's KeStallExecutionProcessor loop.
+ *
+ * The kernel expresses a delay in loop iterations (367 per microsecond, the
+ * value at 0x8003aff0 in the Complex 4627 kernel), trusting a Pentium III at
+ * 733 MHz to take 2 cycles per iteration.  Translated, an iteration costs
+ * whatever the TB loop costs on the host, so the guest's delays stretch or
+ * shrink with emulation speed.  It was 72% of generated-code time during
+ * Halo's startup.
+ *
+ * The translator calls this before the idiom's `sub` (see translate.c).  It
+ * consumes up to 1 ms of iterations at a time -- waiting for as long as the
+ * real CPU would have taken in mode 1, not at all in mode 2 (an upper bound
+ * for measurement only) -- and always leaves EAX >= 1, so the guest's own
+ * sub/jnz still produce the exit and the flags.  Chunking keeps interrupt
+ * latency at <= 1 ms: the loop returns to the TB start between chunks.
+ */
+int g_xemu_stall_mode;                     /* debug.xemu.stall_hle */
+unsigned long long xemu_stall_iters_elided, xemu_stall_ns_waited;
+
+#define STALL_ITERS_PER_MS 366667          /* 733.33 MHz / 2 cycles, per ms */
+
+void helper_xemu_stall(CPUX86State *env)
+{
+    uint32_t n = env->regs[R_EAX];
+    uint32_t chunk;
+
+    if (n <= 1) {
+        return;
+    }
+    chunk = MIN(n - 1, g_xemu_stall_mode == 2 ? n - 1 : STALL_ITERS_PER_MS);
+    if (g_xemu_stall_mode == 1) {
+        int64_t ns = (int64_t)chunk * 1000000 / STALL_ITERS_PER_MS;
+        int64_t end = get_clock() + ns;
+        if (ns > 200000) {
+            g_usleep((ns - 100000) / 1000);    /* sleep most, spin the tail */
+        }
+        while (get_clock() < end) {
+            /* spin: sub-100 us precision matters for device timing */
+        }
+        qatomic_add(&xemu_stall_ns_waited, ns);
+    }
+    qatomic_add(&xemu_stall_iters_elided, chunk);
+    env->regs[R_EAX] = n - chunk;
 }
