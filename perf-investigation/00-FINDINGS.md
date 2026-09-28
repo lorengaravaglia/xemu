@@ -3056,3 +3056,38 @@ guest halts with IF clear), `guest-#DB` (interrupt history on any #DB),
 `cc-garbage` (stray EFLAGS bits, first 8 logged, count in the vCPU health
 line). All cheap; together they turned a "black screen" into a bugcheck
 code in one reproduction.
+
+---
+
+## AW. SKIPPING THE KERNEL DELAYS: 3.2 s OFF HALO'S BOOT, NOTHING ELSE MOVES (2026-09-27)
+
+Re-measured on the DFE-fixed build (section AV), `debug.xemu.stall_hle`
+mode 2 against mode 0, 10 launches each interleaved:
+
+| | tap -> Microsoft logo | boots reaching Halo |
+|---|---|---|
+| mode 0 (today) | 6.6-6.9 s, mean **6.73** | 10/10 |
+| mode 2 (skip) | 3.5-3.7 s, mean **3.56** | **10/10** |
+
+-3.2 s, -47%. Requested delay is identical every boot (1,417,174,105
+iterations); 0 stray EFLAGS bits in all 20.
+
+**Other titles, 30 s after tap, mode 0 vs 2:**
+- THPS2x requests **1,417,119,058** -- within 0.004% of Halo's. Two different
+  games requesting the same ~3.9 s points at shared library code (likely
+  DirectSound's init) running a wait to its full timeout every time. With the
+  skip it is on the Treyarch intro at 30 s; without, still black.
+- JSRF and MGS2 request ~4.0M (~11 ms): no gain, no change -- same guest PC
+  and same screen (SEGA disclaimer / "Hideo Kojima") either way.
+
+**Gameplay: never used.** Mode 2, iterations after boot = after 20 s of
+slot 5 = after the full slot-7 replay (1,417,174,105 throughout). Slot 7
+bench 30.05 fps in both modes. The skip only touches startup.
+
+(Side observation, not isolated: slot 7 showed 0 frames > 50 ms in both
+runs, against 13-21 in sections AP/AQ. Turnip was enabled in between
+(section AT) and slot 7 is GPU-bound; confirm before crediting it.)
+
+**Unverified: audio.** If the delay is DirectSound waiting for the audio DSP,
+skipping it could leave audio uninitialised in a way no counter here shows.
+Needs a listening test before it ships.
