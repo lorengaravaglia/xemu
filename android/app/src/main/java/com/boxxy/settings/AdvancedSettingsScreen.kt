@@ -19,6 +19,7 @@ fun AdvancedSettingsScreen(
     val context = LocalContext.current
     val accurateMemOrdering by settingsViewModel.accurateMemOrdering.collectAsState()
     val fastOrderedLoads by settingsViewModel.fastOrderedLoads.collectAsState()
+    val fastBoot by settingsViewModel.fastBoot.collectAsState()
 
     // Compute shader cache stats on composition.  shaders/ is the GL
     // renderer's; the Vulkan renderer keeps SPIR-V in shaders_vk/ and the
@@ -80,6 +81,18 @@ fun AdvancedSettingsScreen(
                                    "expect a brief pause.",
                         checked = fastOrderedLoads,
                     ) { settingsViewModel.setFastOrderedLoads(it) }
+                    HorizontalDivider()
+                    SettingsSwitchRow(
+                        label = "Fast boot",
+                        subtitle = "Skips the waits the Xbox builds into " +
+                                   "starting a game, which take several " +
+                                   "seconds and never affect play. Halo " +
+                                   "reaches its first logo in about half " +
+                                   "the time. Turn it off if a game fails " +
+                                   "to start or has no sound. Applies the " +
+                                   "next time a game starts.",
+                        checked = fastBoot,
+                    ) { settingsViewModel.setFastBoot(it) }
                 }
             }
 

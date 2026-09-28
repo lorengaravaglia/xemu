@@ -670,6 +670,19 @@ void xemu_android_set_ldapr(bool enabled) {
     LOGI("ordered loads: %s", enabled ? "LDAPR" : "DMB + LDR");
 }
 
+/*
+ * Fast boot: skip the kernel's KeStallExecutionProcessor busy-waits
+ * (debug.xemu.stall_hle mode 2, FINDINGS AU/AW).  Halo and THPS2x each request
+ * ~3.9 s of delay at startup that always runs to its timeout; skipping it takes
+ * Halo's tap-to-logo from 6.7 s to 3.6 s.  The loop never runs in gameplay.
+ * Read when code is translated, so set before emulation starts.
+ */
+void xemu_android_set_fast_boot(bool enabled) {
+    extern int g_xemu_stall_mode;
+    g_xemu_stall_mode = enabled ? 2 : 0;
+    LOGI("fast boot: %s", enabled ? "on (kernel delays skipped)" : "off");
+}
+
 unsigned int xemu_android_get_surface_scale(void) {
     return g_surface_scale;
 }

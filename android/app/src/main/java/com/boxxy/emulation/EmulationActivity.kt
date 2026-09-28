@@ -1712,6 +1712,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         /* On by default; see SettingsViewModel.setFastOrderedLoads. */
         NativeInterface.setLdapr(
             mainPrefs.getBoolean("fast_ordered_loads", true))
+
+        /* On by default; see SettingsViewModel.setFastBoot.  Must be set
+         * before startEmulation(), which the surface callback runs after
+         * this. */
+        NativeInterface.setFastBoot(mainPrefs.getBoolean("fast_boot", true))
     }
 
     /** Read overlay settings from main_prefs and apply position + visibility. */

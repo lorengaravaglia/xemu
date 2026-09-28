@@ -112,6 +112,9 @@ object NativeInterface {
 
     external fun setLdapr(enabled: Boolean)
 
+    /** Skip the Xbox kernel's startup busy-waits; must precede startEmulation. */
+    external fun setFastBoot(enabled: Boolean)
+
     /**
      * Save current VM state to a named snapshot inside the qcow2 HDD image.
      * Slot name convention: "slot_1" … "slot_8".

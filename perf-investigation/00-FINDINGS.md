@@ -3088,6 +3088,9 @@ bench 30.05 fps in both modes. The skip only touches startup.
 runs, against 13-21 in sections AP/AQ. Turnip was enabled in between
 (section AT) and slot 7 is GPU-bound; confirm before crediting it.)
 
-**Unverified: audio.** If the delay is DirectSound waiting for the audio DSP,
-skipping it could leave audio uninitialised in a way no counter here shows.
-Needs a listening test before it ships.
+**Audio: checked by ear by the user** (Bungie intro, menu music, weapons) --
+fine. **Shipped** as Advanced -> Fast boot, default on
+(`xemu_android_set_fast_boot`, applied before emulation starts); the
+`debug.xemu.stall_hle` property now overrides only when it holds 0-2, so
+"auto" leaves the setting in charge. Verified: default 3.6 s (4.0 s on the
+first launch after install), off 6.7 s.

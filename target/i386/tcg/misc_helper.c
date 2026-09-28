@@ -187,7 +187,7 @@ void helper_xemu_stall(CPUX86State *env)
     uint32_t n = env->regs[R_EAX];
     uint32_t chunk;
 
-    if (n <= 1) {
+    if (n <= 1 || g_xemu_stall_mode == 0) {
         return;
     }
     chunk = MIN(n - 1, g_xemu_stall_mode == 2 ? n - 1 : STALL_ITERS_PER_MS);

@@ -5210,10 +5210,14 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         static const uint8_t idiom[5] = { 0x83, 0xe8, 0x01, 0x75, 0xfb };
 
         if (!mode_read) {
+            /* The Fast boot setting sets the mode before emulation starts;
+             * the property overrides it only when it holds a mode (0-2), so
+             * any other value -- "auto" -- leaves the setting in charge. */
             char v[PROP_VALUE_MAX] = { 0 };
-            g_xemu_stall_mode =
-                __system_property_get("debug.xemu.stall_hle", v) > 0 ?
-                atoi(v) : 0;
+            if (__system_property_get("debug.xemu.stall_hle", v) > 0 &&
+                v[0] >= '0' && v[0] <= '2' && v[1] == '\0') {
+                g_xemu_stall_mode = v[0] - '0';
+            }
             mode_read = true;
             fprintf(stderr, "stall_hle: mode %d\n", g_xemu_stall_mode);
         }

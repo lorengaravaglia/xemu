@@ -197,6 +197,20 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         NativeInterface.setLdapr(value)
     }
 
+    /*
+     * Default ON: skipping the kernel's startup busy-waits took Halo's boot
+     * from 6.7 s to 3.6 s to the first logo, 20/20 boots clean, audio checked
+     * by ear (FINDINGS AW).  Applied at the next launch -- the emulation
+     * process reads it before it starts.
+     */
+    private val _fastBoot = MutableStateFlow(prefs.getBoolean("fast_boot", true))
+    val fastBoot: StateFlow<Boolean> = _fastBoot
+
+    fun setFastBoot(value: Boolean) {
+        _fastBoot.value = value
+        prefs.edit().putBoolean("fast_boot", value).apply()
+    }
+
     fun setHrtf(value: Boolean) {
         _hrtf.value = value
         prefs.edit().putBoolean("audio_hrtf", value).apply()
