@@ -500,7 +500,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             setPadding(12.dp, 6.dp, 12.dp, 6.dp)
             isClickable = true
             isFocusable = true
-            setOnClickListener { showMenuPopup(this) }
+            /* With the lower screen in use, the menu opens there instead of
+             * over the game. */
+            setOnClickListener {
+                if (bottomScreen != null) openPanelMenu() else showMenuPopup(this)
+            }
         }
         root.addView(menuBtn, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -518,7 +522,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
          */
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (!isExiting) confirmExit()
+                if (isExiting) {
+                    // already leaving
+                } else if (bottomScreen != null) {
+                    openPanelScreen(BottomPanelState.Screen.CONFIRM_EXIT)
+                } else {
+                    confirmExit()
+                }
             }
         })
         onBackPressedDispatcher.addCallback(this, overlayBackCallback)
@@ -1448,9 +1458,15 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             ControllerMapping.HotkeyFunction.TOGGLE_PAUSE  -> toggleUserPause()
             /* With the panel up, the menu hotkey hands it the controller; the
              * full menu is one tile away there ("More…"). */
+            /* With the panel up, the menu hotkey opens the menu there and
+             * hands it the controller -- whoever pressed it holds one. */
             ControllerMapping.HotkeyFunction.OPEN_MENU     ->
-                if (bottomScreen != null) setPanelController(true)
-                else showMenuPopup(menuBtn)
+                if (bottomScreen != null) {
+                    openPanelMenu()
+                    setPanelController(true)
+                } else {
+                    showMenuPopup(menuBtn)
+                }
             ControllerMapping.HotkeyFunction.CYCLE_OVERLAY -> cycleOverlayMode()
             ControllerMapping.HotkeyFunction.TOGGLE_FPS    -> toggleFpsOverlay()
         }
@@ -1628,10 +1644,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             KeyEvent.KEYCODE_ENTER -> if (event.repeatCount == 0) activatePanelFocus()
             KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BACK ->
                 if (event.repeatCount == 0) {
-                    if (panelState.screen.value != BottomPanelState.Screen.HOME) {
-                        panelActions.onBackToHome()
-                    } else {
-                        setPanelController(false)
+                    when (panelState.screen.value) {
+                        BottomPanelState.Screen.HOME -> setPanelController(false)
+                        BottomPanelState.Screen.CONFIRM_EXIT ->
+                            panelActions.onConfirmExit(false)
+                        else -> panelActions.onBackToHome()
                     }
                 }
             KeyEvent.KEYCODE_BUTTON_START ->
@@ -1655,6 +1672,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val i = panelState.focus.intValue
         when (panelState.screen.value) {
             BottomPanelState.Screen.HOME -> panelActions.onHomeTile(i)
+            BottomPanelState.Screen.MENU -> panelActions.onMenuTile(i)
+            BottomPanelState.Screen.CONFIRM_EXIT -> panelActions.onConfirmExit(i == 0)
             else -> panelState.slots.value.getOrNull(i)?.let { panelActions.onSlot(it.number) }
         }
     }
@@ -1669,7 +1688,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 BottomPanelState.TILE_SAVE       -> openPanelSlots(isSave = true)
                 BottomPanelState.TILE_LOAD       -> openPanelSlots(isSave = false)
                 BottomPanelState.TILE_SCREENSHOT -> takeScreenshot()
-                BottomPanelState.TILE_MORE       -> if (overlayView == null) showMenuPopup(menuBtn)
+                BottomPanelState.TILE_MORE       -> openPanelMenu()
             }
         }
 
@@ -1683,6 +1702,57 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
         override fun onToggleController() =
             setPanelController(!panelState.controllerHere.value)
+
+        override fun onMenuTile(index: Int) {
+            when (index) {
+                BottomPanelState.MENU_OVERLAY ->
+                    panelState.overlayLabel.value = cycleOverlayMode()
+                BottomPanelState.MENU_HRTF ->
+                    panelState.hrtfOn.value = toggleHrtf()
+                BottomPanelState.MENU_MAP_CONTROLS -> startActivity(
+                    Intent(this@EmulationActivity, MappingActivity::class.java))
+                BottomPanelState.MENU_RECORD -> {
+                    toggleRecording()
+                    refreshPanelMenuLabels()
+                }
+                BottomPanelState.MENU_PLAY_RECORDING -> showPlayRecordingDialog()
+                BottomPanelState.MENU_EXIT ->
+                    openPanelScreen(BottomPanelState.Screen.CONFIRM_EXIT)
+            }
+        }
+
+        override fun onConfirmExit(exit: Boolean) {
+            if (exit) {
+                exitToLibrary()
+            } else {
+                openPanelMenu()
+                panelState.focus.intValue = BottomPanelState.MENU_EXIT
+            }
+        }
+    }
+
+    /** Refresh the menu's live labels from the settings they show. */
+    private fun refreshPanelMenuLabels() {
+        panelState.overlayLabel.value = overlayModeLabel()
+        panelState.hrtfOn.value = mainPrefs.getBoolean("audio_hrtf", false)
+        panelState.recordingLabel.value = when {
+            InputRecorder.isRecording -> "Stop recording"
+            InputRecorder.isPlaying   -> "Playback active"
+            else                      -> "Record input"
+        }
+        panelState.recordingBusy.value = InputRecorder.isPlaying
+    }
+
+    private fun openPanelMenu() {
+        refreshPanelMenuLabels()
+        openPanelScreen(BottomPanelState.Screen.MENU)
+    }
+
+    private fun openPanelScreen(screen: BottomPanelState.Screen) {
+        panelState.screen.value = screen
+        /* The exit confirmation starts on Cancel: a stray A should not leave. */
+        panelState.focus.intValue =
+            if (screen == BottomPanelState.Screen.CONFIRM_EXIT) 1 else 0
     }
 
     private fun refreshPanelSlots() {

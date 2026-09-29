@@ -61,7 +61,7 @@ import com.boxxy.ui.theme.XemuTheme
 
 /** Observable state of the lower-screen panel; owned by EmulationActivity. */
 class BottomPanelState {
-    enum class Screen { HOME, SAVE_SLOTS, LOAD_SLOTS }
+    enum class Screen { HOME, SAVE_SLOTS, LOAD_SLOTS, MENU, CONFIRM_EXIT }
 
     val screen = mutableStateOf(Screen.HOME)
     /** True while controller input drives this panel instead of the game. */
@@ -77,11 +77,28 @@ class BottomPanelState {
     val status = mutableStateOf<String?>(null)
     val statusIsError = mutableStateOf(false)
 
+    /* Menu screen labels -- the in-game menu's, set by the activity. */
+    val overlayLabel = mutableStateOf("")
+    val hrtfOn = mutableStateOf(false)
+    val recordingLabel = mutableStateOf("Record input")
+    val recordingBusy = mutableStateOf(false)
+
+    /** Tiles on the current screen; the highlight never lands past them. */
+    fun tileCount(): Int = when (screen.value) {
+        Screen.HOME -> 8
+        Screen.SAVE_SLOTS, Screen.LOAD_SLOTS -> slots.value.size
+        Screen.MENU -> MENU_TILES
+        Screen.CONFIRM_EXIT -> 2
+    }
+
     /** Move the controller highlight within the 4-column, 2-row grid. */
     fun moveFocus(dx: Int, dy: Int) {
         val col = (focus.intValue % COLUMNS + dx).coerceIn(0, COLUMNS - 1)
         val row = (focus.intValue / COLUMNS + dy).coerceIn(0, ROWS - 1)
-        focus.intValue = row * COLUMNS + col
+        val next = row * COLUMNS + col
+        if (next < tileCount()) {
+            focus.intValue = next
+        }
     }
 
     companion object {
@@ -96,6 +113,14 @@ class BottomPanelState {
         const val TILE_LOAD = 5
         const val TILE_SCREENSHOT = 6
         const val TILE_MORE = 7
+
+        const val MENU_OVERLAY = 0
+        const val MENU_HRTF = 1
+        const val MENU_MAP_CONTROLS = 2
+        const val MENU_RECORD = 3
+        const val MENU_PLAY_RECORDING = 4
+        const val MENU_EXIT = 5
+        const val MENU_TILES = 6
     }
 }
 
@@ -105,6 +130,9 @@ interface BottomPanelActions {
     fun onSlot(number: Int)
     fun onBackToHome()
     fun onToggleController()
+    fun onMenuTile(index: Int)
+    /** From the exit confirmation: leave, or go back to the menu. */
+    fun onConfirmExit(exit: Boolean)
 }
 
 /**
@@ -153,6 +181,8 @@ private fun BottomPanel(state: BottomPanelState, actions: BottomPanelActions) {
 
             when (state.screen.value) {
                 BottomPanelState.Screen.HOME -> HomeGrid(state, actions)
+                BottomPanelState.Screen.MENU -> MenuGrid(state, actions)
+                BottomPanelState.Screen.CONFIRM_EXIT -> ConfirmExit(state, actions)
                 else -> SlotGrid(state, actions)
             }
 
@@ -220,7 +250,7 @@ private fun HomeGrid(state: BottomPanelState, actions: BottomPanelActions) {
         "Save…",
         "Load…",
         "Screenshot",
-        "More…",
+        "Menu…",
     )
     TileGrid(
         count = labels.size,
@@ -268,6 +298,73 @@ private fun SlotGrid(state: BottomPanelState, actions: BottomPanelActions) {
             enabled = usable && !state.busy.value,
             dim = !usable,
             onClick = { actions.onSlot(s.number) },
+        )
+    }
+}
+
+/** Header row for a sub-screen: its title and the way back. */
+@Composable
+private fun SubScreenHeader(title: String, onBack: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onBack) { Text("Back") }
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+/**
+ * The in-game menu, on the lower screen so opening it no longer covers the
+ * game.  Save and load already have home tiles; this holds the rest of what
+ * the top-screen menu offers.
+ */
+@Composable
+private fun MenuGrid(state: BottomPanelState, actions: BottomPanelActions) {
+    SubScreenHeader("Menu", onBack = actions::onBackToHome)
+    val labels = listOf(
+        "Overlay\n${state.overlayLabel.value}",
+        "HRTF\n${if (state.hrtfOn.value) "On" else "Off"}",
+        "Map controls",
+        state.recordingLabel.value,
+        "Play recording",
+        "Exit to library",
+    )
+    TileGrid(
+        count = labels.size,
+        focus = if (state.controllerHere.value) state.focus.intValue else -1,
+    ) { index, focused ->
+        PanelTile(
+            label = labels[index],
+            focused = focused,
+            enabled = !(index == BottomPanelState.MENU_RECORD &&
+                        state.recordingBusy.value),
+            onClick = { actions.onMenuTile(index) },
+        )
+    }
+}
+
+@Composable
+private fun ConfirmExit(state: BottomPanelState, actions: BottomPanelActions) {
+    SubScreenHeader("Exit to library?", onBack = { actions.onConfirmExit(false) })
+    Text(
+        "Your place is kept for Quick resume. Save to a slot to keep it longer.",
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.padding(bottom = 12.dp),
+    )
+    val labels = listOf("Exit", "Cancel")
+    TileGrid(
+        count = labels.size,
+        focus = if (state.controllerHere.value) state.focus.intValue else -1,
+    ) { index, focused ->
+        PanelTile(
+            label = labels[index],
+            focused = focused,
+            enabled = true,
+            onClick = { actions.onConfirmExit(index == 0) },
         )
     }
 }
