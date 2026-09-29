@@ -28,6 +28,7 @@
         <activity
             android:name=".emulation.EmulationActivity"
             android:configChanges="orientation|screenSize"
+            android:launchMode="singleTask"
             android:exported="false"
             android:gwpAsanMode="never"
             android:memtagMode="off"

@@ -89,8 +89,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Start the game a running emulator handed over when switching games
+     * (EmulationActivity.switchToGame).  Its process must be gone first: QEMU
+     * cannot start twice in one, and a new start while it lingers would be
+     * routed straight back into it.
+     */
+    private fun maybeRelaunchGame(from: Intent) {
+        @Suppress("DEPRECATION")
+        val next = from.getParcelableExtra<Intent>(
+            com.boxxy.emulation.EXTRA_RELAUNCH_GAME) ?: return
+        val pid = from.getIntExtra(com.boxxy.emulation.EXTRA_RELAUNCH_WAIT_PID, 0)
+        from.removeExtra(com.boxxy.emulation.EXTRA_RELAUNCH_GAME)
+        val am = getSystemService(android.app.ActivityManager::class.java)
+        lifecycleScope.launch {
+            for (i in 0 until 50) {
+                val alive = am.runningAppProcesses?.any { it.pid == pid } == true
+                if (!alive) break
+                kotlinx.coroutines.delay(100)
+            }
+            startActivity(next)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        maybeRelaunchGame(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        maybeRelaunchGame(intent)
         maybeAutoLaunch()
         enableEdgeToEdge()
         // Dark theme — force light (white) status bar icons

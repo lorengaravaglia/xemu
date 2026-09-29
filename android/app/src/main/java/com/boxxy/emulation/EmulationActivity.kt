@@ -67,6 +67,10 @@ private const val TAP_HOLD_MS = 100L
 /** Intent extra: load this game's quick-resume point instead of booting. */
 const val EXTRA_QUICK_RESUME = "quick_resume"
 
+/** Extras MainActivity uses to start a game once the old emulator is gone. */
+const val EXTRA_RELAUNCH_GAME = "relaunch_game"
+const val EXTRA_RELAUNCH_WAIT_PID = "relaunch_wait_pid"
+
 /**
  * Minimum play before an automatic resume point is written.  Quitting during
  * the boot's black screen would otherwise replace a real resume point with a
@@ -642,6 +646,86 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             setUserPaused(pausedBeforePanel)
         }
         hideDualScreen()
+    }
+
+    /*
+     * One emulator per process, ever: QEMU cannot be initialised twice.
+     *
+     * This activity is singleTask, so asking for a game while one runs lands
+     * here instead of building a second instance in the same process -- which
+     * is what reaching the library in-app and starting a game used to do.
+     * The same game just carries on.  A different one needs a fresh process,
+     * which this one cannot start for itself: it saves its place, hands the
+     * launch to the library's process, and exits; MainActivity waits for this
+     * process to be gone before starting the new game.
+     */
+    override fun onNewIntent(newIntent: Intent) {
+        super.onNewIntent(newIntent)
+        val iso = newIntent.getStringExtra("iso") ?: return
+        if (!emulationStarted || isExiting) return
+        if (QuickResume.gameIdFor(iso) == gameId) {
+            /* Already further on than any resume point: carry on. */
+            showMessage(if (newIntent.getBooleanExtra(EXTRA_QUICK_RESUME, false))
+                            "Already playing \u2014 carrying on"
+                        else "Already running")
+            return
+        }
+        confirmSwitchGame(newIntent)
+    }
+
+    private fun gameTitleFor(isoUri: String): String =
+        android.net.Uri.parse(isoUri).lastPathSegment
+            ?.substringAfterLast('/')
+            ?.removeSuffix(".iso")?.removeSuffix(".xiso")
+            ?: "the game"
+
+    private fun confirmSwitchGame(newIntent: Intent) {
+        val current = gameTitleFor(intent.getStringExtra("iso") ?: "")
+        val next = gameTitleFor(newIntent.getStringExtra("iso") ?: "")
+        showOverlay(Gravity.CENTER, dimBackground = true) { transition, onHidden ->
+            GameConfirmDialog(
+                title = "Switch game?",
+                message = "Start $next?\n\n$current keeps its place for " +
+                          "Quick resume.",
+                confirmLabel = "Switch",
+                dismissLabel = "Keep playing",
+                visibleState = transition,
+                maxHeight = dialogMaxHeight(),
+                onFullyHidden = onHidden,
+                onConfirm = { dismissOverlay(); switchToGame(newIntent) },
+                onDismiss = { dismissOverlay() },
+            )
+        }
+    }
+
+    private fun switchToGame(newIntent: Intent) {
+        if (isExiting) return
+        isExiting = true
+        showMessage("Saving\u2026")
+        Thread {
+            if (shouldAutoSave()) {
+                saveResumePoint()
+            }
+            NativeInterface.flushBlockDevices()
+            runOnUiThread {
+                val relaunch = Intent(this, MainActivity::class.java).apply {
+                    putExtra(EXTRA_RELAUNCH_GAME, Intent(newIntent).apply {
+                        component = android.content.ComponentName(
+                            this@EmulationActivity, EmulationActivity::class.java)
+                    })
+                    putExtra(EXTRA_RELAUNCH_WAIT_PID, android.os.Process.myPid())
+                    /* Reuse the library already under this activity rather
+                     * than stacking a second one. */
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                             Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+                startActivity(relaunch)
+                finish()
+                window.decorView.postDelayed({
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                }, 350)
+            }
+        }.start()
     }
 
     override fun onStop() {
