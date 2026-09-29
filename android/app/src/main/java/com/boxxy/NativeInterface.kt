@@ -115,6 +115,10 @@ object NativeInterface {
     /** Skip the Xbox kernel's startup busy-waits; must precede startEmulation. */
     external fun setFastBoot(enabled: Boolean)
 
+    /** True once the emulated controller's USB devices exist -- a save state
+     *  cannot be loaded before then. */
+    external fun isInputReady(): Boolean
+
     /**
      * Save current VM state to a named snapshot inside the qcow2 HDD image.
      * Slot name convention: "slot_1" … "slot_8".

@@ -64,6 +64,16 @@ private const val COMBO_WINDOW_MS = 120L
  */
 private const val TAP_HOLD_MS = 100L
 
+/** Intent extra: load this game's quick-resume point instead of booting. */
+const val EXTRA_QUICK_RESUME = "quick_resume"
+
+/**
+ * Minimum play before an automatic resume point is written.  Quitting during
+ * the boot's black screen would otherwise replace a real resume point with a
+ * useless one.  Halo reaches its first logo in ~3.6 s with Fast boot.
+ */
+private const val AUTO_SAVE_MIN_PLAY_MS = 15_000L
+
 class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
     private lateinit var surfaceView: SurfaceView
@@ -100,6 +110,16 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private val lateSentKeycodes = mutableSetOf<Int>()         // pressed after the combo window
     private var quickSaveSlot = 1                              // 1–8, cycled via hotkey
     private var userPaused = false                             // user explicitly paused in-game
+
+    // ── Quick resume (see QuickResume.kt) ─────────────────────────────────────
+    /** When play began: emulation start, or a completed resume.  Auto-save
+     *  waits for AUTO_SAVE_MIN_PLAY_MS so a boot-and-quit cannot overwrite a
+     *  real resume point with a black boot screen. */
+    private var playingSinceMs = 0L
+    private var quickResumeLoading = false
+    @Volatile private var backgroundSaveInFlight = false
+    /** onResume arrived during a background save; resume once it is done. */
+    private var resumeWhenSaveDone = false
 
     // ── Dual-screen mode (see DualScreen.kt) ──────────────────────────────────
     private val panelState = BottomPanelState()
@@ -556,7 +576,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     override fun onResume() {
         super.onResume()
-        if (!userPaused) NativeInterface.resumeEmulation()
+        /* A background save holds the QEMU main loop; resuming now would
+         * block this thread on it.  Resume when the save finishes instead. */
+        if (backgroundSaveInFlight) {
+            resumeWhenSaveDone = true
+        } else if (!userPaused) {
+            NativeInterface.resumeEmulation()
+        }
         inputManager.registerInputDeviceListener(this, null)
         lastFpsTime = 0L
         usageSampler.reset()
@@ -606,6 +632,27 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             setUserPaused(pausedBeforePanel)
         }
         hideDualScreen()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        /* Leaving for the background: save a resume point in case Android
+         * reclaims the process.  Emulation is already paused (onPause), and
+         * saving while paused is supported (FINDINGS AV era fix). */
+        if (!isExiting && !isChangingConfigurations && shouldAutoSave()) {
+            backgroundSaveInFlight = true
+            resumeWhenSaveDone = false
+            Thread {
+                saveResumePoint()
+                runOnUiThread {
+                    backgroundSaveInFlight = false
+                    if (resumeWhenSaveDone && !userPaused) {
+                        NativeInterface.resumeEmulation()
+                    }
+                    resumeWhenSaveDone = false
+                }
+            }.start()
+        }
     }
 
     override fun onDestroy() {
@@ -1111,19 +1158,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     }
 
     /** Derive a short, filesystem-safe game ID from the ISO URI for snapshot namespacing. */
-    private fun isoUriToGameId(uriStr: String): String {
-        if (uriStr.isEmpty()) return "dashboard"
-        val basename = android.net.Uri.parse(uriStr).lastPathSegment
-            ?.substringAfterLast('/')
-            ?.substringBeforeLast('.')
-            ?: return "game"
-        return basename
-            .lowercase()
-            .replace(Regex("[^a-z0-9]+"), "_")
-            .trim('_')
-            .take(24)
-            .ifEmpty { "game" }
-    }
 
     /** Cycles the overlay mode and returns the new label, so the menu can
      *  update without being dismissed and reopened. */
@@ -1161,7 +1195,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             GameConfirmDialog(
                 title = "Exit to Library",
                 message = "Return to the game library?\n\n" +
-                          "Unsaved game progress will be lost.",
+                          "Your place is kept for Quick resume. Save " +
+                          "to a slot to keep it longer.",
                 confirmLabel = "Exit",
                 dismissLabel = "Cancel",
                 visibleState = transition,
@@ -1186,11 +1221,14 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
      * be re-initialised in a process that has already run it, so the next
      * launch needs a fresh one.
      */
-    private fun exitToLibrary() {
+    private fun exitToLibrary(saveResume: Boolean = true) {
         if (isExiting) return
         isExiting = true
         showMessage("Saving\u2026")
         Thread {
+            if (saveResume && shouldAutoSave()) {
+                saveResumePoint()
+            }
             NativeInterface.flushBlockDevices()
             runOnUiThread {
                 finish()
@@ -1198,6 +1236,91 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 window.decorView.postDelayed({
                     android.os.Process.killProcess(android.os.Process.myPid())
                 }, 350)
+            }
+        }.start()
+    }
+
+    // ── Quick resume ──────────────────────────────────────────────────────────
+
+    private fun shouldAutoSave(): Boolean =
+        emulationStarted && !quickResumeLoading && !stateOpInFlight &&
+        playingSinceMs != 0L &&
+        System.currentTimeMillis() - playingSinceMs >= AUTO_SAVE_MIN_PLAY_MS
+
+    /** Blocking; call off the UI thread.  Records the marker only on success. */
+    private fun saveResumePoint() {
+        val err = NativeInterface.saveState(QuickResume.snapshotName(gameId))
+        if (err == null) {
+            QuickResume.markSaved(this, gameId)
+            Log.i("xemu-android", "quick resume: saved ${QuickResume.snapshotName(gameId)}")
+        } else {
+            Log.w("xemu-android", "quick resume: save failed: $err")
+        }
+    }
+
+    /**
+     * Load the resume point as soon as the machine exists.
+     *
+     * Uses the same load path as the save slots rather than QEMU's -loadvm,
+     * which restores during machine construction and has never been exercised
+     * here.  The guest starts booting for a moment first; the load replaces
+     * all of it.  If the load fails -- the marker outlived its state -- the
+     * boot simply carries on.
+     */
+    private fun startQuickResume() {
+        quickResumeLoading = true
+        showMessage("Resuming\u2026")
+        val name = QuickResume.snapshotName(gameId)
+        Thread {
+            /*
+             * Wait for the machine to match the saved one.  The state includes
+             * the controller's USB hub, attached just after QEMU starts; a
+             * load before that fails ("Unknown section or instance") and a
+             * failed load leaves the VM stopped, so it must not be attempted
+             * early and retried.  Require the hub for 300 ms, since the port
+             * is briefly re-bound during startup.
+             */
+            val deadline = System.currentTimeMillis() + 20_000
+            var readySince = 0L
+            while (System.currentTimeMillis() < deadline) {
+                if (NativeInterface.isInputReady()) {
+                    if (readySince == 0L) readySince = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - readySince >= 300) break
+                } else {
+                    readySince = 0L
+                }
+                Thread.sleep(50)
+            }
+            val err: String? = if (readySince == 0L) {
+                "the emulated controller never attached"
+            } else {
+                NativeInterface.loadState(name)
+            }
+            runOnUiThread {
+                quickResumeLoading = false
+                playingSinceMs = System.currentTimeMillis()
+                if (err == null) {
+                    Log.i("xemu-android", "quick resume: loaded $name")
+                    showMessage("Resumed")
+                } else {
+                    Log.w("xemu-android", "quick resume: load failed: $err")
+                    /* Forget the resume point only if it is really gone;
+                     * any other failure is worth trying again. */
+                    if (err.contains("not found", ignoreCase = true) ||
+                        err.contains("does not exist", ignoreCase = true) ||
+                        err.contains("No snapshot", ignoreCase = true)) {
+                        QuickResume.clear(this, gameId)
+                    }
+                    /*
+                     * A failed load leaves the machine stopped and possibly
+                     * half-restored, so it cannot just carry on booting, and
+                     * QEMU cannot be started twice in one process.  Say what
+                     * happened and go back to the library, where a normal tap
+                     * starts the game fresh.  Nothing is saved on the way out.
+                     */
+                    showMessage("Could not resume: $err", isError = true)
+                    root.postDelayed({ exitToLibrary(saveResume = false) }, 3000)
+                }
             }
         }.start()
     }
@@ -1212,7 +1335,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         val biosUri = intent.getStringExtra("bios") ?: ""
         val hddUri  = intent.getStringExtra("hdd")  ?: ""
         val isoUriStr = intent.getStringExtra("iso") ?: ""
-        gameId = isoUriToGameId(isoUriStr)
+        gameId = QuickResume.gameIdFor(isoUriStr)
         val renderer  = intent.getStringExtra("renderer") ?: ""
         val driverDir  = intent.getStringExtra("driverDir")  ?: ""
         val driverName = intent.getStringExtra("driverName") ?: ""
@@ -1232,6 +1355,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         /* Both are read while the machine is built; must precede startEmulation(). */
         NativeInterface.setSkipBootAnim(mainPrefs.getBoolean("skip_boot_anim", false))
         NativeInterface.setVoiceWorkers(mainPrefs.getInt("audio_voice_workers", 2))
+
+        playingSinceMs = System.currentTimeMillis()
+        if (intent.getBooleanExtra(EXTRA_QUICK_RESUME, false)) {
+            startQuickResume()
+        }
 
         NativeInterface.startEmulation(
             holder.surface,

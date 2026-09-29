@@ -234,6 +234,17 @@ void xemu_android_input_init(void) {
     xemu_input_bind(0, state, false);
 }
 
+/*
+ * True once port 0 has its controller and USB hub attached.  A save state
+ * records that hub ("usb-hub" under the controller port), so loading one
+ * before the device exists fails with "Unknown section or instance", and the
+ * failed load leaves the VM stopped.  Quick resume waits for this.
+ */
+bool xemu_android_input_ready(void) {
+    ControllerState *c = xemu_input_get_bound(0);
+    return c != NULL && c->device != NULL;
+}
+
 void xemu_android_set_button(uint32_t mask, int pressed) {
     if (!g_android_controller) return;
     if (pressed) {

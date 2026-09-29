@@ -130,6 +130,7 @@ void xemu_android_set_surface_scale(unsigned int scale);
 void xemu_android_set_accurate_mem_ordering(bool enabled);
 void xemu_android_set_ldapr(bool enabled);
 void xemu_android_set_fast_boot(bool enabled);
+bool xemu_android_input_ready(void);
 
 /* xemu_adpf.c -- performance hint session for the frame-rate threads. */
 void xemu_adpf_on_guest_frame(void);

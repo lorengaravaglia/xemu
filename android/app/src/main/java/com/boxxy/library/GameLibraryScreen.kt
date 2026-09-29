@@ -28,6 +28,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.boxxy.emulation.EmulationActivity
+import com.boxxy.emulation.EXTRA_QUICK_RESUME
+import com.boxxy.emulation.QuickResume
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.boxxy.settings.SettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -45,6 +52,18 @@ fun GameLibraryScreen(
 
     // Long-pressed game awaiting an artwork decision.
     var artTarget by remember { mutableStateOf<GameEntry?>(null) }
+
+    /* Bumped whenever the library returns to the front, so resume points the
+     * emulator process just wrote show up without a rescan. */
+    var resumeRefresh by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumeRefresh++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val artPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -135,10 +154,20 @@ fun GameLibraryScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 items(games, key = { it.uri.toString() }) { game ->
+                    /* Re-read when the library comes back to the front: the
+                     * emulator process writes the marker on exit. */
+                    val resumeAt = remember(game.uri, resumeRefresh) {
+                        QuickResume.savedAt(
+                            context, QuickResume.gameIdFor(game.uri.toString()))
+                    }
                     GameCard(
                         game = game,
                         onClick = { launchGame(context, game, settingsViewModel) },
                         onLongClick = { artTarget = game },
+                        onResume = resumeAt?.let {
+                            { launchGame(context, game, settingsViewModel,
+                                         quickResume = true) }
+                        },
                     )
                 }
             }
@@ -148,8 +177,15 @@ fun GameLibraryScreen(
 
 
     artTarget?.let { game ->
+        val resumeAt = QuickResume.savedAt(
+            context, QuickResume.gameIdFor(game.uri.toString()))
         ArtworkDialog(
             game = game,
+            resumeAt = resumeAt,
+            onQuickResume = {
+                artTarget = null
+                launchGame(context, game, settingsViewModel, quickResume = true)
+            },
             onChoose = { artPicker.launch(arrayOf("image/*")) },
             onReset = {
                 libraryViewModel.clearCustomArt(game)
@@ -168,6 +204,8 @@ fun GameLibraryScreen(
 @Composable
 private fun ArtworkDialog(
     game: GameEntry,
+    resumeAt: Long?,
+    onQuickResume: () -> Unit,
     onChoose: () -> Unit,
     onReset: () -> Unit,
     onDismiss: () -> Unit,
@@ -176,13 +214,26 @@ private fun ArtworkDialog(
         onDismissRequest = onDismiss,
         title = { Text(game.displayName) },
         text = {
-            Text(
-                if (game.titleId == null)
-                    "This disc could not be read, so artwork cannot be stored for it."
-                else
-                    "Choose your own image, or go back to the artwork found on the disc.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                /* The alternate way in: a normal tap boots the game. */
+                if (resumeAt != null) {
+                    FilledTonalButton(
+                        onClick = onQuickResume,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Quick resume \u00b7 " +
+                             android.text.format.DateUtils.getRelativeTimeSpanString(
+                                 resumeAt).toString())
+                    }
+                }
+                Text(
+                    if (game.titleId == null)
+                        "This disc could not be read, so artwork cannot be stored for it."
+                    else
+                        "Choose your own image, or go back to the artwork found on the disc.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
         },
         confirmButton = {
             TextButton(onClick = onChoose, enabled = game.titleId != null) {
@@ -201,6 +252,7 @@ private fun launchGame(
     context: android.content.Context,
     game: GameEntry,
     settings: SettingsViewModel,
+    quickResume: Boolean = false,
 ) {
     val mcpx = settings.mcpxUri.value?.toString() ?: return
     val bios = settings.biosUri.value?.toString() ?: return
@@ -216,6 +268,7 @@ private fun launchGame(
         putExtra("renderer",   settings.renderer.value)
         putExtra("driverDir",  if (useCustomDriver) settings.driverDir.value else "")
         putExtra("driverName", if (useCustomDriver) settings.driverName.value else "")
+        putExtra(EXTRA_QUICK_RESUME, quickResume)
     }
     context.startActivity(intent)
 }

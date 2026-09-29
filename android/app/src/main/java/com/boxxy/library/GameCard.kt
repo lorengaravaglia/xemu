@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -20,7 +21,13 @@ import coil.compose.AsyncImage
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun GameCard(game: GameEntry, onClick: () -> Unit, onLongClick: () -> Unit = {}) {
+fun GameCard(
+    game: GameEntry,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
+    /** Non-null when a quick-resume point exists: the alternate way in. */
+    onResume: (() -> Unit)? = null,
+) {
     /*
      * The click handling sits on the inner Box rather than Card's own onClick
      * overload, because long-press needs combinedClickable and Card has no such
@@ -55,6 +62,25 @@ fun GameCard(game: GameEntry, onClick: () -> Unit, onLongClick: () -> Unit = {})
                             else Color.Transparent
                         ),
                 )
+            }
+            /* Quick resume, as a separate target: tapping the card itself
+             * still boots the game from the start. */
+            if (onResume != null) {
+                Surface(
+                    onClick = onResume,
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp),
+                ) {
+                    Text(
+                        "Resume",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
             }
             // Title bar at bottom — always shown; semi-transparent over art, solid when no art
             Box(

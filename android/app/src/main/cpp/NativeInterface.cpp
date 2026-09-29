@@ -164,6 +164,11 @@ Java_com_boxxy_NativeInterface_setLdapr(JNIEnv *env, jclass clazz,
     xemu_android_set_ldapr((bool)enabled);
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_boxxy_NativeInterface_isInputReady(JNIEnv *env, jclass clazz) {
+    return xemu_android_input_ready() ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL
 Java_com_boxxy_NativeInterface_setFastBoot(JNIEnv *env, jclass clazz,
                                            jboolean enabled) {
