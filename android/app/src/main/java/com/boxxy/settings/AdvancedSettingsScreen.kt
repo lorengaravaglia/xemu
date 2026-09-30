@@ -20,6 +20,7 @@ fun AdvancedSettingsScreen(
     val accurateMemOrdering by settingsViewModel.accurateMemOrdering.collectAsState()
     val fastOrderedLoads by settingsViewModel.fastOrderedLoads.collectAsState()
     val fastBoot by settingsViewModel.fastBoot.collectAsState()
+    val hrtf by settingsViewModel.hrtf.collectAsState()
 
     // Compute shader cache stats on composition.  shaders/ is the GL
     // renderer's; the Vulkan renderer keeps SPIR-V in shaders_vk/ and the
@@ -93,6 +94,25 @@ fun AdvancedSettingsScreen(
                                    "next time a game starts.",
                         checked = fastBoot,
                     ) { settingsViewModel.setFastBoot(it) }
+                }
+            }
+
+            SettingsSectionLabel("Audio")
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    SettingsSwitchRow(
+                        label = "HRTF 3D audio",
+                        subtitle = "Games that position sounds in 3D can use " +
+                                   "HRTF filtering, which shapes each sound the " +
+                                   "way your ears would hear it from its " +
+                                   "direction — behind, above, to one side. " +
+                                   "It only works on headphones: through " +
+                                   "speakers both ears hear both channels and " +
+                                   "the effect cancels out, costing about 2% " +
+                                   "CPU for nothing. Normal left/right stereo " +
+                                   "is kept either way. Applies immediately.",
+                        checked = hrtf,
+                    ) { settingsViewModel.setHrtf(it) }
                 }
             }
 

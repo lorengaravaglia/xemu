@@ -206,53 +206,62 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             val now = System.currentTimeMillis()
             val count = NativeInterface.getRenderedFrameCount()
             val elapsed = now - lastFpsTime
-            if (lastFpsTime != 0L && elapsed > 0) {
-                val fps = (count - lastFrameCount) * 1000f / elapsed
-                if (fpsLine.visibility == View.VISIBLE)
-                    fpsLine.text = "FPS: %.1f".format(fps)
-            }
-            if (frametimeLine.visibility == View.VISIBLE) {
-                val worstMs = NativeInterface.getWorstFrameTimeMs()
-                frametimeLine.text = "Frame: ${worstMs} ms worst"
-            }
-            if (frameTimeGraph.visibility == View.VISIBLE) {
-                frameTimeGraph.samples = NativeInterface.getFrameTimeHistory()
-                frameTimeGraph.invalidate()
-            }
-            if (pgraphLine.visibility == View.VISIBLE) {
-                val syncMs = NativeInterface.getPgraphSyncWaitMs()
-                pgraphLine.text = "GPU wait: ${syncMs} ms"
-            }
-            if (memoryLine.visibility == View.VISIBLE) {
-                val kb = java.io.File("/proc/self/status").readLines()
+            val panel = bottomScreen != null
+            fun shown(v: View) = v.visibility == View.VISIBLE
+
+            /*
+             * Each figure is read ONCE per tick and shared by the top overlay
+             * and the lower screen's Performance tab: the worst-frame reading
+             * resets when read, and the usage sampler measures the window
+             * between calls, so a second read would see ~0.
+             */
+            val fps = if (lastFpsTime != 0L && elapsed > 0)
+                (count - lastFrameCount) * 1000f / elapsed else null
+            val worstMs = if (shown(frametimeLine) || panel)
+                NativeInterface.getWorstFrameTimeMs() else null
+            val history = if (shown(frameTimeGraph) || panel)
+                NativeInterface.getFrameTimeHistory() else null
+            val syncMs = if (shown(pgraphLine) || panel)
+                NativeInterface.getPgraphSyncWaitMs() else null
+            val ramMb = if (shown(memoryLine) || panel)
+                (java.io.File("/proc/self/status").readLines()
                     .firstOrNull { it.startsWith("VmRSS:") }
                     ?.filter { it.isDigit() }
-                    ?.toLongOrNull() ?: 0L
-                memoryLine.text = "RAM: ${kb / 1024} MB"
-            }
-            if (shadersLine.visibility == View.VISIBLE) {
-                val n = NativeInterface.getCompiledShaderCount()
-                shadersLine.text = "Shaders: $n"
-            }
-            /* Sampled once per tick and shared: the sampler works on deltas,
-             * so a second call in the same tick would read a ~0 ms window. */
-            val wantUsage = cpuLine.visibility == View.VISIBLE || bottomScreen != null
+                    ?.toLongOrNull() ?: 0L) / 1024 else null
+            val shaders = if (shown(shadersLine) || panel)
+                NativeInterface.getCompiledShaderCount() else null
+            val wantUsage = shown(cpuLine) || panel
             val t = if (wantUsage) usageSampler.sampleThreads() else null
             val g = if (wantUsage) usageSampler.sampleGpu() else null
-            if (cpuLine.visibility == View.VISIBLE) {
+
+            if (shown(fpsLine) && fps != null) fpsLine.text = "FPS: %.1f".format(fps)
+            if (shown(frametimeLine)) frametimeLine.text = "Frame: ${worstMs} ms worst"
+            if (shown(frameTimeGraph) && history != null) {
+                frameTimeGraph.samples = history
+                frameTimeGraph.invalidate()
+            }
+            if (shown(pgraphLine)) pgraphLine.text = "GPU wait: ${syncMs} ms"
+            if (shown(memoryLine)) memoryLine.text = "RAM: ${ramMb} MB"
+            if (shown(shadersLine)) shadersLine.text = "Shaders: $shaders"
+            if (shown(cpuLine)) {
                 cpuLine.text = "CPU: x86 ${t?.vcpuPct?.let { "$it%" } ?: "--"}" +
                                " · NV2A ${t?.nv2aPct?.let { "$it%" } ?: "--"}"
                 gpuLine.text = if (g == null) "GPU: n/a"
                                else "GPU: ${g.busyPct}%" + (g.mhz?.let { " @ $it MHz" } ?: "")
             }
-            if (bottomScreen != null && lastFpsTime != 0L && elapsed > 0) {
-                val fps = (count - lastFrameCount) * 1000f / elapsed
+            if (panel && fps != null) {
                 panelState.stats.value = buildString {
                     append("%.1f fps".format(fps))
                     t?.vcpuPct?.let { append("  ·  x86 $it%") }
                     t?.nv2aPct?.let { append("  ·  NV2A $it%") }
                     g?.let { append("  ·  GPU ${it.busyPct}%") }
                 }
+                panelState.perf.value = PerfSnapshot(
+                    fps = fps, worstMs = worstMs, history = history ?: IntArray(0),
+                    gpuWaitMs = syncMs, ramMb = ramMb, shaders = shaders,
+                    vcpuPct = t?.vcpuPct, nv2aPct = t?.nv2aPct,
+                    gpuBusyPct = g?.busyPct, gpuMhz = g?.mhz,
+                )
             }
             lastFrameCount = count
             lastFpsTime = now
@@ -1091,7 +1100,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         showOverlay(Gravity.TOP or Gravity.END, topPx, 16.dp) { transition, onHidden ->
             InGameMenu(
                 initialOverlayLabel = overlayModeLabel(),
-                initialHrtfOn = mainPrefs.getBoolean("audio_hrtf", false),
                 recordingLabel = when {
                     InputRecorder.isRecording -> "Stop Recording"
                     InputRecorder.isPlaying   -> "Playback active"
@@ -1102,7 +1110,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 visibleState = transition,
                 onFullyHidden = onHidden,
                 onCycleOverlay = { cycleOverlayMode() },
-                onToggleHrtf = { toggleHrtf() },
                 onSaveState = { dismissOverlay(); showSlotPicker(isSave = true) },
                 onLoadState = { dismissOverlay(); showSlotPicker(isSave = false) },
                 onMapControls = {
@@ -1270,18 +1277,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         OverlayMode.AUTO        -> "Auto"
         OverlayMode.ALWAYS_SHOW -> "Always"
         OverlayMode.ALWAYS_HIDE -> "Hidden"
-    }
-
-    /**
-     * Toggle HRTF 3D positional audio.  The APU re-reads this every audio
-     * frame, so it applies immediately and can be A/B'd while a game is
-     * running.  Shares the "audio_hrtf" pref with the Audio settings screen.
-     */
-    private fun toggleHrtf(): Boolean {
-        val enabled = !mainPrefs.getBoolean("audio_hrtf", false)
-        mainPrefs.edit().putBoolean("audio_hrtf", enabled).apply()
-        NativeInterface.setHrtf(enabled)
-        return enabled
     }
 
     private fun confirmExit() {
@@ -1728,8 +1723,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             KeyEvent.KEYCODE_ENTER -> if (event.repeatCount == 0) activatePanelFocus()
             KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BACK ->
                 if (event.repeatCount == 0) {
+                    /* On a tab's own screen, B hands the controller back; on
+                     * a sub-screen it steps up one level. */
                     when (panelState.screen.value) {
-                        BottomPanelState.Screen.HOME -> setPanelController(false)
+                        BottomPanelState.Screen.HOME,
+                        BottomPanelState.Screen.MENU,
+                        BottomPanelState.Screen.PERF -> setPanelController(false)
                         BottomPanelState.Screen.CONFIRM_EXIT ->
                             panelActions.onConfirmExit(false)
                         else -> panelActions.onBackToHome()
@@ -1758,11 +1757,22 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             BottomPanelState.Screen.HOME -> panelActions.onHomeTile(i)
             BottomPanelState.Screen.MENU -> panelActions.onMenuTile(i)
             BottomPanelState.Screen.CONFIRM_EXIT -> panelActions.onConfirmExit(i == 0)
+            BottomPanelState.Screen.PERF -> {}
             else -> panelState.slots.value.getOrNull(i)?.let { panelActions.onSlot(it.number) }
         }
     }
 
     private val panelActions = object : BottomPanelActions {
+        /* A swipe or tab tap lands on the tab's own screen. */
+        override fun onSelectTab(tab: BottomPanelState.Tab) {
+            when (tab) {
+                BottomPanelState.Tab.QUICK -> openPanelScreen(BottomPanelState.Screen.HOME)
+                BottomPanelState.Tab.MENU -> openPanelMenu()
+                BottomPanelState.Tab.PERF -> openPanelScreen(BottomPanelState.Screen.PERF)
+            }
+            panelState.activeSlot.value = null
+        }
+
         override fun onHomeTile(index: Int) {
             when (index) {
                 BottomPanelState.TILE_PAUSE      -> toggleUserPause()
@@ -1772,7 +1782,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 BottomPanelState.TILE_SAVE       -> openPanelSlots(isSave = true)
                 BottomPanelState.TILE_LOAD       -> openPanelSlots(isSave = false)
                 BottomPanelState.TILE_SCREENSHOT -> takeScreenshot()
-                BottomPanelState.TILE_MORE       -> openPanelMenu()
             }
         }
 
@@ -1791,8 +1800,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             when (index) {
                 BottomPanelState.MENU_OVERLAY ->
                     panelState.overlayLabel.value = cycleOverlayMode()
-                BottomPanelState.MENU_HRTF ->
-                    panelState.hrtfOn.value = toggleHrtf()
                 BottomPanelState.MENU_MAP_CONTROLS -> startActivity(
                     Intent(this@EmulationActivity, MappingActivity::class.java))
                 BottomPanelState.MENU_RECORD -> {
@@ -1818,7 +1825,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     /** Refresh the menu's live labels from the settings they show. */
     private fun refreshPanelMenuLabels() {
         panelState.overlayLabel.value = overlayModeLabel()
-        panelState.hrtfOn.value = mainPrefs.getBoolean("audio_hrtf", false)
         panelState.recordingLabel.value = when {
             InputRecorder.isRecording -> "Stop recording"
             InputRecorder.isPlaying   -> "Playback active"

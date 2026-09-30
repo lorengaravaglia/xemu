@@ -7,8 +7,11 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,15 +20,25 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -33,11 +46,13 @@ import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.boxxy.ui.theme.XemuTheme
+import kotlinx.coroutines.launch
 
 /*
  * Dual-screen mode: the second screen of a dual-screen handheld (the AYN Thor's
- * lower panel) becomes a companion panel while a game runs -- pause, save and
- * load, screenshots, stats -- leaving the game image on the top screen alone.
+ * lower panel) becomes a companion panel while a game runs -- quick actions,
+ * the in-game menu and performance numbers -- leaving the game image on the
+ * top screen alone.  Three tabs, switched by swiping (or tapping a tab).
  *
  * Opt-in.  In single-screen mode the lower screen belongs to Android and to
  * whatever the user runs there, and this code never touches it.
@@ -56,54 +71,75 @@ import com.boxxy.ui.theme.XemuTheme
  *    each event either to the guest or to panel navigation, depending on
  *    [BottomPanelState.controllerHere].  Handing it over pauses the game (the
  *    player is not driving it anyway); handing it back restores the pause
- *    state it had.
+ *    state it had.  Tabs change by touch only.
  */
+
+/** One tick of the numbers the top-screen performance overlay shows. */
+data class PerfSnapshot(
+    val fps: Float? = null,
+    val worstMs: Int? = null,
+    val history: IntArray = IntArray(0),
+    val gpuWaitMs: Int? = null,
+    val ramMb: Long? = null,
+    val shaders: Int? = null,
+    val vcpuPct: Int? = null,
+    val nv2aPct: Int? = null,
+    val gpuBusyPct: Int? = null,
+    val gpuMhz: Int? = null,
+)
 
 /** Observable state of the lower-screen panel; owned by EmulationActivity. */
 class BottomPanelState {
-    enum class Screen { HOME, SAVE_SLOTS, LOAD_SLOTS, MENU, CONFIRM_EXIT }
+    /** The three tabs.  Each has a root screen; Quick and Menu have sub-screens. */
+    enum class Tab(val title: String) { QUICK("Quick"), MENU("Menu"), PERF("Performance") }
+
+    enum class Screen(val tab: Tab) {
+        HOME(Tab.QUICK), SAVE_SLOTS(Tab.QUICK), LOAD_SLOTS(Tab.QUICK),
+        MENU(Tab.MENU), CONFIRM_EXIT(Tab.MENU),
+        PERF(Tab.PERF),
+    }
 
     val screen = mutableStateOf(Screen.HOME)
     /** True while controller input drives this panel instead of the game. */
     val controllerHere = mutableStateOf(false)
-    /** Controller highlight, an index into the current screen's 4x2 grid. */
+    /** Controller highlight, an index into the current screen's tiles. */
     val focus = mutableIntStateOf(0)
     val paused = mutableStateOf(false)
     val quickSlot = mutableIntStateOf(1)
+    /** One-line summary shown under the Quick and Menu tabs. */
     val stats = mutableStateOf("")
+    val perf = mutableStateOf(PerfSnapshot())
     val slots = mutableStateOf<List<SlotInfo>>(emptyList())
     val busy = mutableStateOf(false)
     val activeSlot = mutableStateOf<Int?>(null)
     val status = mutableStateOf<String?>(null)
     val statusIsError = mutableStateOf(false)
 
-    /* Menu screen labels -- the in-game menu's, set by the activity. */
+    /* Menu tab labels -- the in-game menu's, set by the activity. */
     val overlayLabel = mutableStateOf("")
-    val hrtfOn = mutableStateOf(false)
     val recordingLabel = mutableStateOf("Record input")
     val recordingBusy = mutableStateOf(false)
 
     /** Tiles on the current screen; the highlight never lands past them. */
     fun tileCount(): Int = when (screen.value) {
-        Screen.HOME -> 8
+        Screen.HOME -> HOME_TILES
         Screen.SAVE_SLOTS, Screen.LOAD_SLOTS -> slots.value.size
         Screen.MENU -> MENU_TILES
         Screen.CONFIRM_EXIT -> 2
+        Screen.PERF -> 0
     }
 
-    /** Move the controller highlight within the 4-column, 2-row grid. */
+    /** Move the controller highlight within the 4-column grid. */
     fun moveFocus(dx: Int, dy: Int) {
+        val rows = (tileCount() + COLUMNS - 1) / COLUMNS
+        if (rows == 0) return
         val col = (focus.intValue % COLUMNS + dx).coerceIn(0, COLUMNS - 1)
-        val row = (focus.intValue / COLUMNS + dy).coerceIn(0, ROWS - 1)
-        val next = row * COLUMNS + col
-        if (next < tileCount()) {
-            focus.intValue = next
-        }
+        val row = (focus.intValue / COLUMNS + dy).coerceIn(0, rows - 1)
+        focus.intValue = (row * COLUMNS + col).coerceAtMost(tileCount() - 1)
     }
 
     companion object {
         const val COLUMNS = 4
-        const val ROWS = 2
 
         const val TILE_PAUSE = 0
         const val TILE_QUICK_SAVE = 1
@@ -112,20 +148,20 @@ class BottomPanelState {
         const val TILE_SAVE = 4
         const val TILE_LOAD = 5
         const val TILE_SCREENSHOT = 6
-        const val TILE_MORE = 7
+        const val HOME_TILES = 7
 
         const val MENU_OVERLAY = 0
-        const val MENU_HRTF = 1
-        const val MENU_MAP_CONTROLS = 2
-        const val MENU_RECORD = 3
-        const val MENU_PLAY_RECORDING = 4
-        const val MENU_EXIT = 5
-        const val MENU_TILES = 6
+        const val MENU_MAP_CONTROLS = 1
+        const val MENU_RECORD = 2
+        const val MENU_PLAY_RECORDING = 3
+        const val MENU_EXIT = 4
+        const val MENU_TILES = 5
     }
 }
 
 /** What the panel asks the activity to do.  Touch and controller share these. */
 interface BottomPanelActions {
+    fun onSelectTab(tab: BottomPanelState.Tab)
     fun onHomeTile(index: Int)
     fun onSlot(number: Int)
     fun onBackToHome()
@@ -171,32 +207,83 @@ class BottomScreenPresentation(
         activity.dispatchGenericMotionEvent(event)
 }
 
+/* HorizontalPager is still experimental in this Compose version. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BottomPanel(state: BottomPanelState, actions: BottomPanelActions) {
     val scheme = MaterialTheme.colorScheme
-    Surface(color = scheme.background, modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
-            ControllerBanner(state, actions)
-            Spacer(Modifier.height(12.dp))
+    val tabs = BottomPanelState.Tab.values()
+    val current = state.screen.value.tab
+    val pager = rememberPagerState(initialPage = current.ordinal) { tabs.size }
+    val scope = rememberCoroutineScope()
 
-            when (state.screen.value) {
-                BottomPanelState.Screen.HOME -> HomeGrid(state, actions)
-                BottomPanelState.Screen.MENU -> MenuGrid(state, actions)
-                BottomPanelState.Screen.CONFIRM_EXIT -> ConfirmExit(state, actions)
-                else -> SlotGrid(state, actions)
+    /* Keep the pager and the panel state in step both ways: a swipe that
+     * settles on another page selects that tab, and a tab opened by code
+     * (the MENU pill, Back) scrolls the pager there. */
+    LaunchedEffect(pager.settledPage) {
+        val settled = tabs[pager.settledPage]
+        if (settled != state.screen.value.tab) actions.onSelectTab(settled)
+    }
+    LaunchedEffect(current) {
+        if (pager.currentPage != current.ordinal) pager.animateScrollToPage(current.ordinal)
+    }
+
+    Surface(color = scheme.background, modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+            ControllerBanner(state, actions)
+            TabRow(
+                selectedTabIndex = pager.currentPage,
+                containerColor = scheme.background,
+                modifier = Modifier.padding(top = 4.dp),
+            ) {
+                tabs.forEach { t ->
+                    Tab(
+                        selected = pager.currentPage == t.ordinal,
+                        onClick = { scope.launch { pager.animateScrollToPage(t.ordinal) } },
+                        text = { Text(t.title) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            HorizontalPager(
+                state = pager,
+                verticalAlignment = Alignment.Top,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            ) { page ->
+                val tab = tabs[page]
+                /* The page for the current tab shows its current screen; a
+                 * neighbour seen mid-swipe shows its root. */
+                val screen = if (tab == state.screen.value.tab) state.screen.value
+                             else when (tab) {
+                                 BottomPanelState.Tab.QUICK -> BottomPanelState.Screen.HOME
+                                 BottomPanelState.Tab.MENU -> BottomPanelState.Screen.MENU
+                                 BottomPanelState.Tab.PERF -> BottomPanelState.Screen.PERF
+                             }
+                Column(modifier = Modifier.fillMaxSize()) {
+                    when (screen) {
+                        BottomPanelState.Screen.HOME -> HomeGrid(state, actions)
+                        BottomPanelState.Screen.MENU -> MenuGrid(state, actions)
+                        BottomPanelState.Screen.CONFIRM_EXIT -> ConfirmExit(state, actions)
+                        BottomPanelState.Screen.PERF -> PerfView(state.perf.value)
+                        else -> SlotGrid(state, actions)
+                    }
+                }
             }
 
-            Spacer(Modifier.weight(1f))
             Text(
                 state.status.value ?: " ",
                 style = MaterialTheme.typography.bodyMedium,
                 color = if (state.statusIsError.value) scheme.error else scheme.onBackground,
             )
-            Text(
-                state.stats.value,
-                style = MaterialTheme.typography.labelMedium,
-                color = scheme.onBackground.copy(alpha = 0.6f),
-            )
+            /* The Performance tab shows all of it; elsewhere, the summary. */
+            if (pager.currentPage != BottomPanelState.Tab.PERF.ordinal) {
+                Text(
+                    state.stats.value,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = scheme.onBackground.copy(alpha = 0.6f),
+                )
+            }
         }
     }
 }
@@ -215,7 +302,7 @@ private fun ControllerBanner(state: BottomPanelState, actions: BottomPanelAction
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -224,7 +311,7 @@ private fun ControllerBanner(state: BottomPanelState, actions: BottomPanelAction
                 )
                 Text(
                     when {
-                        here               -> "D-pad to move, A to choose, B to return"
+                        here               -> "D-pad to move, A to choose, B to go back"
                         state.paused.value -> "Paused"
                         else               -> "Playing"
                     },
@@ -250,11 +337,10 @@ private fun HomeGrid(state: BottomPanelState, actions: BottomPanelActions) {
         "Save…",
         "Load…",
         "Screenshot",
-        "Menu…",
     )
     TileGrid(
         count = labels.size,
-        focus = if (state.controllerHere.value) state.focus.intValue else -1,
+        focus = focusFor(state, BottomPanelState.Screen.HOME),
     ) { index, focused ->
         PanelTile(
             label = labels[index],
@@ -265,25 +351,20 @@ private fun HomeGrid(state: BottomPanelState, actions: BottomPanelActions) {
     }
 }
 
+/** The highlight is shown only on the screen the controller is actually on. */
+private fun focusFor(state: BottomPanelState, screen: BottomPanelState.Screen): Int =
+    if (state.controllerHere.value && state.screen.value == screen) state.focus.intValue
+    else -1
+
 @Composable
 private fun SlotGrid(state: BottomPanelState, actions: BottomPanelActions) {
     val isSave = state.screen.value == BottomPanelState.Screen.SAVE_SLOTS
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            if (isSave) "Save state" else "Load state",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.weight(1f),
-        )
-        TextButton(onClick = actions::onBackToHome, enabled = !state.busy.value) {
-            Text("Back")
-        }
-    }
-    Spacer(Modifier.height(8.dp))
+    SubScreenHeader(if (isSave) "Save state" else "Load state",
+                    enabled = !state.busy.value, onBack = actions::onBackToHome)
     val slots = state.slots.value
     TileGrid(
         count = slots.size,
-        focus = if (state.controllerHere.value) state.focus.intValue else -1,
+        focus = focusFor(state, state.screen.value),
     ) { index, focused ->
         val s = slots[index]
         val usable = isSave || s.occupied
@@ -304,7 +385,7 @@ private fun SlotGrid(state: BottomPanelState, actions: BottomPanelActions) {
 
 /** Header row for a sub-screen: its title and the way back. */
 @Composable
-private fun SubScreenHeader(title: String, onBack: () -> Unit) {
+private fun SubScreenHeader(title: String, enabled: Boolean = true, onBack: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
             title,
@@ -312,22 +393,20 @@ private fun SubScreenHeader(title: String, onBack: () -> Unit) {
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f),
         )
-        TextButton(onClick = onBack) { Text("Back") }
+        TextButton(onClick = onBack, enabled = enabled) { Text("Back") }
     }
-    Spacer(Modifier.height(8.dp))
+    Spacer(Modifier.height(4.dp))
 }
 
 /**
  * The in-game menu, on the lower screen so opening it no longer covers the
- * game.  Save and load already have home tiles; this holds the rest of what
- * the top-screen menu offers.
+ * game.  Save and load live on the Quick tab; this holds the rest of what the
+ * top-screen menu offers.
  */
 @Composable
 private fun MenuGrid(state: BottomPanelState, actions: BottomPanelActions) {
-    SubScreenHeader("Menu", onBack = actions::onBackToHome)
     val labels = listOf(
         "Overlay\n${state.overlayLabel.value}",
-        "HRTF\n${if (state.hrtfOn.value) "On" else "Off"}",
         "Map controls",
         state.recordingLabel.value,
         "Play recording",
@@ -335,7 +414,7 @@ private fun MenuGrid(state: BottomPanelState, actions: BottomPanelActions) {
     )
     TileGrid(
         count = labels.size,
-        focus = if (state.controllerHere.value) state.focus.intValue else -1,
+        focus = focusFor(state, BottomPanelState.Screen.MENU),
     ) { index, focused ->
         PanelTile(
             label = labels[index],
@@ -353,12 +432,12 @@ private fun ConfirmExit(state: BottomPanelState, actions: BottomPanelActions) {
     Text(
         "Your place is kept for Quick resume. Save to a slot to keep it longer.",
         style = MaterialTheme.typography.bodyMedium,
-        modifier = Modifier.padding(bottom = 12.dp),
+        modifier = Modifier.padding(bottom = 10.dp),
     )
     val labels = listOf("Exit", "Cancel")
     TileGrid(
         count = labels.size,
-        focus = if (state.controllerHere.value) state.focus.intValue else -1,
+        focus = focusFor(state, BottomPanelState.Screen.CONFIRM_EXIT),
     ) { index, focused ->
         PanelTile(
             label = labels[index],
@@ -369,23 +448,100 @@ private fun ConfirmExit(state: BottomPanelState, actions: BottomPanelActions) {
     }
 }
 
-/** A 4-column grid of equal tiles that share the panel's width. */
+/** The performance overlay's numbers, large enough to read at a glance. */
+@Composable
+private fun PerfView(p: PerfSnapshot) {
+    val cells = listOf(
+        "FPS" to (p.fps?.let { "%.1f".format(it) } ?: "--"),
+        "Worst frame" to (p.worstMs?.let { "$it ms" } ?: "--"),
+        "CPU x86" to (p.vcpuPct?.let { "$it%" } ?: "--"),
+        "CPU NV2A" to (p.nv2aPct?.let { "$it%" } ?: "--"),
+        "GPU" to (p.gpuBusyPct?.let { b -> "$b%" + (p.gpuMhz?.let { " @ $it" } ?: "") }
+                  ?: "n/a"),
+        "GPU wait" to (p.gpuWaitMs?.let { "$it ms" } ?: "--"),
+        "RAM" to (p.ramMb?.let { "$it MB" } ?: "--"),
+        "Shaders" to (p.shaders?.toString() ?: "--"),
+    )
+    val scheme = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (row in cells.chunked(4)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for ((label, value) in row) {
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = scheme.surfaceVariant.copy(alpha = 0.30f),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                            Text(label, style = MaterialTheme.typography.labelSmall,
+                                 color = scheme.onSurface.copy(alpha = 0.65f))
+                            Text(value, style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                }
+            }
+        }
+        FrameTimeGraph(p.history, modifier = Modifier.fillMaxWidth().height(96.dp))
+    }
+}
+
+/*
+ * Frame times, as the top overlay draws them: deliberately not themed.  Blue
+ * is a frame inside the 33.3 ms budget, red one that missed it, and the
+ * yellow dashed line is the budget itself -- colour carrying meaning, which the
+ * app's accent colour must not overwrite.  Scale 0-100 ms.
+ */
+@Composable
+private fun FrameTimeGraph(samples: IntArray, modifier: Modifier) {
+    val ok = Color(0xEB78DCFF)
+    val miss = Color(0xEBFF6E6E)
+    val target = Color(0x96FFDC00)
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+        modifier = modifier,
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize().padding(6.dp)) {
+            fun y(ms: Int) = size.height - (ms.coerceIn(0, 100) / 100f * size.height)
+            drawLine(target, Offset(0f, y(33)), Offset(size.width, y(33)),
+                     strokeWidth = 2f,
+                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f)))
+            if (samples.size < 2) return@Canvas
+            val step = size.width / (samples.size - 1)
+            for (i in 1 until samples.size) {
+                val a = Offset((i - 1) * step, y(samples[i - 1]))
+                val b = Offset(i * step, y(samples[i]))
+                drawLine(if (samples[i] > 34) miss else ok, a, b, strokeWidth = 3f)
+            }
+        }
+    }
+}
+
+/**
+ * Up to four equal tiles per row.  A short row is centred rather than
+ * left-aligned, so two tiles under a row of four sit in the middle.
+ */
 @Composable
 private fun TileGrid(
     count: Int,
     focus: Int,
     tile: @Composable (index: Int, focused: Boolean) -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        for (row in 0 until (count + BottomPanelState.COLUMNS - 1) / BottomPanelState.COLUMNS) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth().height(124.dp),
-            ) {
-                for (col in 0 until BottomPanelState.COLUMNS) {
-                    val i = row * BottomPanelState.COLUMNS + col
-                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        if (i < count) tile(i, i == focus)
+    val gap = 10.dp
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val tileWidth = (maxWidth - gap * (BottomPanelState.COLUMNS - 1)) /
+                        BottomPanelState.COLUMNS
+        Column(verticalArrangement = Arrangement.spacedBy(gap)) {
+            for (row in 0 until (count + BottomPanelState.COLUMNS - 1) / BottomPanelState.COLUMNS) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally),
+                    modifier = Modifier.fillMaxWidth().height(104.dp),
+                ) {
+                    val first = row * BottomPanelState.COLUMNS
+                    for (i in first until minOf(first + BottomPanelState.COLUMNS, count)) {
+                        Box(modifier = Modifier.width(tileWidth).fillMaxHeight()) {
+                            tile(i, i == focus)
+                        }
                     }
                 }
             }

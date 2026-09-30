@@ -76,14 +76,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun InGameMenu(
     initialOverlayLabel: String,
-    initialHrtfOn: Boolean,
     recordingLabel: String,
     isRecordingBusy: Boolean,
     maxHeight: Dp,
     visibleState: MutableTransitionState<Boolean>,
     onFullyHidden: () -> Unit,
     onCycleOverlay: () -> String,
-    onToggleHrtf: () -> Boolean,
     onSaveState: () -> Unit,
     onLoadState: () -> Unit,
     onMapControls: () -> Unit,
@@ -140,24 +138,19 @@ fun InGameMenu(
                 verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
                 /*
-                 * The two toggles keep the menu open and update in place; the
+                 * The toggle keeps the menu open and updates in place; the
                  * items that lead somewhere else close it. Cycling the overlay
-                 * mode meant reopening the menu three times before.
+                 * mode meant reopening the menu three times before.  (HRTF
+                 * lives in Advanced settings.)
                  */
                 var overlayLabel by remember { mutableStateOf(initialOverlayLabel) }
-                var hrtfOn by remember { mutableStateOf(initialHrtfOn) }
 
-                MenuSectionLabel("Display & Audio")
+                MenuSectionLabel("Display")
                 MenuRow(
                     label = "Overlay",
                     value = overlayLabel,
                     dismissesMenu = false,
                 ) { overlayLabel = onCycleOverlay() }
-                MenuRow(
-                    label = "HRTF",
-                    value = if (hrtfOn) "On" else "Off",
-                    dismissesMenu = false,
-                ) { hrtfOn = onToggleHrtf() }
 
                 MenuSeparator()
                 MenuSectionLabel("Save States")
