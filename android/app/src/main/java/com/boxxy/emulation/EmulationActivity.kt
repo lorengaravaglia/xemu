@@ -66,6 +66,8 @@ private const val TAP_HOLD_MS = 100L
 
 /** Intent extra: load this game's quick-resume point instead of booting. */
 const val EXTRA_QUICK_RESUME = "quick_resume"
+/** The lower screen's Quick tab contents (see QuickAction). */
+private const val PREF_QUICK_ACTIONS = "panel_quick_actions"
 
 /** Extras MainActivity uses to start a game once the old emulator is gone. */
 const val EXTRA_RELAUNCH_GAME = "relaunch_game"
@@ -1650,6 +1652,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (target != null && bottomScreen == null) {
             panelState.quickSlot.intValue = quickSaveSlot
             panelState.paused.value = userPaused
+            panelState.quickActions.value =
+                QuickAction.decode(prefs.getString(PREF_QUICK_ACTIONS, null))
+            refreshPanelMenuLabels()
             val panel = BottomScreenPresentation(this, target, panelState, panelActions)
             try {
                 panel.show()
@@ -1754,7 +1759,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun activatePanelFocus() {
         val i = panelState.focus.intValue
         when (panelState.screen.value) {
-            BottomPanelState.Screen.HOME -> panelActions.onHomeTile(i)
+            BottomPanelState.Screen.HOME -> {
+                val chosen = panelState.quickActions.value
+                if (i < chosen.size) panelActions.onQuickAction(chosen[i])
+                else panelActions.onCustomize()
+            }
+            BottomPanelState.Screen.CUSTOMIZE ->
+                QuickAction.values().getOrNull(i)?.let { panelActions.onToggleQuickAction(it) }
             BottomPanelState.Screen.MENU -> panelActions.onMenuTile(i)
             BottomPanelState.Screen.CONFIRM_EXIT -> panelActions.onConfirmExit(i == 0)
             BottomPanelState.Screen.PERF -> {}
@@ -1766,23 +1777,49 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         /* A swipe or tab tap lands on the tab's own screen. */
         override fun onSelectTab(tab: BottomPanelState.Tab) {
             when (tab) {
-                BottomPanelState.Tab.QUICK -> openPanelScreen(BottomPanelState.Screen.HOME)
+                BottomPanelState.Tab.QUICK -> {
+                    refreshPanelMenuLabels()
+                    openPanelScreen(BottomPanelState.Screen.HOME)
+                }
                 BottomPanelState.Tab.MENU -> openPanelMenu()
                 BottomPanelState.Tab.PERF -> openPanelScreen(BottomPanelState.Screen.PERF)
             }
             panelState.activeSlot.value = null
         }
 
-        override fun onHomeTile(index: Int) {
-            when (index) {
-                BottomPanelState.TILE_PAUSE      -> toggleUserPause()
-                BottomPanelState.TILE_QUICK_SAVE -> executeQuickSave()
-                BottomPanelState.TILE_QUICK_LOAD -> executeQuickLoad()
-                BottomPanelState.TILE_QUICK_SLOT -> changeQuickSaveSlot(+1)
-                BottomPanelState.TILE_SAVE       -> openPanelSlots(isSave = true)
-                BottomPanelState.TILE_LOAD       -> openPanelSlots(isSave = false)
-                BottomPanelState.TILE_SCREENSHOT -> takeScreenshot()
+        override fun onQuickAction(action: QuickAction) {
+            when (action) {
+                QuickAction.PAUSE          -> toggleUserPause()
+                QuickAction.QUICK_SAVE     -> executeQuickSave()
+                QuickAction.QUICK_LOAD     -> executeQuickLoad()
+                QuickAction.QUICK_SLOT     -> changeQuickSaveSlot(+1)
+                QuickAction.SAVE           -> openPanelSlots(isSave = true)
+                QuickAction.LOAD           -> openPanelSlots(isSave = false)
+                QuickAction.SCREENSHOT     -> takeScreenshot()
+                QuickAction.OVERLAY        -> panelState.overlayLabel.value = cycleOverlayMode()
+                QuickAction.MAP_CONTROLS   -> startActivity(
+                    Intent(this@EmulationActivity, MappingActivity::class.java))
+                QuickAction.RECORD         -> {
+                    toggleRecording()
+                    refreshPanelMenuLabels()
+                }
+                QuickAction.PLAY_RECORDING -> showPlayRecordingDialog()
             }
+        }
+
+        override fun onCustomize() = openPanelScreen(BottomPanelState.Screen.CUSTOMIZE)
+
+        override fun onToggleQuickAction(action: QuickAction) {
+            val chosen = panelState.quickActions.value
+            if (action !in chosen && chosen.size >= BottomPanelState.MAX_QUICK_ACTIONS) {
+                showMessage("Up to ${BottomPanelState.MAX_QUICK_ACTIONS} quick actions: " +
+                            "remove one first", isError = true)
+                return
+            }
+            val next = QuickAction.decode(QuickAction.encode(
+                if (action in chosen) chosen - action else chosen + action))
+            panelState.quickActions.value = next
+            prefs.edit().putString(PREF_QUICK_ACTIONS, QuickAction.encode(next)).apply()
         }
 
         override fun onSlot(number: Int) = panelSlotOp(number)

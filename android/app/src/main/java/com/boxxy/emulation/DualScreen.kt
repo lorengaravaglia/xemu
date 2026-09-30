@@ -6,6 +6,7 @@ import android.view.Display
 import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.activity.ComponentActivity
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -20,9 +21,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -40,11 +43,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.boxxy.R
 import com.boxxy.ui.theme.XemuTheme
 import kotlinx.coroutines.launch
 
@@ -90,11 +96,17 @@ data class PerfSnapshot(
 
 /** Observable state of the lower-screen panel; owned by EmulationActivity. */
 class BottomPanelState {
-    /** The three tabs.  Each has a root screen; Quick and Menu have sub-screens. */
-    enum class Tab(val title: String) { QUICK("Quick"), MENU("Menu"), PERF("Performance") }
+    /** The three tabs, shown as icons only (Material Symbols).  Each has a
+     *  root screen; Quick and Menu have sub-screens. */
+    enum class Tab(val title: String, @DrawableRes val icon: Int) {
+        QUICK("Quick actions", R.drawable.ic_panel_star),
+        MENU("Menu", R.drawable.ic_panel_home),
+        PERF("Performance", R.drawable.ic_panel_speed_4),
+    }
 
     enum class Screen(val tab: Tab) {
         HOME(Tab.QUICK), SAVE_SLOTS(Tab.QUICK), LOAD_SLOTS(Tab.QUICK),
+        CUSTOMIZE(Tab.QUICK),
         MENU(Tab.MENU), CONFIRM_EXIT(Tab.MENU),
         PERF(Tab.PERF),
     }
@@ -106,6 +118,8 @@ class BottomPanelState {
     val focus = mutableIntStateOf(0)
     val paused = mutableStateOf(false)
     val quickSlot = mutableIntStateOf(1)
+    /** What the Quick tab shows, in catalogue order; the player picks them. */
+    val quickActions = mutableStateOf(QuickAction.DEFAULTS)
     /** One-line summary shown under the Quick and Menu tabs. */
     val stats = mutableStateOf("")
     val perf = mutableStateOf(PerfSnapshot())
@@ -122,7 +136,8 @@ class BottomPanelState {
 
     /** Tiles on the current screen; the highlight never lands past them. */
     fun tileCount(): Int = when (screen.value) {
-        Screen.HOME -> HOME_TILES
+        Screen.HOME -> quickActions.value.size + 1          // + the Edit tile
+        Screen.CUSTOMIZE -> QuickAction.values().size
         Screen.SAVE_SLOTS, Screen.LOAD_SLOTS -> slots.value.size
         Screen.MENU -> MENU_TILES
         Screen.CONFIRM_EXIT -> 2
@@ -141,14 +156,8 @@ class BottomPanelState {
     companion object {
         const val COLUMNS = 4
 
-        const val TILE_PAUSE = 0
-        const val TILE_QUICK_SAVE = 1
-        const val TILE_QUICK_LOAD = 2
-        const val TILE_QUICK_SLOT = 3
-        const val TILE_SAVE = 4
-        const val TILE_LOAD = 5
-        const val TILE_SCREENSHOT = 6
-        const val HOME_TILES = 7
+        /* Two rows of four on the Quick tab, one of them the Edit tile. */
+        const val MAX_QUICK_ACTIONS = 7
 
         const val MENU_OVERLAY = 0
         const val MENU_MAP_CONTROLS = 1
@@ -159,10 +168,39 @@ class BottomPanelState {
     }
 }
 
+/**
+ * Everything the Quick tab can hold.  The first seven are the default set;
+ * the rest duplicate Menu-tab items for players who want them one tap away.
+ * Exit is deliberately not offered: it is the one action a stray tap must
+ * not reach.
+ */
+enum class QuickAction {
+    PAUSE, QUICK_SAVE, QUICK_LOAD, QUICK_SLOT, SAVE, LOAD, SCREENSHOT,
+    OVERLAY, MAP_CONTROLS, RECORD, PLAY_RECORDING;
+
+    companion object {
+        val DEFAULTS = listOf(PAUSE, QUICK_SAVE, QUICK_LOAD, QUICK_SLOT, SAVE, LOAD, SCREENSHOT)
+
+        /** Stored as a comma list of names; unknown names are skipped, so a
+         *  renamed action never breaks the rest of the set. */
+        fun decode(s: String?): List<QuickAction> {
+            if (s == null) return DEFAULTS
+            val set = s.split(',').mapNotNull { n -> values().firstOrNull { it.name == n } }.toSet()
+            return values().filter { it in set }
+        }
+
+        fun encode(list: List<QuickAction>) = list.joinToString(",") { it.name }
+    }
+}
+
 /** What the panel asks the activity to do.  Touch and controller share these. */
 interface BottomPanelActions {
     fun onSelectTab(tab: BottomPanelState.Tab)
-    fun onHomeTile(index: Int)
+    fun onQuickAction(action: QuickAction)
+    /** Open the Quick-tab editor. */
+    fun onCustomize()
+    /** In the editor: add or remove one action. */
+    fun onToggleQuickAction(action: QuickAction)
     fun onSlot(number: Int)
     fun onBackToHome()
     fun onToggleController()
@@ -240,7 +278,13 @@ private fun BottomPanel(state: BottomPanelState, actions: BottomPanelActions) {
                     Tab(
                         selected = pager.currentPage == t.ordinal,
                         onClick = { scope.launch { pager.animateScrollToPage(t.ordinal) } },
-                        text = { Text(t.title) },
+                        icon = {
+                            Icon(
+                                painterResource(t.icon),
+                                contentDescription = t.title,
+                                modifier = Modifier.size(28.dp),
+                            )
+                        },
                     )
                 }
             }
@@ -263,6 +307,7 @@ private fun BottomPanel(state: BottomPanelState, actions: BottomPanelActions) {
                 Column(modifier = Modifier.fillMaxSize()) {
                     when (screen) {
                         BottomPanelState.Screen.HOME -> HomeGrid(state, actions)
+                        BottomPanelState.Screen.CUSTOMIZE -> CustomizeGrid(state, actions)
                         BottomPanelState.Screen.MENU -> MenuGrid(state, actions)
                         BottomPanelState.Screen.CONFIRM_EXIT -> ConfirmExit(state, actions)
                         BottomPanelState.Screen.PERF -> PerfView(state.perf.value)
@@ -326,27 +371,80 @@ private fun ControllerBanner(state: BottomPanelState, actions: BottomPanelAction
     }
 }
 
+/** Tile text for an action, with its live state (slot, pause, overlay). */
+private fun quickLabel(state: BottomPanelState, a: QuickAction): String {
+    val slot = state.quickSlot.intValue
+    return when (a) {
+        QuickAction.PAUSE -> if (state.paused.value) "Resume" else "Pause"
+        QuickAction.QUICK_SAVE -> "Quick save\nslot $slot"
+        QuickAction.QUICK_LOAD -> "Quick load\nslot $slot"
+        QuickAction.QUICK_SLOT -> "Quick slot\n$slot  ▸"
+        QuickAction.SAVE -> "Save…"
+        QuickAction.LOAD -> "Load…"
+        QuickAction.SCREENSHOT -> "Screenshot"
+        QuickAction.OVERLAY -> "Overlay\n${state.overlayLabel.value}"
+        QuickAction.MAP_CONTROLS -> "Map controls"
+        QuickAction.RECORD -> state.recordingLabel.value
+        QuickAction.PLAY_RECORDING -> "Play recording"
+    }
+}
+
+/** The player's chosen actions, then the Edit tile that changes them. */
 @Composable
 private fun HomeGrid(state: BottomPanelState, actions: BottomPanelActions) {
-    val slot = state.quickSlot.intValue
-    val labels = listOf(
-        if (state.paused.value) "Resume" else "Pause",
-        "Quick save\nslot $slot",
-        "Quick load\nslot $slot",
-        "Quick slot\n$slot  ▸",
-        "Save…",
-        "Load…",
-        "Screenshot",
-    )
+    val chosen = state.quickActions.value
     TileGrid(
-        count = labels.size,
+        count = chosen.size + 1,
         focus = focusFor(state, BottomPanelState.Screen.HOME),
     ) { index, focused ->
+        if (index == chosen.size) {
+            PanelTile(
+                label = "Edit",
+                icon = R.drawable.ic_panel_edit,
+                focused = focused,
+                enabled = !state.busy.value,
+                onClick = actions::onCustomize,
+            )
+        } else {
+            val a = chosen[index]
+            PanelTile(
+                label = quickLabel(state, a),
+                focused = focused,
+                enabled = !state.busy.value &&
+                          !(a == QuickAction.RECORD && state.recordingBusy.value),
+                onClick = { actions.onQuickAction(a) },
+            )
+        }
+    }
+}
+
+/**
+ * Pick what the Quick tab holds: every action, the chosen ones lit.  Tiles
+ * are shorter here so all eleven fit in three rows without scrolling.
+ */
+@Composable
+private fun CustomizeGrid(state: BottomPanelState, actions: BottomPanelActions) {
+    val chosen = state.quickActions.value
+    SubScreenHeader(
+        "Quick actions  ${chosen.size}/${BottomPanelState.MAX_QUICK_ACTIONS}",
+        backLabel = "Done",
+        onBack = actions::onBackToHome,
+    )
+    val all = QuickAction.values()
+    TileGrid(
+        count = all.size,
+        focus = focusFor(state, BottomPanelState.Screen.CUSTOMIZE),
+        tileHeight = 72.dp,
+    ) { index, focused ->
+        val a = all[index]
+        val on = a in chosen
         PanelTile(
-            label = labels[index],
+            label = quickLabel(state, a).replace('\n', ' '),
             focused = focused,
-            enabled = !state.busy.value,
-            onClick = { actions.onHomeTile(index) },
+            enabled = true,
+            active = on,
+            dim = !on,
+            onClick = { actions.onToggleQuickAction(a) },
         )
     }
 }
@@ -385,7 +483,12 @@ private fun SlotGrid(state: BottomPanelState, actions: BottomPanelActions) {
 
 /** Header row for a sub-screen: its title and the way back. */
 @Composable
-private fun SubScreenHeader(title: String, enabled: Boolean = true, onBack: () -> Unit) {
+private fun SubScreenHeader(
+    title: String,
+    enabled: Boolean = true,
+    backLabel: String = "Back",
+    onBack: () -> Unit,
+) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
             title,
@@ -393,7 +496,7 @@ private fun SubScreenHeader(title: String, enabled: Boolean = true, onBack: () -
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f),
         )
-        TextButton(onClick = onBack, enabled = enabled) { Text("Back") }
+        TextButton(onClick = onBack, enabled = enabled) { Text(backLabel) }
     }
     Spacer(Modifier.height(4.dp))
 }
@@ -525,6 +628,7 @@ private fun FrameTimeGraph(samples: IntArray, modifier: Modifier) {
 private fun TileGrid(
     count: Int,
     focus: Int,
+    tileHeight: Dp = 104.dp,
     tile: @Composable (index: Int, focused: Boolean) -> Unit,
 ) {
     val gap = 10.dp
@@ -535,7 +639,7 @@ private fun TileGrid(
             for (row in 0 until (count + BottomPanelState.COLUMNS - 1) / BottomPanelState.COLUMNS) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally),
-                    modifier = Modifier.fillMaxWidth().height(104.dp),
+                    modifier = Modifier.fillMaxWidth().height(tileHeight),
                 ) {
                     val first = row * BottomPanelState.COLUMNS
                     for (i in first until minOf(first + BottomPanelState.COLUMNS, count)) {
@@ -557,6 +661,7 @@ private fun PanelTile(
     onClick: () -> Unit,
     active: Boolean = false,
     dim: Boolean = false,
+    @DrawableRes icon: Int? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
@@ -577,12 +682,20 @@ private fun PanelTile(
         },
         modifier = Modifier.fillMaxSize(),
     ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+        Column(
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            if (icon != null) {
+                Icon(painterResource(icon), contentDescription = null,
+                     modifier = Modifier.size(28.dp).padding(bottom = 4.dp))
+            }
             Text(
                 label,
                 style = MaterialTheme.typography.titleSmall,
                 textAlign = TextAlign.Center,
-                color = scheme.onSurface.copy(alpha = if (dim) 0.35f else 1f),
+                color = scheme.onSurface.copy(alpha = if (dim) 0.45f else 1f),
             )
         }
     }
