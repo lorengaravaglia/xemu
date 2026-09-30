@@ -134,6 +134,15 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val _dualScreen = MutableStateFlow(prefs.getBoolean("dual_screen", false))
     val dualScreen: StateFlow<Boolean> = _dualScreen
 
+    /** Lower screen during play: 0 stay on, 1 dim, 2 turn off (after 15 s idle). */
+    private val _dualScreenIdle = MutableStateFlow(prefs.getInt("dual_screen_idle", 0))
+    val dualScreenIdle: StateFlow<Int> = _dualScreenIdle
+
+    fun setDualScreenIdle(value: Int) {
+        _dualScreenIdle.value = value
+        prefs.edit().putInt("dual_screen_idle", value).apply()
+    }
+
     fun setDualScreen(value: Boolean) {
         _dualScreen.value = value
         prefs.edit().putBoolean("dual_screen", value).apply()

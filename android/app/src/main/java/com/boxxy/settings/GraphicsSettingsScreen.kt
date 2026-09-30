@@ -27,6 +27,7 @@ fun GraphicsSettingsScreen(
     val surfaceScale  by settingsViewModel.surfaceScale.collectAsState()
     val filterNearest by settingsViewModel.filterNearest.collectAsState()
     val dualScreen    by settingsViewModel.dualScreen.collectAsState()
+    val dualScreenIdle by settingsViewModel.dualScreenIdle.collectAsState()
     /* Only offered where there is a second screen to use. */
     val hasSecondScreen = remember {
         context.getSystemService(android.hardware.display.DisplayManager::class.java)
@@ -72,6 +73,36 @@ fun GraphicsSettingsScreen(
                                        "off, the lower screen stays yours.",
                             checked = dualScreen,
                         ) { settingsViewModel.setDualScreen(it) }
+                        if (dualScreen) {
+                            HorizontalDivider()
+                            Text(
+                                "Lower screen during play",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
+                            Text(
+                                "After 15 seconds untouched while a game is " +
+                                "playing. A touch brings it back; that touch " +
+                                "only wakes it and does not press anything.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 8.dp),
+                            )
+                            val idleOptions = listOf(
+                                0 to "Stay on",
+                                1 to "Dim",
+                                2 to "Turn off",
+                            )
+                            SettingsDropdown(
+                                value = idleOptions.first { it.first == dualScreenIdle }.second,
+                                options = idleOptions.map { it.second },
+                                onSelect = { label ->
+                                    settingsViewModel.setDualScreenIdle(
+                                        idleOptions.first { it.second == label }.first)
+                                },
+                            )
+                            Spacer(Modifier.height(8.dp))
+                        }
                     }
                 }
             }

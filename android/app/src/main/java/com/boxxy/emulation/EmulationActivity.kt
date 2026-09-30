@@ -68,6 +68,10 @@ private const val TAP_HOLD_MS = 100L
 const val EXTRA_QUICK_RESUME = "quick_resume"
 /** The lower screen's Quick tab contents (see QuickAction). */
 private const val PREF_QUICK_ACTIONS = "panel_quick_actions"
+/** main_prefs: lower screen during play -- 0 stay on, 1 dim, 2 turn off. */
+const val PREF_PANEL_IDLE = "dual_screen_idle"
+private const val PANEL_IDLE_MS = 15_000L
+private const val ACTION_PANEL_SLEEP = "com.boxxy.action.PANEL_SLEEP"
 
 /** Extras MainActivity uses to start a game once the old emulator is gone. */
 const val EXTRA_RELAUNCH_GAME = "relaunch_game"
@@ -179,6 +183,14 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                         }
                     }
                 }
+                /* Force the lower panel's idle state, for measuring it:
+                 * mode 0 awake, 1 dim, 2 blank.  The idle timer is stopped
+                 * so the forced state holds until a touch. */
+                ACTION_PANEL_SLEEP -> {
+                    panelHandler.removeCallbacks(panelIdleRunnable)
+                    setPanelSleep(BottomPanelState.Sleep.values()[
+                        intent.getIntExtra("mode", 0).coerceIn(0, 2)])
+                }
                 InputRecorder.ACTION_LOAD_STATE -> {
                     if (emulationStarted) {
                         val slot = intent.getIntExtra(InputRecorder.EXTRA_SLOT, 1)
@@ -208,7 +220,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             val now = System.currentTimeMillis()
             val count = NativeInterface.getRenderedFrameCount()
             val elapsed = now - lastFpsTime
-            val panel = bottomScreen != null
+            /* A blanked panel is not fed: nothing to draw, nothing redrawn. */
+            val panel = bottomScreen != null &&
+                        panelState.sleep.value != BottomPanelState.Sleep.BLANK
             fun shown(v: View) = v.visibility == View.VISIBLE
 
             /*
@@ -624,6 +638,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 addAction(InputRecorder.ACTION_STOP_PLAYBACK)
                 addAction(InputRecorder.ACTION_BENCHMARK)
                 addAction(InputRecorder.ACTION_LOAD_STATE)
+                addAction(ACTION_PANEL_SLEEP)
             },
             ContextCompat.RECEIVER_EXPORTED
         )
@@ -970,6 +985,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         runOnUiThread {
             panelState.status.value = text
             panelState.statusIsError.value = isError
+            notePanelActivity()      /* a message is worth waking the panel for */
             messageHide?.let { messageView.removeCallbacks(it) }
             messageText.value = text
             messageIsError.value = isError
@@ -1633,6 +1649,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (paused) NativeInterface.pauseEmulation() else NativeInterface.resumeEmulation()
         userPaused = paused
         panelState.paused.value = paused
+        notePanelActivity()
     }
 
     // ── Dual-screen mode ──────────────────────────────────────────────────────
@@ -1654,11 +1671,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             panelState.paused.value = userPaused
             panelState.quickActions.value =
                 QuickAction.decode(prefs.getString(PREF_QUICK_ACTIONS, null))
+            panelIdleMode = mainPrefs.getInt(PREF_PANEL_IDLE, 0)
             refreshPanelMenuLabels()
             val panel = BottomScreenPresentation(this, target, panelState, panelActions)
             try {
                 panel.show()
                 bottomScreen = panel
+                notePanelActivity()
             } catch (e: WindowManager.InvalidDisplayException) {
                 Log.w("xemu-android", "dual screen: display ${target.displayId} went away", e)
             }
@@ -1666,6 +1685,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     }
 
     private fun hideDualScreen() {
+        panelHandler.removeCallbacks(panelIdleRunnable)
+        panelState.sleep.value = BottomPanelState.Sleep.AWAKE
         if (panelState.controllerHere.value) setPanelController(false)
         bottomScreen?.dismiss()
         bottomScreen = null
@@ -1693,6 +1714,45 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         panelHatX = 0f
         panelHatY = 0f
         panelState.controllerHere.value = here
+        notePanelActivity()
+    }
+
+    /*
+     * D3: the panel's idle state during play.  After PANEL_IDLE_MS with no
+     * touch it dims or blanks, per the setting -- but only while the game is
+     * actually being played: not paused, not while the controller drives the
+     * panel, not mid save or load.  Anything the player does on or through
+     * the panel wakes it and restarts the wait.
+     */
+    private val panelHandler = Handler(Looper.getMainLooper())
+    /** 0 stay on, 1 dim, 2 turn off.  Read when the panel is shown. */
+    private var panelIdleMode = 0
+    private val panelIdleRunnable = Runnable { maybeSleepPanel() }
+
+    private fun notePanelActivity() {
+        panelHandler.removeCallbacks(panelIdleRunnable)
+        if (panelState.sleep.value != BottomPanelState.Sleep.AWAKE) {
+            setPanelSleep(BottomPanelState.Sleep.AWAKE)
+        }
+        if (bottomScreen != null && panelIdleMode != 0) {
+            panelHandler.postDelayed(panelIdleRunnable, PANEL_IDLE_MS)
+        }
+    }
+
+    private fun maybeSleepPanel() {
+        if (bottomScreen == null || panelIdleMode == 0) return
+        if (userPaused || panelState.controllerHere.value || panelState.busy.value) {
+            panelHandler.postDelayed(panelIdleRunnable, PANEL_IDLE_MS)
+            return
+        }
+        setPanelSleep(if (panelIdleMode == 1) BottomPanelState.Sleep.DIM
+                      else BottomPanelState.Sleep.BLANK)
+    }
+
+    private fun setPanelSleep(sleep: BottomPanelState.Sleep) {
+        panelState.sleep.value = sleep
+        bottomScreen?.applySleep(sleep)
+        Log.i("xemu-android", "panel sleep=$sleep")
     }
 
     private fun releaseGuestInput() {
@@ -1832,6 +1892,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
         override fun onToggleController() =
             setPanelController(!panelState.controllerHere.value)
+
+        override fun onPanelTouched(): Boolean {
+            val wasAsleep = panelState.sleep.value != BottomPanelState.Sleep.AWAKE
+            notePanelActivity()
+            return wasAsleep
+        }
 
         override fun onMenuTile(index: Int) {
             when (index) {

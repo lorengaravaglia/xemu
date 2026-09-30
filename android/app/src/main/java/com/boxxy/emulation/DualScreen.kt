@@ -5,10 +5,12 @@ import android.os.Bundle
 import android.view.Display
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +41,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
@@ -111,7 +114,16 @@ class BottomPanelState {
         PERF(Tab.PERF),
     }
 
+    /**
+     * Idle state during play (D3).  DIM fades the panel and lowers its
+     * brightness; BLANK draws nothing but black -- on the Thor's OLED panel
+     * black pixels are unlit -- and the activity stops feeding it stats, so it
+     * does not redraw either.  A touch wakes it.
+     */
+    enum class Sleep { AWAKE, DIM, BLANK }
+
     val screen = mutableStateOf(Screen.HOME)
+    val sleep = mutableStateOf(Sleep.AWAKE)
     /** True while controller input drives this panel instead of the game. */
     val controllerHere = mutableStateOf(false)
     /** Controller highlight, an index into the current screen's tiles. */
@@ -204,6 +216,9 @@ interface BottomPanelActions {
     fun onSlot(number: Int)
     fun onBackToHome()
     fun onToggleController()
+    /** Any touch on the panel.  True when it only woke the panel, in which
+     *  case the gesture is swallowed rather than pressing whatever is under it. */
+    fun onPanelTouched(): Boolean
     fun onMenuTile(index: Int)
     /** From the exit confirmation: leave, or go back to the menu. */
     fun onConfirmExit(exit: Boolean)
@@ -236,6 +251,37 @@ class BottomScreenPresentation(
         })
     }
 
+    /**
+     * The panel's own brightness, as a window override: dimmed while idle,
+     * the minimum while blank, the system's otherwise.
+     */
+    fun applySleep(sleep: BottomPanelState.Sleep) {
+        val w = window ?: return
+        w.attributes = w.attributes.apply {
+            screenBrightness = when (sleep) {
+                BottomPanelState.Sleep.AWAKE -> WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                BottomPanelState.Sleep.DIM   -> DIM_BRIGHTNESS
+                BottomPanelState.Sleep.BLANK -> WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_OFF
+            }
+        }
+    }
+
+    /* A touch that wakes the panel is eaten whole, DOWN through UP, so the
+     * tile under the finger is not pressed by the same touch. */
+    private var swallowing = false
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            swallowing = actions.onPanelTouched()
+        }
+        if (swallowing) {
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL) swallowing = false
+            return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
     /* Input that lands here because this display was touched last goes to the
      * same routing as input on the game's display.  See the file comment. */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
@@ -245,10 +291,17 @@ class BottomScreenPresentation(
         activity.dispatchGenericMotionEvent(event)
 }
 
+/** Window brightness while dimmed: low, still readable indoors. */
+private const val DIM_BRIGHTNESS = 0.05f
+
 /* HorizontalPager is still experimental in this Compose version. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BottomPanel(state: BottomPanelState, actions: BottomPanelActions) {
+    if (state.sleep.value == BottomPanelState.Sleep.BLANK) {
+        Box(Modifier.fillMaxSize().background(Color.Black))
+        return
+    }
     val scheme = MaterialTheme.colorScheme
     val tabs = BottomPanelState.Tab.values()
     val current = state.screen.value.tab
@@ -266,8 +319,11 @@ private fun BottomPanel(state: BottomPanelState, actions: BottomPanelActions) {
         if (pager.currentPage != current.ordinal) pager.animateScrollToPage(current.ordinal)
     }
 
+    val dim = state.sleep.value == BottomPanelState.Sleep.DIM
     Surface(color = scheme.background, modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+        Column(modifier = Modifier
+            .alpha(if (dim) 0.35f else 1f)
+            .padding(horizontal = 20.dp, vertical = 12.dp)) {
             ControllerBanner(state, actions)
             TabRow(
                 selectedTabIndex = pager.currentPage,
