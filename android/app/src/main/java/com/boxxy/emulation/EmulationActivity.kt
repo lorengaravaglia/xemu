@@ -194,7 +194,17 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 InputRecorder.ACTION_LOAD_STATE -> {
                     if (emulationStarted) {
                         val slot = intent.getIntExtra(InputRecorder.EXTRA_SLOT, 1)
-                        Thread { loadStateSlot(slot) }.start()
+                        /* Optional "name": load any snapshot by name, e.g. the
+                         * hidden quick-resume point (diagnostics). */
+                        val named = intent.getStringExtra("name")
+                        Thread {
+                            if (named != null) {
+                                val err = NativeInterface.loadState(named)
+                                Log.i("xemu-android", "loadstate: '$named' -> ${err ?: "ok"}")
+                            } else {
+                                loadStateSlot(slot)
+                            }
+                        }.start()
                     }
                 }
             }

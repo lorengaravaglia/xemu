@@ -446,12 +446,16 @@ static void main_thread_bh(void *opaque)
 
     case MAIN_OP_LOAD: {
         bool was_running = runstate_is_running();
+        int64_t lt0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         vm_stop(RUN_STATE_RESTORE_VM);
         if (!was_running) {
             vm_state_notify(false, RUN_STATE_RESTORE_VM);
         }
         g_main_req.ok = load_snapshot(g_main_req.name, NULL, false, NULL,
                                       &g_main_req.err);
+        ALOGI("loadstate '%s': %lld ms, ok=%d", g_main_req.name,
+              (long long)(qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - lt0),
+              g_main_req.ok);
         if (g_main_req.ok && was_running) {
             vm_start();
         }

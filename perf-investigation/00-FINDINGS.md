@@ -3130,3 +3130,49 @@ on this panel. 0.05 -> backlight 18, 0.1 -> 34, 0.2 -> 129, 0.3 -> 319,
 0.4 -> 614, 0.5 -> 1025. At low drive the OLED shows a red cast on its left
 side. The framebuffer is uniform there (sampled (19,21,6) left, centre and
 right), so the cast is panel non-uniformity, not the app.
+
+## AY. THE BLACK SCREEN WAS A MISSING glFlush: RESUME -1.9 s, EVERY BOOT -0.9 s (2026-09-30)
+
+Open item: after Quick resume the state finished loading ~1.4 s after the
+tap, but the scene appeared only ~3.6 s after it. Diagnosed with a timeline
+on the cold-resume path, each step ruling something out:
+
+1. **Guest and renderer were not stalled.** Guest frames arrived from +0.4 s
+   after the load at a steady 30 fps. There were no sync misses and no
+   pipeline compiles. Yet a `glReadPixels` probe of 5 screen points read
+   exactly 0 until +2.2 s, then jumped straight to ~212: a cut, not a fade.
+2. **Cold-only, and not the snapshot.** A warm load of the same snapshot
+   showed content at once. So did the first load in a ~20 s old process.
+3. **Process age, not boot stage.** With the load held back by 0, 1 and 2 s
+   (`debug.xemu.resume_delay_ms`, since removed), the picture appeared at a
+   fixed ~3.6 s after the tap: 3.58, 3.62 and 3.82 s, the last being just
+   the normal first frame.
+4. **The Vulkan output was correct all along.** The displayed surfaces were
+   GPU-drawn every frame (~1,900 draws per frame, pvideo off). The CPU-mapped
+   readback buffer's centre pixel was the scene, 82,86,51, from the first
+   frame at +304 ms, while the screen stayed black.
+
+**Cause.** On Android, `render_display()` copies the Vulkan display image
+to a host-visible buffer and uploads it with `glTexSubImage2D` in the PFIFO
+thread's GL context. The render thread samples that texture from its own
+context. Nothing flushed the uploading context, so the uploads waited on the
+driver's own submission heuristics, which in a fresh process took ~2.2 s.
+Desktop xemu imports the image memory directly and never needed a flush.
+GL guarantees cross-context visibility only after the writer flushes and
+the reader rebinds; the HUD blit already rebinds every frame.
+
+**Fix:** `glFlush()` after the upload, with `debug.xemu.display_flush=0` as
+an A/B switch.
+
+- **Instrumentation check:** with the flush off, a cold resume went black
+  again (+2168 ms); with it on, +479 ms.
+- **Cold resume:** picture with the first guest frame, +285 / +302 / +398 ms
+  after the load, against +2.1 to 2.3 s before. Tap to picture ~1.7 s,
+  was ~3.6 s.
+- **Normal boot,** first picture after the first render frame,
+  interleaved: on 1642 / 1628 / 1626 ms, off 2557 / 2497 / 2498 ms. That is
+  **-0.9 s on every launch.**
+- **Cost:** slot 7, 600 frames, ABBA, one process. vCPU ms/frame on 31.43*,
+  31.15, 31.15, 31.13; off 31.08, 31.15, 30.98, 31.05 (*first benchmark in
+  the process). Difference ~0.08 ms, inside noise; fps 30 throughout. The
+  flush runs on the PFIFO thread, not the vCPU.

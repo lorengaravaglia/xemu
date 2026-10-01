@@ -17,6 +17,9 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include "renderer.h"
 #include <math.h>
 
@@ -1121,6 +1124,32 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, disp->width, disp->height,
                         GL_RGBA, GL_UNSIGNED_BYTE, disp->readback_mapped);
         glBindTexture(GL_TEXTURE_2D, 0);
+        /*
+         * Flush, or the render thread may never see this frame.  The upload
+         * happens in this thread's GL context; the render thread samples the
+         * texture from its own, and GL only guarantees another context sees
+         * the change once this one has flushed (and the reader rebinds,
+         * which the HUD blit does every frame).  Unflushed, the upload waits
+         * on the driver's own submission heuristics: in a fresh process that
+         * left the screen black for ~2.2 s after Quick resume although every
+         * frame here was already correct, and delayed a normal boot's first
+         * picture by ~0.9 s (FINDINGS AY).  Desktop xemu shares the image
+         * memory directly and never needed this.
+         *
+         * debug.xemu.display_flush=0 turns it off, for A/B measurement only;
+         * re-read every 60 frames so it can be toggled in a running game.
+         */
+        {
+            static int flush_on = 1, frames;
+            if (frames++ % 60 == 0) {
+                char v[PROP_VALUE_MAX];
+                flush_on = !(__system_property_get("debug.xemu.display_flush", v) > 0 &&
+                             v[0] == '0');
+            }
+            if (flush_on) {
+                glFlush();
+            }
+        }
     }
 #endif
 
