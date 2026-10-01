@@ -394,6 +394,7 @@ From the heavy-frames agent, not yet measured:
 | Eliminating CC helper calls | 97% removed, 1.1% fewer host insns, ZERO cycles saved — section W |
 | Trusting absolute PMU figures from before section U | counters were multiplexed to 9-29%; understated 3-11x |
 | Dynamic spin detection (auto) | detects correctly, but the benchmark has no spin worth eliding; 0.2-0.6 ms/frame worse — section R |
+| Lower panel as a heat/perf lever (D3) | Off saves 0.13 W (~2%) and nothing else: fps, vCPU ms/frame and CPU temperature do not move — section AX |
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
 | GPU thread stealing vCPU time by blocking | vCPU shows no wait symbols, 1.26% kernel |
 | Shrinking the JIT translation buffer (iTLB locality) | **MEASURED 2026-09-12: tb-size 256 vs 32 MB = 32.55 vs 32.55 ms/frame.** iTLB misses rose with the smaller buffer. Switchable via `debug.xemu.tb_size`, default 256. |
@@ -3094,3 +3095,38 @@ fine. **Shipped** as Advanced -> Fast boot, default on
 `debug.xemu.stall_hle` property now overrides only when it holds 0-2, so
 "auto" leaves the setting in charge. Verified: default 3.6 s (4.0 s on the
 first launch after install), off 6.7 s.
+
+## AX. THE LOWER PANEL'S COST: 0.13 W WHEN OFF, NOTHING ELSE (2026-09-30)
+
+D3 asked whether blanking the Thor's lower panel during play buys power
+or, through heat, performance. Measured with `android/tools/panel-idle-ab.sh`:
+unplugged, Halo in-game from slot 7, one process, the panel forced
+awake/dim/off by the PANEL_SLEEP debug broadcast. The order rotated each of
+4 rounds; 20 s warmup was discarded, then 40 s sampled per phase.
+
+Instrumentation checked first. A dry run (plugged in) printed absolute
+values: backlight 1099 -> ~20 in each mode, fps and vCPU parsed from
+`bench: RESULT`. The first fps probe matched no log line and would have
+printed "?" silently. Charging was refused: current_now was +4 A, the
+charger's story.
+
+| mode  | mean power | vs awake | per-round delta (mW)   |
+|-------|-----------:|---------:|------------------------|
+| awake | 6.71 W     |          |                        |
+| dim   | 6.70 W     | -0.01 W  | -88, +82, -56, +16     |
+| off   | 6.58 W     | -0.13 W  | -188, -41, -99, -206   |
+
+- **fps / vCPU:** 30.0 fps and 32.4 ms/frame in every phase.
+- **CPU temperature:** drifted 70.4 -> 76.5 °C monotonically across the
+  run. Per-mode differences sit inside that drift, so there is no thermal
+  effect to claim.
+- **Why dim does nothing:** the panel UI is mostly near-black, which an OLED
+  barely pays for even at full drive. Off additionally stops the 1 Hz stats
+  redraw.
+- **Conclusion:** off is a ~2% battery nicety, not a performance lever.
+
+Side finding: the window `screenBrightness` override is strongly non-linear
+on this panel. 0.05 -> backlight 18, 0.1 -> 34, 0.2 -> 129, 0.3 -> 319,
+0.4 -> 614, 0.5 -> 1025. At low drive the OLED shows a red cast on its left
+side. The framebuffer is uniform there (sampled (19,21,6) left, centre and
+right), so the cast is panel non-uniformity, not the app.

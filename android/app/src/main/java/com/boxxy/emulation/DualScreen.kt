@@ -291,8 +291,13 @@ class BottomScreenPresentation(
         activity.dispatchGenericMotionEvent(event)
 }
 
-/** Window brightness while dimmed: low, still readable indoors. */
-private const val DIM_BRIGHTNESS = 0.05f
+/**
+ * Window brightness while dimmed.  The override is not linear in backlight:
+ * on the Thor 0.05 gave a backlight of 18 (~2% of a normal 1099, readable
+ * only with effort), 0.2 gave 129, 0.3 gave 319 (~29%), and 0.5 gave 1025.
+ * A var only so the PANEL_SLEEP debug broadcast can tune it live.
+ */
+internal var DIM_BRIGHTNESS = 0.3f
 
 /* HorizontalPager is still experimental in this Compose version. */
 @OptIn(ExperimentalFoundationApi::class)
@@ -322,7 +327,7 @@ private fun BottomPanel(state: BottomPanelState, actions: BottomPanelActions) {
     val dim = state.sleep.value == BottomPanelState.Sleep.DIM
     Surface(color = scheme.background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier
-            .alpha(if (dim) 0.35f else 1f)
+            .alpha(if (dim) 0.6f else 1f)
             .padding(horizontal = 20.dp, vertical = 12.dp)) {
             ControllerBanner(state, actions)
             TabRow(
