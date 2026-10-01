@@ -188,7 +188,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                  * so the forced state holds until a touch. */
                 ACTION_PANEL_SLEEP -> {
                     panelHandler.removeCallbacks(panelIdleRunnable)
-                    if (intent.hasExtra("dim")) DIM_BRIGHTNESS = intent.getFloatExtra("dim", DIM_BRIGHTNESS)
                     setPanelSleep(BottomPanelState.Sleep.values()[
                         intent.getIntExtra("mode", 0).coerceIn(0, 2)])
                 }

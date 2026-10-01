@@ -115,10 +115,10 @@ class BottomPanelState {
     }
 
     /**
-     * Idle state during play (D3).  DIM fades the panel and lowers its
-     * brightness; BLANK draws nothing but black -- on the Thor's OLED panel
-     * black pixels are unlit -- and the activity stops feeding it stats, so it
-     * does not redraw either.  A touch wakes it.
+     * Idle state during play (D3).  DIM fades the panel's content; BLANK
+     * draws nothing but black -- on the Thor's OLED panel black pixels are
+     * unlit -- and the activity stops feeding it stats, so it does not redraw
+     * either.  A touch wakes it.
      */
     enum class Sleep { AWAKE, DIM, BLANK }
 
@@ -252,15 +252,18 @@ class BottomScreenPresentation(
     }
 
     /**
-     * The panel's own brightness, as a window override: dimmed while idle,
-     * the minimum while blank, the system's otherwise.
+     * The panel's own brightness, as a window override: the minimum while
+     * blank, the system's otherwise.  Dim deliberately keeps the system's
+     * brightness and only fades the content: lowering the backlight saved no
+     * measurable power (FINDINGS AX) and at low drive this OLED shows a red
+     * cast on its left side.
      */
     fun applySleep(sleep: BottomPanelState.Sleep) {
         val w = window ?: return
         w.attributes = w.attributes.apply {
             screenBrightness = when (sleep) {
-                BottomPanelState.Sleep.AWAKE -> WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-                BottomPanelState.Sleep.DIM   -> DIM_BRIGHTNESS
+                BottomPanelState.Sleep.AWAKE,
+                BottomPanelState.Sleep.DIM   -> WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 BottomPanelState.Sleep.BLANK -> WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_OFF
             }
         }
@@ -291,14 +294,6 @@ class BottomScreenPresentation(
         activity.dispatchGenericMotionEvent(event)
 }
 
-/**
- * Window brightness while dimmed.  The override is not linear in backlight:
- * on the Thor 0.05 gave a backlight of 18 (~2% of a normal 1099, readable
- * only with effort), 0.2 gave 129, 0.3 gave 319 (~29%), and 0.5 gave 1025.
- * A var only so the PANEL_SLEEP debug broadcast can tune it live.
- */
-internal var DIM_BRIGHTNESS = 0.3f
-
 /* HorizontalPager is still experimental in this Compose version. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -327,7 +322,7 @@ private fun BottomPanel(state: BottomPanelState, actions: BottomPanelActions) {
     val dim = state.sleep.value == BottomPanelState.Sleep.DIM
     Surface(color = scheme.background, modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier
-            .alpha(if (dim) 0.6f else 1f)
+            .alpha(if (dim) 0.5f else 1f)
             .padding(horizontal = 20.dp, vertical = 12.dp)) {
             ControllerBanner(state, actions)
             TabRow(
