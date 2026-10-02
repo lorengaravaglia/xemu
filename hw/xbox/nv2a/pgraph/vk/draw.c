@@ -1449,8 +1449,13 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
             check_budget = true;
         }
 
-        VK_CHECK(vkWaitForFences(r->device, 1, &r->command_buffer_fence,
-                                 VK_TRUE, UINT64_MAX));
+        {
+            int64_t fw0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+            VK_CHECK(vkWaitForFences(r->device, 1, &r->command_buffer_fence,
+                                     VK_TRUE, UINT64_MAX));
+            g_nv2a_stats.frame_working.fence_us +=
+                (int)(qemu_clock_get_us(QEMU_CLOCK_REALTIME) - fw0);
+        }
 
         r->descriptor_set_index = 0;
         r->in_command_buffer = false;

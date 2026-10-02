@@ -131,6 +131,12 @@ typedef struct NV2AStats {
     struct {
         int mspf;
         int counters[NV2A_PROF__COUNT];
+        /* C5 diagnostics: when this frame's flip stall happened
+         * (CLOCK_MONOTONIC, us), the NV2A thread's CPU time and its time
+         * blocked in vkWaitForFences during the frame (us). */
+        int64_t t_us;
+        int cpu_us;
+        int fence_us;
     } frame_working, frame_history[NV2A_PROF_NUM_FRAMES];
     unsigned int frame_ptr;
 } NV2AStats;
@@ -145,6 +151,7 @@ const char *nv2a_profile_get_counter_name(unsigned int cnt);
 int nv2a_profile_get_counter_value(unsigned int cnt);
 void nv2a_profile_increment(void);
 void nv2a_profile_flip_stall(void);
+void nv2a_profile_dump_history(int frames);
 
 static inline void nv2a_profile_inc_counter(enum NV2A_PROF_COUNTERS_ENUM cnt)
 {

@@ -19,6 +19,7 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "renderer.h"
+#include <time.h>
 
 #include "gloffscreen.h"
 
@@ -104,10 +105,26 @@ static void pgraph_vk_flush(NV2AState *d)
     qemu_event_set(&d->pgraph.flush_complete);
 }
 
+/* C5: display-sync timeline, CLOCK_MONOTONIC us: requested by the render
+ * thread, picked up by PFIFO, finished; and the queue-idle wait inside the
+ * display readback (display.c). */
+volatile int64_t g_c5_sync_req_us, g_c5_sync_start_us, g_c5_sync_end_us;
+volatile int g_c5_waitidle_us;
+
+static int64_t c5_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+}
+
 static void pgraph_vk_sync(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
+    g_c5_sync_start_us = c5_now_us();
+    g_c5_waitidle_us = 0;
     pgraph_vk_render_display(pg);
+    g_c5_sync_end_us = c5_now_us();
 
     qatomic_set(&d->pgraph.sync_pending, false);
     qemu_event_set(&d->pgraph.sync_complete);
@@ -195,6 +212,7 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
 
 #if HAVE_EXTERNAL_MEMORY
     qemu_event_reset(&d->pgraph.sync_complete);
+    g_c5_sync_req_us = c5_now_us();
     qatomic_set(&pg->sync_pending, true);
     pfifo_kick(d);
     qemu_mutex_unlock(&d->pfifo.lock);

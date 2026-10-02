@@ -947,6 +947,13 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
                  (unsigned)old, (unsigned)new,
                  (unsigned)PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D));
     pg->frame_time++;
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        /* Wake the render thread: it presents per guest frame (ui/xemu.c). */
+        extern void xemu_android_guest_frame_ready(void);
+        xemu_android_guest_frame_ready();
+    }
+#endif
 }
 
 DEF_METHOD(NV097, FLIP_STALL)

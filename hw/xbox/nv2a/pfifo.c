@@ -22,6 +22,7 @@
 #include "nv2a_int.h"
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <android/log.h>
+#include <sys/system_properties.h>
 #define ALOGI_PFIFO(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
 #else
 #define ALOGI_PFIFO(...) ((void)0)
@@ -265,6 +266,22 @@ static bool pfifo_pusher_should_stall(NV2AState *d)
            qatomic_read(&d->pgraph.waiting_for_nop);
 }
 
+static bool pfifo_sync_midstream(void)
+{
+#if defined(__ANDROID__) || defined(ANDROID)
+    static int on = 1;
+    static unsigned calls;
+    if (calls++ % 64 == 0) {
+        char v[PROP_VALUE_MAX];
+        on = !(__system_property_get("debug.xemu.sync_midstream", v) > 0 &&
+               v[0] == '0');
+    }
+    return on;
+#else
+    return true;
+#endif
+}
+
 static void pfifo_run_pusher(NV2AState *d)
 {
     uint32_t *push0 = &d->pfifo.regs[NV_PFIFO_CACHE1_PUSH0];
@@ -390,6 +407,22 @@ static void pfifo_run_pusher(NV2AState *d)
             }
 
             dma_get_v += (num_words_processed-1)*4;
+
+            /*
+             * A display sync must not wait for the rest of the pushbuffer.
+             * pgraph_process_pending() otherwise runs only between pusher
+             * passes, and a pass covers everything the guest has queued --
+             * in Halo's slot-7 scene a whole frame, ~14 ms of NV2A work.  A
+             * sync requested just after a pass began waited that long, the
+             * render thread missed a vsync, and a 33 ms frame reached the
+             * screen as 52 ms then ~16 ms (FINDINGS AZ).  Servicing it at a
+             * method boundary is what the loop does anyway whenever the
+             * pusher catches up with dma_put mid-frame; only the latency
+             * changes.  debug.xemu.sync_midstream=0 disables, for A/B.
+             */
+            if (qatomic_read(&d->pgraph.sync_pending) && pfifo_sync_midstream()) {
+                pgraph_process_pending(d);
+            }
 
             if (method_type == NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE_INC) {
                 SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_METHOD,

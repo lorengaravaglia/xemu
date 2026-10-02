@@ -122,6 +122,42 @@ void xemu_android_vm_resume(void)
     bql_unlock();
 }
 
+/*
+ * Present per guest frame (FINDINGS AZ).  The render loop used to sleep a
+ * fixed 16 ms between iterations; with ~1.5 ms of work that is a ~17.6 ms
+ * cadence, tied to neither the display nor the guest, so it drifted against
+ * the guest's 30 fps and every ~10 frames took two frames 18 ms apart (one
+ * shown for one vsync, its neighbour for three).  Instead PGRAPH posts this
+ * semaphore when a frame is complete and the loop presents it at once; the
+ * compositor shows it at the next real vsync.  debug.xemu.present_mode=0
+ * restores the fixed sleep, for A/B.
+ */
+static QemuSemaphore s_frame_ready_sem;
+static int s_frame_ready_init;
+
+void xemu_android_guest_frame_ready(void);
+void xemu_android_guest_frame_ready(void)
+{
+    if (qatomic_load_acquire(&s_frame_ready_init)) {
+        qemu_sem_post(&s_frame_ready_sem);
+    }
+}
+
+static bool present_per_frame(void)
+{
+    static int on = 1;
+    static unsigned calls;
+    if (calls++ % 60 == 0) {
+        char v[PROP_VALUE_MAX];
+        on = !(__system_property_get("debug.xemu.present_mode", v) > 0 &&
+               v[0] == '0');
+    }
+    return on;
+}
+
+/* C5 render-loop probe: frame_time of a frame taken this iteration, or -1. */
+static int s_rl_new_frame = -1;
+
 /* Frame counter incremented after each eglSwapBuffers — read by JNI to
  * compute FPS in the Kotlin UI layer. */
 static volatile int g_rendered_frame_count = 0;
@@ -2610,6 +2646,11 @@ static void bench_tick(void)
     }
 
     xemu_dump_guest_map();
+    {
+        /* C5: the NV2A side's own frame history for the same window. */
+        extern void nv2a_profile_dump_history(int frames);
+        nv2a_profile_dump_history(s_bench_frames_total + 10);
+    }
     xemu_dump_guest_code();
 
     /*
@@ -3005,6 +3046,7 @@ static void gl_render_frame(struct xemu_console *scon)
         if (tex != 0) {
             s_last_synced_frame_time = cur_frame_time;
             g_rendered_frame_count++;
+            s_rl_new_frame = cur_frame_time;
             s_fpw.new_frames++;
             bench_tick();
 
@@ -3215,6 +3257,32 @@ static void gl_render_frame(struct xemu_console *scon)
         eglSwapBuffers(egl_display, egl_surface);
         uint64_t swap_ns = (uint64_t)(qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
                                       fp_swap_start);
+        {
+            /* C5: log every render-loop iteration while debug.xemu.clockprobe
+             * is armed -- when it ran, whether it took a new guest frame,
+             * the display sync wait and the swap time. */
+            static int rl_left, rl_armed = -1, rl_iter;
+            if (rl_iter++ % 60 == 0) {
+                char v[PROP_VALUE_MAX];
+                int n = __system_property_get("debug.xemu.clockprobe", v) > 0 ? atoi(v) : 0;
+                if (n != rl_armed) { rl_armed = n; rl_left = n * 2; }
+            }
+            if (rl_left > 0) {
+                struct timespec ts;
+                rl_left--;
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                extern volatile int64_t g_c5_sync_req_us, g_c5_sync_start_us,
+                                        g_c5_sync_end_us;
+                extern volatile int g_c5_waitidle_us;
+                ALOGI("rl: t %lld.%06ld new %d sync %d swap %d | pickup %lld disp %lld waitidle %d",
+                      (long long)ts.tv_sec, ts.tv_nsec / 1000, s_rl_new_frame,
+                      g_pgraph_sync_wait_ms, (int)(swap_ns / 1000),
+                      (long long)(g_c5_sync_start_us - g_c5_sync_req_us),
+                      (long long)(g_c5_sync_end_us - g_c5_sync_start_us),
+                      g_c5_waitidle_us);
+            }
+            s_rl_new_frame = -1;
+        }
         s_fp.swap_ns += swap_ns;
         s_fpw.swap_ns += swap_ns;
         s_fp.composited++;
@@ -3993,6 +4061,10 @@ int xemu_core_main(int argc, char **argv)
     xemu_main_loop_unlock();
 
     ALOGI("Initialization complete. Entering main render loop...");
+#if defined(__ANDROID__) || defined(ANDROID)
+    qemu_sem_init(&s_frame_ready_sem, 0);
+    qatomic_store_release(&s_frame_ready_init, 1);
+#endif
     struct xemu_console *scon = &scon_list[0];
     int frames = 0;
     while (!qatomic_read(&qemu_exiting)) {
@@ -4013,7 +4085,16 @@ int xemu_core_main(int argc, char **argv)
         gl_render_frame(scon);
         frames++;
 #if defined(__ANDROID__) || defined(ANDROID)
-        g_usleep(16000); // Throttle to ~60fps
+        if (present_per_frame()) {
+            /* Until the guest completes a frame; the timeout keeps the loop
+             * turning while there is none (boot, pause, a hung guest). */
+            qemu_sem_timedwait(&s_frame_ready_sem, 50);
+            while (qemu_sem_timedwait(&s_frame_ready_sem, 0) == 0) {
+                /* collapse a backlog: present the newest frame once */
+            }
+        } else {
+            g_usleep(16000); // Throttle to ~60fps
+        }
 #endif
     }
     ALOGI("Main loop exited. Shutting down...");

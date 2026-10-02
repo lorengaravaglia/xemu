@@ -395,6 +395,7 @@ From the heavy-frames agent, not yet measured:
 | Trusting absolute PMU figures from before section U | counters were multiplexed to 9-29%; understated 3-11x |
 | Dynamic spin detection (auto) | detects correctly, but the benchmark has no spin worth eliding; 0.2-0.6 ms/frame worse — section R |
 | Lower panel as a heat/perf lever (D3) | Off saves 0.13 W (~2%) and nothing else: fps, vCPU ms/frame and CPU temperature do not move — section AX |
+| Slot 7 dip as a CPU/codegen problem | The guest never misses a frame there; the dip was display pacing (render-loop pickup + fixed 16 ms sleep) -- section AZ |
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
 | GPU thread stealing vCPU time by blocking | vCPU shows no wait symbols, 1.26% kernel |
 | Shrinking the JIT translation buffer (iTLB locality) | **MEASURED 2026-09-12: tb-size 256 vs 32 MB = 32.55 vs 32.55 ms/frame.** iTLB misses rose with the smaller buffer. Switchable via `debug.xemu.tb_size`, default 256. |
@@ -3176,3 +3177,88 @@ an A/B switch.
   31.15, 31.15, 31.13; off 31.08, 31.15, 30.98, 31.05 (*first benchmark in
   the process). Difference ~0.08 ms, inside noise; fps 30 throughout. The
   flush runs on the PFIFO thread, not the vCPU.
+
+## AZ. C5: SLOT 7'S DIP WAS DISPLAY PACING, NOT EMULATION (2026-10-01)
+
+C5 asked what the remaining >50 ms frames are made of, using section AP's
+slot 7 scene.
+
+**Harness correction first.** The dip is the state slot 7 loads into, a
+full-screen effect, and walking into the health pack ENDS it.
+`walk_fps_dip` is only 1.4 s long, so a benchmark started 2 s after the
+replay (as `combat-replay-ab.sh` does) measures the scene after the dip:
+0 frames over 50 ms in 3 of 3 runs. To measure the dip, benchmark straight
+after the load with no replay: `android/tools/tail-run.sh OUT 7 none 240`
+with `SETTLE=1.5`. That gives 15-17 frames over 50 ms in 240, all 50-60 ms,
+one every 9-15 frames.
+
+### Each layer, ruled out in turn
+
+1. **"Slow frames do more work" was an artefact.** WORKSPLIT showed slow
+   frames with 1.6x the vCPU cycles and 1.74x the host instructions, at
+   equal IPC, which looked like real work. But the frame boundaries are when
+   the RENDER THREAD saw a new frame, and the vCPU is busy all the time, so
+   a 52 ms window simply holds 1.6x the cycles. The guest-PC split agreed:
+   Halo's clock spin (page 0x000bb000) is 49% of expensive-frame samples
+   against 35% of cheap ones.
+2. **The guest never misses a frame.** A vblank probe
+   (`debug.xemu.clockprobe=N`, nv2a.c) showed `[0x1f8c80]` is a vblank
+   counter, +1 per emulated vblank. The spin targets step by exactly 2,
+   149 of 149 and 164 of 164: a perfect 30 fps limiter.
+3. **NV2A never misses a flip.** Flip completions (`INCREMENT_READ_3D`)
+   were 32-35 ms apart, 261 of 261. Every frame finished 20-24 ms after
+   the previous flip. Per frame: ~14 ms NV2A CPU, ~7.3 ms fence wait, 954
+   draws, 4 surface downloads, 31 surface-to-texture copies. The new
+   NV2A frame-history dump (`nvf:` lines at benchmark end) shows all of it.
+4. **The render loop was late picking frames up.** With a per-iteration
+   probe (`rl:` lines, also on clockprobe), all 12 late frames had a 16-20 ms
+   display-sync wait, against a 2 ms median otherwise. Split into phases:
+
+   | | pickup (request until PFIFO starts) | readback | queue idle |
+   |---|---|---|---|
+   | late frames | **14-21 ms** | 1.1-2.1 ms | ~0.3 ms |
+   | normal | 0.01 ms median | 1.3 ms | ~0.4 ms |
+
+   `vkQueueWaitIdle` in the readback is innocent. `pgraph_process_pending()`
+   ran only between pusher passes, and a pass covers everything queued --
+   here a whole frame, ~14 ms of NV2A work.
+5. **And the loop was paced by nothing.** The Android render loop was
+   `gl_render_frame(); g_usleep(16000);`, about a 17.6 ms cadence tied to
+   neither the 60 Hz display nor the 30 fps guest. Fixing only the pickup
+   exposed it: two frames 18 ms apart every ~10 frames. Before that, the
+   14 ms stall had accidentally locked the loop to 33 ms, which was smooth
+   at a good phase and 52 ms at a bad one, hence the run-to-run luck.
+
+### Fixes
+
+- **Mid-stream sync** (`pfifo.c`): after each method, service a pending
+  display sync. The pusher already services pending work at arbitrary
+  method boundaries whenever it catches up with dma_put; only the latency
+  changes. A/B switch: `debug.xemu.sync_midstream=0`. Pickup median went
+  from 12-14 ms to 0.01 ms; max from 17-23 ms to 2.7-3.6 ms.
+- **Present per guest frame** (`pgraph.c` + `ui/xemu.c`):
+  FLIP_INCREMENT_WRITE posts a semaphore, and the render loop waits on it
+  (50 ms timeout) instead of sleeping 16 ms. A/B switch:
+  `debug.xemu.present_mode=0`.
+
+### Results
+
+Off-cadence frames (render-loop pickup gap <25 or >42 ms), slot 7, ~6 s
+per run, ABCCBA x2 in one process:
+
+| config | frames | off-cadence | >42 ms |
+|---|---|---|---|
+| A original | 709 | 5.4% (30 of them in the one bad-phase run) | 9 |
+| B mid-stream only | 750 | 9.1% (every run) | 0 |
+| **C both** | 749 | **1.2%** | **0** |
+
+- **Ground truth for C:** SurfaceFlinger `--latency` on the SurfaceView
+  layer gave 123 of 126 presents exactly 2 vsyncs apart, twice. The residue
+  is one slip per ~4 s: the emulated vblank (a host timer) and the panel's
+  vsync are separate 60 Hz clocks.
+- **Cost:** slot 7, 400 frames, ABBA: vCPU 31.16 vs 31.36 ms/frame, within
+  the run spread of 30.88-31.50; fps 30.02 both.
+- **Pause and resume** still work.
+
+**Open (follow-up):** lock the emulated vblank to the panel's vsync
+(Choreographer) to remove the residual slip.

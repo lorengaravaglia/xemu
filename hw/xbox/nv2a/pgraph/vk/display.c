@@ -1113,7 +1113,12 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 #endif /* __ANDROID__ */
 
     pgraph_vk_end_debug_marker(r, cmd);
-    pgraph_vk_end_single_time_commands(pg, cmd);
+    {
+        extern volatile int g_c5_waitidle_us;
+        int64_t w0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        pgraph_vk_end_single_time_commands(pg, cmd);
+        g_c5_waitidle_us = (int)(qemu_clock_get_us(QEMU_CLOCK_REALTIME) - w0);
+    }
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
 
 #ifdef __ANDROID__

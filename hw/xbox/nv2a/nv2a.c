@@ -23,6 +23,8 @@
 #include "qemu/main-loop.h"
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <android/log.h>
+#include <sys/system_properties.h>
+#include <time.h>
 #endif
 
 void nv2a_update_irq(NV2AState *d)
@@ -225,6 +227,44 @@ static void nv2a_vga_gfx_update(void *opaque)
     static unsigned stuck_entry_vblank = 0;
 
     vblank_count++;
+
+    /*
+     * C5 diagnostic: Halo's frame limiter spins until the 64-bit counter at
+     * guest 0x1f8c80 reaches EDI:ESI (FINDINGS M).  Log, per vblank, the
+     * counter and -- when the vCPU is in that loop -- its target, so the
+     * counter's source and the limiter's targets can be read off.
+     * debug.xemu.clockprobe=N logs the next N vblanks (re-armed by setting it
+     * again with a different value).
+     */
+    {
+        static int probe_left, probe_armed_val = -1;
+        if (vblank_count % 30 == 0) {
+            char v[PROP_VALUE_MAX];
+            int n = __system_property_get("debug.xemu.clockprobe", v) > 0 ? atoi(v) : 0;
+            if (n != probe_armed_val) {
+                probe_armed_val = n;
+                probe_left = n;
+            }
+        }
+        if (probe_left > 0 && first_cpu) {
+            CPUState *vcpu = first_cpu;
+            CPUX86State *env = cpu_env(vcpu);
+            uint32_t pc = (uint32_t)(env->segs[R_CS].base + env->eip);
+            uint32_t clk[2] = { 0, 0 };
+            struct timespec ts;
+            bool in_spin = pc >= 0x000bb0d4 && pc <= 0x000bb0f2;
+
+            probe_left--;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            cpu_memory_rw_debug(vcpu, 0x1f8c80, (uint8_t *)clk, 8, 0);
+            __android_log_print(ANDROID_LOG_INFO, "xemu-clock",
+                "vb %u t %lld.%06ld clk %u:%u pc 0x%08x%s tgt %u:%u",
+                vblank_count, (long long)ts.tv_sec, ts.tv_nsec / 1000,
+                clk[1], clk[0], pc, in_spin ? " SPIN" : "",
+                in_spin ? (uint32_t)env->regs[R_EDI] : 0,
+                in_spin ? (uint32_t)env->regs[R_ESI] : 0);
+        }
+    }
 
     if (vblank_count % 6 == 0) {
         CPUState *vcpu = first_cpu;
