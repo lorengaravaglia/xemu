@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.boxxy.emulation.EmulationActivity
 import com.boxxy.emulation.EXTRA_QUICK_RESUME
+import com.boxxy.emulation.GameLaunch
 import com.boxxy.emulation.QuickResume
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableIntStateOf
@@ -254,21 +255,6 @@ private fun launchGame(
     settings: SettingsViewModel,
     quickResume: Boolean = false,
 ) {
-    val mcpx = settings.mcpxUri.value?.toString() ?: return
-    val bios = settings.biosUri.value?.toString() ?: return
-    val hdd  = settings.hddUri.value?.toString()  ?: return
-    val useCustomDriver = settings.driverEnabled.value &&
-        settings.driverDir.value.isNotEmpty() &&
-        settings.driverName.value.isNotEmpty()
-    val intent = Intent(context, EmulationActivity::class.java).apply {
-        putExtra("mcpx",       mcpx)
-        putExtra("bios",       bios)
-        putExtra("hdd",        hdd)
-        putExtra("iso",        game.uri.toString())
-        putExtra("renderer",   settings.renderer.value)
-        putExtra("driverDir",  if (useCustomDriver) settings.driverDir.value else "")
-        putExtra("driverName", if (useCustomDriver) settings.driverName.value else "")
-        putExtra(EXTRA_QUICK_RESUME, quickResume)
-    }
+    val intent = GameLaunch.intentFor(context, game.uri.toString(), quickResume) ?: return
     context.startActivity(intent)
 }

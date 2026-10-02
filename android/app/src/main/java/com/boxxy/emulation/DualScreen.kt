@@ -145,6 +145,8 @@ class BottomPanelState {
     val overlayLabel = mutableStateOf("")
     val recordingLabel = mutableStateOf("Record input")
     val recordingBusy = mutableStateOf(false)
+    /** "Exit to library", or "Exit game" when a frontend started the game. */
+    val exitLabel = mutableStateOf("Exit to library")
 
     /** Tiles on the current screen; the highlight never lands past them. */
     fun tileCount(): Int = when (screen.value) {
@@ -569,7 +571,7 @@ private fun MenuGrid(state: BottomPanelState, actions: BottomPanelActions) {
         "Map controls",
         state.recordingLabel.value,
         "Play recording",
-        "Exit to library",
+        state.exitLabel.value,
     )
     TileGrid(
         count = labels.size,
@@ -587,7 +589,7 @@ private fun MenuGrid(state: BottomPanelState, actions: BottomPanelActions) {
 
 @Composable
 private fun ConfirmExit(state: BottomPanelState, actions: BottomPanelActions) {
-    SubScreenHeader("Exit to library?", onBack = { actions.onConfirmExit(false) })
+    SubScreenHeader("${state.exitLabel.value}?", onBack = { actions.onConfirmExit(false) })
     Text(
         "Your place is kept for Quick resume. Save to a slot to keep it longer.",
         style = MaterialTheme.typography.bodyMedium,

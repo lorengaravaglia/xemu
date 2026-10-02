@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!-- ES-DE (Android) custom find rule for Boxxy; see es_systems.xml. -->
+<ruleList>
+    <emulator name="BOXXY">
+        <!-- Microsoft Xbox emulator Boxxy (xemu for Android) -->
+        <rule type="androidpackage">
+            <entry>com.boxxy/.ExternalLaunchActivity</entry>
+        </rule>
+    </emulator>
+</ruleList>

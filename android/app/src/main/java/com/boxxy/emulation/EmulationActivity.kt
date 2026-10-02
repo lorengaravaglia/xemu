@@ -750,6 +750,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                             this@EmulationActivity, EmulationActivity::class.java)
                     })
                     putExtra(EXTRA_RELAUNCH_WAIT_PID, android.os.Process.myPid())
+                    /* A frontend's disc comes with a read grant on the
+                     * intent; hand it on, or MainActivity cannot pass it to
+                     * the next emulator once this one is gone. */
+                    newIntent.data?.let {
+                        data = it
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
                     /* Reuse the library already under this activity rather
                      * than stacking a second one. */
                     addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or
@@ -1128,6 +1135,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         showOverlay(Gravity.TOP or Gravity.END, topPx, 16.dp) { transition, onHidden ->
             InGameMenu(
                 initialOverlayLabel = overlayModeLabel(),
+                exitLabel = if (launchedExternally) "Exit Game" else "Exit to Library",
                 recordingLabel = when {
                     InputRecorder.isRecording -> "Stop Recording"
                     InputRecorder.isPlaying   -> "Playback active"
@@ -1310,8 +1318,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun confirmExit() {
         showOverlay(Gravity.CENTER, dimBackground = true) { transition, onHidden ->
             GameConfirmDialog(
-                title = "Exit to Library",
-                message = "Return to the game library?\n\n" +
+                title = if (launchedExternally) "Exit Game" else "Exit to Library",
+                message = (if (launchedExternally) "Leave the game?\n\n"
+                           else "Return to the game library?\n\n") +
                           "Your place is kept for Quick resume. Save " +
                           "to a slot to keep it longer.",
                 confirmLabel = "Exit",
@@ -1338,6 +1347,10 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
      * be re-initialised in a process that has already run it, so the next
      * launch needs a fresh one.
      */
+    /** Started by a frontend (ES-DE): exit returns there, and says so. */
+    private val launchedExternally: Boolean
+        get() = intent.getBooleanExtra(GameLaunch.EXTRA_EXTERNAL, false)
+
     private fun exitToLibrary(saveResume: Boolean = true) {
         if (isExiting) return
         isExiting = true
@@ -1348,7 +1361,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             }
             NativeInterface.flushBlockDevices()
             runOnUiThread {
-                finish()
+                /* Started by a frontend: go back to it, not to whatever of
+                 * Boxxy's own task lies underneath. */
+                if (launchedExternally) {
+                    finishAndRemoveTask()
+                } else {
+                    finish()
+                }
                 /* Let the transition render before the process disappears. */
                 window.decorView.postDelayed({
                     android.os.Process.killProcess(android.os.Process.myPid())
@@ -1681,6 +1700,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             panelState.paused.value = userPaused
             panelState.quickActions.value =
                 QuickAction.decode(prefs.getString(PREF_QUICK_ACTIONS, null))
+            panelState.exitLabel.value =
+                if (launchedExternally) "Exit game" else "Exit to library"
             panelIdleMode = mainPrefs.getInt(PREF_PANEL_IDLE, 0)
             refreshPanelMenuLabels()
             val panel = BottomScreenPresentation(this, target, panelState, panelActions)

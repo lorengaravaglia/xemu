@@ -109,6 +109,15 @@ class MainActivity : ComponentActivity() {
                 kotlinx.coroutines.delay(100)
             }
             startActivity(next)
+            /*
+             * A frontend's game: this activity was only the handoff, so step
+             * aside.  Exit from the game removes its task only when the game
+             * is the task's root, and should land back in the frontend, not
+             * in this library.
+             */
+            if (next.getBooleanExtra(com.boxxy.emulation.GameLaunch.EXTRA_EXTERNAL, false)) {
+                finish()
+            }
         }
     }
 

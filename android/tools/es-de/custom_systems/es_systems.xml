@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!--
+  ES-DE (Android) custom system: adds Boxxy to the Microsoft Xbox system.
+
+  Copy this file and es_find_rules.xml to ES-DE/custom_systems/ on the
+  device and restart ES-DE.  A custom system with the same <name> replaces the
+  bundled one, so the bundled emulators are repeated below; the first command
+  is the default, and the others stay selectable under Other Settings ->
+  Alternative Emulators.  Based on ES-DE 3.4's resources/systems/android/
+  es_systems.xml.
+-->
+<systemList>
+    <system>
+        <name>xbox</name>
+        <fullname>Microsoft Xbox</fullname>
+        <path>%ROMPATH%/xbox</path>
+        <extension>.iso .ISO .xiso .XISO</extension>
+        <command label="Boxxy (Standalone)">%EMULATOR_BOXXY% %ACTION%=android.intent.action.VIEW %DATA%=%ROMSAF%</command>
+        <command label="X1 BOX (Standalone)">%EMULATOR_X1-BOX% %ACTION%=android.intent.action.VIEW %DATA%=%ROMSAF%</command>
+        <command label="hakuX (Standalone)">%EMULATOR_HAKUX% %ACTION%=android.intent.action.VIEW %DATA%=%ROMSAF%</command>
+        <command label="Xenra (Standalone)">%EMULATOR_XENRA% %DATA%=%ROMSAF%</command>
+        <platform>xbox</platform>
+        <theme>xbox</theme>
+    </system>
+</systemList>

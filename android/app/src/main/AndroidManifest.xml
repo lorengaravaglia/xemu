@@ -25,6 +25,24 @@
             </intent-filter>
         </activity>
 
+        <!-- Frontends (ES-DE): ACTION_VIEW with the disc as a content URI.
+             Its own affinity and no history, so it never joins or lingers
+             in Boxxy's task; see ExternalLaunchActivity. -->
+        <activity
+            android:name=".ExternalLaunchActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="com.boxxy.external"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/x-iso9660-image" />
+            </intent-filter>
+        </activity>
+
         <activity
             android:name=".emulation.EmulationActivity"
             android:configChanges="orientation|screenSize"

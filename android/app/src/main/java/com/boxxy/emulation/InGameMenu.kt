@@ -76,6 +76,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun InGameMenu(
     initialOverlayLabel: String,
+    exitLabel: String,
     recordingLabel: String,
     isRecordingBusy: Boolean,
     maxHeight: Dp,
@@ -169,7 +170,7 @@ fun InGameMenu(
 
                 MenuSeparator()
                 MenuRow(
-                    label = "Exit to Library",
+                    label = exitLabel,
                     danger = true,
                     onClick = onExit,
                 )
