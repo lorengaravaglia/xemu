@@ -8,4 +8,9 @@
     <color name="xbox_green_light">#FF52B043</color>
     <color name="xemu_background">#FF121212</color>
     <color name="xemu_surface">#FF1E1E1E</color>
+    <!-- Overlay controls on top of the game (GamepadView): neutral so they
+         stay legible over any footage; the accent is used only on press. -->
+    <color name="xemu_surface_raised">#FF505050</color>
+    <color name="xemu_outline">#FFA0A0A0</color>
+    <color name="xemu_on_overlay">#FFFFFFFF</color>
 </resources>

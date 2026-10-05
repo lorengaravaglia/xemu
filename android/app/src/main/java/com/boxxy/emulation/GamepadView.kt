@@ -30,8 +30,15 @@ class GamepadView @JvmOverloads constructor(
 
     // ── Paint ────────────────────────────────────────────────────────────────
 
+    /* Every colour comes from the app palette (res/values/colors.xml), at
+     * the alpha the overlay needs over game footage. */
+    private fun palette(id: Int, alpha: Int): Int {
+        val c = ContextCompat.getColor(context, id)
+        return Color.argb(alpha, Color.red(c), Color.green(c), Color.blue(c))
+    }
+
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(160, 30, 30, 30)
+        color = palette(R.color.xemu_surface, 160)
         style = Paint.Style.FILL
     }
     /*
@@ -44,32 +51,30 @@ class GamepadView @JvmOverloads constructor(
      * clearest possible press feedback.
      */
     private val pressedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        val accent = ContextCompat.getColor(context, R.color.xbox_green_light)
-        color = Color.argb(210, Color.red(accent), Color.green(accent),
-                           Color.blue(accent))
+        color = palette(R.color.xbox_green_light, 210)
         style = Paint.Style.FILL
     }
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(200, 160, 160, 160)
+        color = palette(R.color.xemu_outline, 200)
         style = Paint.Style.STROKE
         strokeWidth = 3f
     }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
+        color = palette(R.color.xemu_on_overlay, 255)
         textAlign = Paint.Align.CENTER
         textSize = 28f
     }
     private val smallTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
+        color = palette(R.color.xemu_on_overlay, 255)
         textAlign = Paint.Align.CENTER
         textSize = 22f
     }
     private val stickBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(120, 20, 20, 20)
+        color = palette(R.color.xemu_background, 120)
         style = Paint.Style.FILL
     }
     private val stickKnobPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(180, 80, 80, 80)
+        color = palette(R.color.xemu_surface_raised, 180)
         style = Paint.Style.FILL
     }
 
