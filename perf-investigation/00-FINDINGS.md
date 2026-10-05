@@ -396,6 +396,7 @@ From the heavy-frames agent, not yet measured:
 | Dynamic spin detection (auto) | detects correctly, but the benchmark has no spin worth eliding; 0.2-0.6 ms/frame worse — section R |
 | Lower panel as a heat/perf lever (D3) | Off saves 0.13 W (~2%) and nothing else: fps, vCPU ms/frame and CPU temperature do not move — section AX |
 | Slot 7 dip as a CPU/codegen problem | The guest never misses a frame there; the dip was display pacing (render-loop pickup + fixed 16 ms sleep) -- section AZ |
+| 60 Hz instead of 120 Hz during play (A8) | Nothing to save on the Thor: the panels never leave 60 Hz -- section BA |
 | Trace JIT / LLVM backend (HQEMU, Instrew) | user-mode results; system-mode ceiling 1.15x |
 | GPU thread stealing vCPU time by blocking | vCPU shows no wait symbols, 1.26% kernel |
 | Shrinking the JIT translation buffer (iTLB locality) | **MEASURED 2026-09-12: tb-size 256 vs 32 MB = 32.55 vs 32.55 ms/frame.** iTLB misses rose with the smaller buffer. Switchable via `debug.xemu.tb_size`, default 256. |
@@ -3262,3 +3263,28 @@ per run, ABCCBA x2 in one process:
 
 **Open (follow-up):** lock the emulated vblank to the panel's vsync
 (Choreographer) to remove the residual slip.
+
+## BA. A8: THE THOR NEVER RUNS ITS PANELS AT 120 Hz (2026-10-05)
+
+A8 assumed the top panel's default 120 Hz mode was active during play and
+wasted power and heat on a 30 fps guest. Measured: it is not.
+
+- **The configuration holds 60 Hz.** The user's settings are
+  `peak_refresh_rate=60`, `min_refresh_rate=60`. DisplayModeDirector also
+  carries a device `PRIORITY_DEFAULT_REFRESH_RATE` vote with max 60
+  (`mDefaultRefreshRate: 60`).
+- **Nothing moved it off 60 Hz.** `mActiveSfDisplayMode` stayed at 60 Hz on
+  both panels in every case:
+  - peak 120 / min 60;
+  - peak 120 / min 120;
+  - the game window requesting the 120 Hz mode (`debug.xemu.panel60=120`);
+  - continuous touch on the top panel.
+- **The game's frame rate would pick 60 Hz anyway.** Since AZ, Boxxy
+  presents only per guest frame, at 30 fps.
+
+So there was no power or thermal comparison to make. Kept anyway, because
+it is a standard API and harmless: game windows (top and lower screen)
+request their display's 60 Hz mode through `preferredDisplayModeId`, which
+would hold 60 Hz on firmware or devices where 120 Hz is reachable.
+`DisplayRate.kt`; `debug.xemu.panel60` = 0 (no request) / 1 (60, default)
+/ 120 (for measuring). C8's list of heat levers loses A8 on this device.

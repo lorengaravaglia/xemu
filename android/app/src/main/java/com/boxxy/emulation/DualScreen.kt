@@ -246,6 +246,7 @@ class BottomScreenPresentation(
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setCancelable(false)
+        DisplayRate.apply(window, display)
         window?.decorView?.let { decor ->
             decor.setViewTreeLifecycleOwner(activity)
             decor.setViewTreeViewModelStoreOwner(activity)

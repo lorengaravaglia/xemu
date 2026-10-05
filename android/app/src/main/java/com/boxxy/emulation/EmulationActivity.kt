@@ -469,6 +469,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         // Edge-to-edge: let content draw behind system bars (immersive mode hides them anyway)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        DisplayRate.apply(window, display)
 
         mapping = ControllerMapping(this)
         inputManager = getSystemService(Context.INPUT_SERVICE) as InputManager
