@@ -3051,6 +3051,11 @@ void qemu_init(int argc, char **argv)
     const char *eeprom_path = get_eeprom_path();
 #if defined(__ANDROID__) || defined(ANDROID)
     ALOGI("qemu_init: eeprom_path = %s", eeprom_path ? eeprom_path : "NULL");
+    {
+        /* Boxxy's widescreen setting into the EEPROM, before it is read. */
+        extern void xemu_android_prepare_eeprom(const char *path);
+        xemu_android_prepare_eeprom(eeprom_path);
+    }
 #endif
     if (eeprom_path) {
 #if defined(__ANDROID__) || defined(ANDROID)

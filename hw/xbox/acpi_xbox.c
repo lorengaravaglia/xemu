@@ -19,6 +19,8 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/cpu.h"
+#include "cpu.h"
 #include "hw/hw.h"
 #include "hw/irq.h"
 #include "hw/i386/pc.h"
@@ -71,6 +73,18 @@ static void xbox_pm_gpio_write(void *opaque, hwaddr addr, uint64_t val,
     XBOX_DPRINTF("pm gpio write [0x%llx] = 0x%llx\n", addr, val);
 
     if (addr == XBOX_PM_GPIO_ASPECT_RATIO) {
+#if defined(__ANDROID__)
+        {
+            uint32_t pc = 0, ret = 0;
+            if (current_cpu) {
+                CPUX86State *e = cpu_env(current_cpu);
+                pc = (uint32_t)(e->segs[R_CS].base + e->eip);
+                cpu_memory_rw_debug(current_cpu, e->regs[R_ESP], (uint8_t *)&ret, 4, 0);
+            }
+            fprintf(stderr, "xbox gpio: aspect ratio write 0x%llx (pc 0x%08x, [esp] 0x%08x)\n",
+                    (unsigned long long)val, pc, ret);
+        }
+#endif
         xemu_set_widescreen(val == 5);
     }
 

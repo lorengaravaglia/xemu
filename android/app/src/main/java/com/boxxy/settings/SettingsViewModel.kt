@@ -120,8 +120,18 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     // ── Display settings ──────────────────────────────────────────────────────
 
     /** 0=Native, 1=Auto, 2=4:3, 3=16:9 (default) */
-    private val _aspectRatio = MutableStateFlow(prefs.getInt("aspect_ratio", 3))
+    /* Default Auto: 16:9 only when the console is set to widescreen. */
+    private val _aspectRatio = MutableStateFlow(prefs.getInt("aspect_ratio", 1))
     val aspectRatio: StateFlow<Int> = _aspectRatio
+
+    /** The Xbox's own widescreen setting (EEPROM), written at each launch. */
+    private val _xboxWidescreen = MutableStateFlow(prefs.getBoolean("xbox_widescreen", false))
+    val xboxWidescreen: StateFlow<Boolean> = _xboxWidescreen
+
+    fun setXboxWidescreen(value: Boolean) {
+        _xboxWidescreen.value = value
+        prefs.edit().putBoolean("xbox_widescreen", value).apply()
+    }
 
     /** 1=1× (native), 2=2×, 3=3× */
     private val _surfaceScale = MutableStateFlow(prefs.getInt("surface_scale", 1))

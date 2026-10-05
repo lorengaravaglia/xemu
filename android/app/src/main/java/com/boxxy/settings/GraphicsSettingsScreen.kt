@@ -27,6 +27,7 @@ fun GraphicsSettingsScreen(
     val surfaceScale  by settingsViewModel.surfaceScale.collectAsState()
     val filterNearest by settingsViewModel.filterNearest.collectAsState()
     val dualScreen    by settingsViewModel.dualScreen.collectAsState()
+    val xboxWidescreen by settingsViewModel.xboxWidescreen.collectAsState()
     val dualScreenIdle by settingsViewModel.dualScreenIdle.collectAsState()
     /* Only offered where there is a second screen to use. */
     val hasSecondScreen = remember {
@@ -114,7 +115,7 @@ fun GraphicsSettingsScreen(
                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     val aspectOptions = listOf(
                         0 to "Native (640×480 integer scale)",
-                        1 to "Auto (stretch)",
+                        1 to "Auto (matches the game)",
                         2 to "4:3 (pillarbox / letterbox)",
                         3 to "16:9 (stretch to fill)",
                     )
@@ -127,6 +128,25 @@ fun GraphicsSettingsScreen(
                             )
                         },
                     )
+                    Text(
+                        "Auto shows 16:9 when the game switches to " +
+                        "widescreen and 4:3 otherwise, so the picture is " +
+                        "never stretched out of shape.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    HorizontalDivider()
+                    SettingsSwitchRow(
+                        label = "Widescreen (16:9)",
+                        subtitle = "The Xbox's own widescreen setting, as on " +
+                                   "a console's dashboard. Games that support " +
+                                   "it can then draw a true 16:9 picture, " +
+                                   "which Auto shows full screen; games that " +
+                                   "do not keep drawing 4:3 and Auto keeps " +
+                                   "them 4:3. Can also be set per game. " +
+                                   "Applies the next time a game starts.",
+                        checked = xboxWidescreen,
+                    ) { settingsViewModel.setXboxWidescreen(it) }
                 }
             }
 

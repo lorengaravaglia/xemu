@@ -39,9 +39,14 @@ object GameSettings {
              listOf("1" to "1× (native)", "2" to "2×", "3" to "3×"),
              { it.getInt("surface_scale", 1).toString() }),
         Spec("aspect_ratio", "Aspect ratio", "Graphics",
-             listOf("0" to "Native (640×480 integer scale)", "1" to "Auto (stretch)",
+             listOf("0" to "Native (640×480 integer scale)", "1" to "Auto (matches the game)",
                     "2" to "4:3 (pillarbox / letterbox)", "3" to "16:9 (stretch to fill)"),
-             { it.getInt("aspect_ratio", 3).toString() }),
+             { it.getInt("aspect_ratio", 1).toString() }),
+        /* The Xbox's EEPROM widescreen flag: games that support it render
+         * true 16:9, and Auto aspect then fills the screen. */
+        Spec("xbox_widescreen", "Widescreen (16:9)", "Graphics",
+             listOf("false" to "Off", "true" to "On"),
+             { it.getBoolean("xbox_widescreen", false).toString() }),
         Spec("accurate_mem_ordering", "Accurate memory ordering", "Compatibility",
              listOf("false" to "Off", "true" to "On"),
              { it.getBoolean("accurate_mem_ordering", false).toString() }),

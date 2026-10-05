@@ -1,7 +1,9 @@
 #include "xemu_hud_stub.h"
 #include <android/log.h>
 #include "ui/xemu-notifications.h"
+#include "ui/xemu-widescreen.h"
 #include <GLES3/gl3.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,7 +25,7 @@ float g_main_menu_height = 0.0f;
 // 1 = Auto   (stretch to fill — same as 16:9 on widescreen phones)
 // 2 = 4:3    (pillarbox/letterbox)
 // 3 = 16:9   (stretch to fill, default)
-static int g_aspect_ratio = 3;
+static int g_aspect_ratio = 1;   /* Auto; see xemu_hud_render() */
 
 void xemu_hud_set_aspect_ratio(int ratio) {
     g_aspect_ratio = ratio;
@@ -202,11 +204,33 @@ void xemu_hud_render(void)
     /* Compute destination rect in NDC space.
      * g_aspect_ratio:
      *   0 = Native  — largest integer multiple of Xbox 640x480, centered
-     *   1 = Auto    — stretch to fill (same as 16:9 on widescreen)
+     *   1 = Auto    — what the game renders (default).  The kernel writes
+     *                 a GPIO on every video mode set (acpi_xbox.c ->
+     *                 xemu_get_widescreen(), 5 = widescreen), including the
+     *                 game's own, so this follows the mode the RUNNING GAME
+     *                 chose, not just the console setting (FINDINGS BC) --
+     *                 as desktop xemu's Auto does.
+     *                 A widescreen game renders 16:9 squeezed into 640x480
+     *                 and expects the TV to stretch it, so stretching is
+     *                 right exactly then; a 4:3 picture must not be.
      *   2 = 4:3     — pillarbox/letterbox to preserve 4:3 AR
-     *   3 = 16:9    — stretch to fill viewport (default) */
+     *   3 = 16:9    — stretch to fill viewport */
     float x0 = -1.0f, y0 = -1.0f, x1 = 1.0f, y1 = 1.0f;
     if (w > 0.0f && h > 0.0f) {
+        if (g_aspect_ratio == 1) {
+            /* Auto: say what it decided whenever that changes. */
+            static int last_wide = -1;
+            int wide = xemu_get_widescreen();
+            if (wide != last_wide) {
+                LOGI("aspect Auto: console %s -> showing %s",
+                     wide ? "widescreen" : "4:3",
+                     wide ? "16:9 (fill)" : "4:3 (pillarbox)");
+                last_wide = wide;
+            }
+        }
+        bool four_three = g_aspect_ratio == 2 ||
+                          (g_aspect_ratio == 1 && !xemu_get_widescreen());
+
         if (g_aspect_ratio == 0) {
             /* Native: largest integer scale of 640×480 that fits */
             int scale = (int)(w / 640.0f);
@@ -216,7 +240,7 @@ void xemu_hud_render(void)
             float rw = (640.0f * scale) / w;
             float rh = (480.0f * scale) / h;
             x0 = -rw; x1 = rw; y0 = -rh; y1 = rh;
-        } else if (g_aspect_ratio == 2) {
+        } else if (four_three) {
             /* 4:3: pillarbox or letterbox */
             const float target_ar = 4.0f / 3.0f;
             float screen_ar = w / h;
@@ -230,7 +254,8 @@ void xemu_hud_render(void)
                 y1 =  rect_h_ndc;
             }
         }
-        /* ratio 1 (Auto) and 3 (16:9): fill viewport — NDC -1..1, no change */
+        /* 16:9, or Auto on a widescreen console: fill the viewport (the
+         * Thor's panel is 16:9) — NDC -1..1, no change */
     }
 
     /* Render to the EGL window surface (FBO 0) */

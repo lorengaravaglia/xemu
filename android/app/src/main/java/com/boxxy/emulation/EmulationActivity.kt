@@ -2120,7 +2120,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     /** Read graphics settings from main_prefs and push to native layer. */
     private fun applyGraphicsSettings() {
-        NativeInterface.setAspectRatio(gameInt("aspect_ratio", 3))
+        NativeInterface.setAspectRatio(gameInt("aspect_ratio", 1))
         NativeInterface.setFilterNearest(mainPrefs.getBoolean("filter_nearest", false))
         NativeInterface.setSurfaceScale(gameInt("surface_scale", 1))
     }
@@ -2147,6 +2147,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
          * this. */
         NativeInterface.setFastBoot(gameBool("fast_boot", true))
         NativeInterface.setX87Rounding(gameBool("x87_rounding", false))
+        /* Into the EEPROM before the machine reads it (qemu_init). */
+        NativeInterface.setWidescreen(gameBool("xbox_widescreen", false))
         Log.i("xemu-android", "game settings $gameSettingsKey: " +
               GameSettings.SPECS.joinToString { sp ->
                   sp.prefKey + "=" + (GameSettings.override(this, gameSettingsKey, sp.prefKey)

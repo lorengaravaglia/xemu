@@ -11,6 +11,8 @@
 #include <pthread.h>
 #include <android/log.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -692,6 +694,71 @@ void xemu_android_set_fast_boot(bool enabled) {
     extern int g_xemu_stall_mode;
     g_xemu_stall_mode = enabled ? 2 : 0;
     LOGI("fast boot: %s", enabled ? "on (kernel delays skipped)" : "off");
+}
+
+/*
+ * The Xbox's own widescreen setting (EEPROM VideoFlags), applied per launch
+ * from Boxxy's (per-game) setting.  Games that support widescreen read it and
+ * render 16:9; the kernel then reports it, and Auto aspect shows 16:9.
+ * -1 = leave the EEPROM as it is.
+ */
+static int s_widescreen_pref = -1;
+
+void xemu_android_set_widescreen(bool enabled) {
+    s_widescreen_pref = enabled;
+}
+
+#define EEPROM_USER_CHECKSUM  0x60
+#define EEPROM_USER_SECTION   0x64
+#define EEPROM_USER_CRC_LEN   0x5C
+#define EEPROM_VIDEO_FLAGS    0x94
+#define VIDEO_WIDESCREEN      0x00010000u
+#define VIDEO_LETTERBOX       0x00100000u
+
+/* hw/xbox/eeprom_generation.c's checksum: a 32-bit sum with end-around
+ * carry, complemented. */
+static uint32_t eeprom_user_crc(const uint8_t *p)
+{
+    uint32_t high = 0, low = 0;
+    for (int i = 0; i < EEPROM_USER_CRC_LEN / 4; i++) {
+        uint32_t v;
+        memcpy(&v, p + 4 * i, 4);
+        uint64_t sum = ((uint64_t)high << 32) | low;
+        high = (uint32_t)((sum + v) >> 32);
+        low += v;
+    }
+    return ~(high + low);
+}
+
+/* Called from qemu_init (system/vl.c) after the EEPROM exists and before
+ * the machine reads it. */
+void xemu_android_prepare_eeprom(const char *path) {
+    uint8_t e[256];
+    FILE *f;
+    uint32_t flags, want;
+
+    if (s_widescreen_pref < 0 || !path || !(f = fopen(path, "r+b"))) {
+        return;
+    }
+    if (fread(e, 1, sizeof(e), f) != sizeof(e)) {
+        fclose(f);
+        return;
+    }
+    memcpy(&flags, e + EEPROM_VIDEO_FLAGS, 4);
+    /* Widescreen and letterbox are alternatives; widescreen wins. */
+    want = s_widescreen_pref ? ((flags | VIDEO_WIDESCREEN) & ~VIDEO_LETTERBOX)
+                             : (flags & ~VIDEO_WIDESCREEN);
+    if (want != flags) {
+        uint32_t crc;
+        memcpy(e + EEPROM_VIDEO_FLAGS, &want, 4);
+        crc = eeprom_user_crc(e + EEPROM_USER_SECTION);
+        memcpy(e + EEPROM_USER_CHECKSUM, &crc, 4);
+        fseek(f, 0, SEEK_SET);
+        fwrite(e, 1, sizeof(e), f);
+    }
+    fclose(f);
+    LOGI("eeprom: widescreen %s (VideoFlags 0x%08x -> 0x%08x)",
+         s_widescreen_pref ? "on" : "off", flags, want);
 }
 
 /* C4: honour the guest's x87 rounding mode.  Must be set before emulation

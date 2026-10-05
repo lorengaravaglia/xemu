@@ -3337,3 +3337,39 @@ before, and directed and nearest rounding agree on integral values. The
 remaining hazard, by design: a directed mode set by the guest is also seen
 by C code on the vCPU thread until the guest restores it, which these
 games do within a few instructions.
+
+## BC. WIDESCREEN: 4:3 GAMES WERE STRETCHED; AUTO NOW FOLLOWS THE GAME (2026-10-05)
+
+Not a performance result; recorded because the method and the open question
+matter.
+
+**Before.** The emulated EEPROM's VideoFlags (offset 0x94) were 0, so the
+console told every game "4:3 TV". Boxxy's default aspect was "16:9 stretch",
+and "Auto" was also a plain stretch. Every game was shown 1.33x too wide:
+Halo's logo measured 782 px from centre instead of 587.
+
+**How the console reports aspect.** The kernel writes PM GPIO 0x16 (5 =
+widescreen) on every video mode set (`acpi_xbox.c` ->
+`xemu_get_widescreen()`). Logged with guest PC: the kernel's boot mode set
+writes the console setting, then each game's own mode set
+(`pc 0x80030760`, a game address on the stack) writes what the GAME chose.
+So Auto now follows the running game, as desktop xemu's Auto does, and is
+the default.
+
+**Verified.** With the console set to widescreen, all five games tested
+(Halo, Halo 2, MGS2, JSRF, THPS2x) wrote 5 at boot and then 4 at their own
+mode set. Auto showed each 4:3, and the pixels confirm it: the Halo logo
+measured 587 px in all three runs, and the Halo 2 logo width was identical
+with widescreen off and on (1032 vs 1031 px).
+
+**The widescreen setting.** Global and per game. It writes EEPROM VideoFlags
+bit 0x00010000 at each launch, in `qemu_init` before the machine reads it,
+with the user-section checksum recomputed. The algorithm reproduces the
+stored checksum. It works at kernel level: the boot GPIO write follows it.
+
+**Open: Halo 2 still chose 4:3.** Halo 2 is a known widescreen title, but
+it requested 4:3 even with widescreen, and with widescreen + 480p set. Some
+other part of what the game reads -- XGetVideoFlags' AV-pack masking, the
+SMC AV-pack value, or another field -- still says "not widescreen".
+Instrumentation kept: `xbox gpio:` lines with guest PC and the `aspect Auto:`
+decision.
