@@ -12,8 +12,8 @@
  * in 20 ms, otherwise 33.3 ms.  A fixed 33.3 ms target would tell a 60 fps
  * game it has half a frame of headroom and invite the governor to drop clocks.
  *
- * API 33+.  minSdk is 28, so everything is resolved with dlsym and the
- * feature is simply absent below 33 or where the HAL declines a session.
+ * API 33+, which is the minSdk (A7), so the NDK calls are made directly; the
+ * feature is simply absent where the HAL declines a session.
  *
  * OFF BY DEFAULT, and only reachable through `setprop debug.xemu.adpf 1`
  * (re-read about once a second, so an A/B can toggle it inside one process).
@@ -26,8 +26,8 @@
  */
 
 #include <android/log.h>
+#include <android/performance_hint.h>
 #include <dirent.h>
-#include <dlfcn.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,16 +41,6 @@
 #define TAG "xemu-adpf"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 
-typedef struct APerformanceHintManager APerformanceHintManager;
-typedef struct APerformanceHintSession APerformanceHintSession;
-
-static APerformanceHintManager *(*p_get_manager)(void);
-static APerformanceHintSession *(*p_create_session)(
-    APerformanceHintManager *, const int32_t *, size_t, int64_t);
-static int (*p_update_target)(APerformanceHintSession *, int64_t);
-static int (*p_report_actual)(APerformanceHintSession *, int64_t);
-static void (*p_close_session)(APerformanceHintSession *);
-
 extern int xemu_vcpu_tid;       /* accel/tcg/cpu-exec.c */
 
 #define TARGET_30_NS  33333333LL
@@ -58,7 +48,7 @@ extern int xemu_vcpu_tid;       /* accel/tcg/cpu-exec.c */
 #define PACE_WINDOW   60        /* frames between pace decisions */
 #define MAX_REPORT_NS 1000000000LL  /* longer = paused or backgrounded */
 
-static bool s_api_ok, s_api_tried, s_session_failed;
+static bool s_session_failed;
 static APerformanceHintSession *s_session;
 static int64_t s_target_ns = TARGET_30_NS;
 static int64_t s_last_frame_ns;
@@ -75,30 +65,6 @@ static int64_t now_ns(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
-static bool load_api(void)
-{
-    if (s_api_tried) {
-        return s_api_ok;
-    }
-    s_api_tried = true;
-
-    void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
-    if (!lib) {
-        return false;
-    }
-    *(void **)&p_get_manager = dlsym(lib, "APerformanceHint_getManager");
-    *(void **)&p_create_session = dlsym(lib, "APerformanceHint_createSession");
-    *(void **)&p_update_target = dlsym(lib, "APerformanceHint_updateTargetWorkDuration");
-    *(void **)&p_report_actual = dlsym(lib, "APerformanceHint_reportActualWorkDuration");
-    *(void **)&p_close_session = dlsym(lib, "APerformanceHint_closeSession");
-    s_api_ok = p_get_manager && p_create_session && p_update_target &&
-               p_report_actual && p_close_session;
-    if (!s_api_ok) {
-        LOGI("ADPF unavailable (API < 33)");
-    }
-    return s_api_ok;
 }
 
 /* nv2a.pfifo has no exported tid; find it by the name QEMU gives it. */
@@ -129,7 +95,7 @@ static int find_thread_by_prefix(const char *prefix)
 
 static void open_session(void)
 {
-    if (s_session_failed || !load_api() || !xemu_vcpu_tid) {
+    if (s_session_failed || !xemu_vcpu_tid) {
         return;
     }
     int32_t tids[2];
@@ -140,8 +106,8 @@ static void open_session(void)
         tids[n++] = pfifo;
     }
 
-    APerformanceHintManager *m = p_get_manager();
-    s_session = m ? p_create_session(m, tids, n, s_target_ns) : NULL;
+    APerformanceHintManager *m = APerformanceHint_getManager();
+    s_session = m ? APerformanceHint_createSession(m, tids, n, s_target_ns) : NULL;
     if (!s_session) {
         /* The HAL may decline; do not retry every frame. */
         s_session_failed = true;
@@ -155,7 +121,7 @@ static void open_session(void)
 static void close_session(void)
 {
     if (s_session) {
-        p_close_session(s_session);
+        APerformanceHint_closeSession(s_session);
         s_session = NULL;
         LOGI("ADPF session closed");
     }
@@ -201,13 +167,13 @@ void xemu_adpf_on_guest_frame(void)
                                                         : TARGET_30_NS;
         if (target != s_target_ns) {
             s_target_ns = target;
-            p_update_target(s_session, target);
+            APerformanceHint_updateTargetWorkDuration(s_session, target);
             LOGI("ADPF target %.1f ms", target / 1e6);
         }
         s_pace_frames = s_pace_fast = 0;
     }
 
-    p_report_actual(s_session, interval);
+    APerformanceHint_reportActualWorkDuration(s_session, interval);
     xemu_adpf_reports++;
     /* 5% tolerance: a 33.4 ms frame on a 33.3 ms target is on pace. */
     xemu_adpf_over_target += interval > s_target_ns + s_target_ns / 20;

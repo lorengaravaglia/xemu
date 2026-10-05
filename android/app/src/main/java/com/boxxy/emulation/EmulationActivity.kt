@@ -28,7 +28,6 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.MediaStore
 import android.view.*
-import androidx.annotation.RequiresApi
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -409,12 +408,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     // Rumble
     private val vibrator: Vibrator by lazy {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-        }
+        (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
     }
     private val rumbleHandler = Handler(Looper.getMainLooper())
     private val rumbleRunnable = object : Runnable {
@@ -425,13 +419,13 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
             if (l == 0 && r == 0) {
                 vibrator.cancel()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) cancelControllerRumble()
+                cancelControllerRumble()
             } else {
                 // ── Device vibrator ───────────────────────────────────────────
                 // Blend both motors: left (heavy) weighted 60%, right (light) 40%.
                 // When right motor strongly dominates, approximate its high-frequency
                 // character with a rapid on/off waveform instead of a solid pulse.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                run {
                     val effect = if (r > l * 3 / 2) {
                         val amp = (r * 255 / 65535).coerceIn(1, 255)
                         VibrationEffect.createWaveform(
@@ -444,13 +438,10 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                         VibrationEffect.createOneShot(150, blended)
                     }
                     vibrator.vibrate(effect)
-                } else {
-                    @Suppress("DEPRECATION")
-                    vibrator.vibrate(150)
                 }
-                // ── Physical controller (API 31+) ─────────────────────────────
+                // ── Physical controller ───────────────────────────────────────
                 // Drive each motor independently on the controller itself.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) vibrateController(l, r)
+                vibrateController(l, r)
             }
             rumbleHandler.postDelayed(this, 100)
         }
@@ -2059,15 +2050,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     }
 
     private fun takeScreenshot() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            takeScreenshotApi26()
-        } else {
-            showMessage("Screenshot requires Android 8+", isError = true)
-        }
-    }
-
-    @RequiresApi(Build.VERSION_CODES.O)
-    private fun takeScreenshotApi26() {
         val w = surfaceView.width
         val h = surfaceView.height
         if (w == 0 || h == 0) return
@@ -2081,27 +2063,19 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun saveScreenshot(bmp: Bitmap) {
         val filename = "xemu_${System.currentTimeMillis()}.png"
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                    put(MediaStore.Images.Media.RELATIVE_PATH,
-                        Environment.DIRECTORY_PICTURES + "/xemu")
-                }
-                val uri = contentResolver.insert(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                uri?.let { u ->
-                    contentResolver.openOutputStream(u)?.use {
-                        bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
-                    }
-                    showMessage("Screenshot saved to Pictures/xemu")
-                }
-            } else {
-                val dir = java.io.File(filesDir, "screenshots").also { it.mkdirs() }
-                java.io.File(dir, filename).outputStream().use {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.RELATIVE_PATH,
+                    Environment.DIRECTORY_PICTURES + "/xemu")
+            }
+            val uri = contentResolver.insert(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            uri?.let { u ->
+                contentResolver.openOutputStream(u)?.use {
                     bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
                 }
-                showMessage("Screenshot saved to app storage")
+                showMessage("Screenshot saved to Pictures/xemu")
             }
         } catch (e: Exception) {
             showMessage("Screenshot failed: ${e.message}", isError = true)
@@ -2119,7 +2093,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             }?.id
 
     /** Drive the physical controller's own left/right rumble motors independently (API 31+). */
-    @RequiresApi(Build.VERSION_CODES.S)
     private fun vibrateController(l: Int, r: Int) {
         val dev = physicalGamepadDeviceId()?.let { InputDevice.getDevice(it) } ?: return
         val vm = dev.vibratorManager
@@ -2140,7 +2113,6 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (hasAny) vm.vibrate(parallel.combine()) else vm.cancel()
     }
 
-    @RequiresApi(Build.VERSION_CODES.S)
     private fun cancelControllerRumble() {
         physicalGamepadDeviceId()?.let { InputDevice.getDevice(it)?.vibratorManager?.cancel() }
     }

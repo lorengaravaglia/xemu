@@ -37,6 +37,13 @@ The Android port uses a **hybrid two-stage build**:
 
 2. **Stage 2 — CMake/Android Studio (JNI wrapper):** Compiles the Android-patched `ui/xemu*.c` files directly (with `#if ANDROID` guards), then links against the Meson `.o` object files via `file(GLOB_RECURSE ...)`. This avoids re-running Meson for every Android tweak.
 
+**API levels differ on purpose.** The app's `minSdk` is 33 (the AYN Thor is the
+floor; OPEN-WORK A7), and CMake builds the JNI layer and links at that level. The
+Meson cross-file (`android_arm64.txt`) stays at API 28: those core objects run
+unchanged on 33, and raising it would force a full core rebuild for no gain.
+CMake-compiled code may call API 33 NDK functions directly (e.g.
+`APerformanceHint_*` in `xemu_adpf.c`); Meson-compiled code should not.
+
 **Critical invariant:** Both build systems must use identical flags: `-mbranch-protection=none -fno-sanitize=shadow-call-stack`. This prevents PAC/SCS security hardening from crashing coroutine stack switching on AArch64. Do not add these flags to only one side.
 
 ## Build Commands

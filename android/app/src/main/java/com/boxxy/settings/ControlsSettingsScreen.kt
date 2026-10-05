@@ -134,35 +134,20 @@ fun ControlsSettingsScreen(
 }
 
 private fun getVibrator(context: Context): Vibrator =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
-    } else {
-        @Suppress("DEPRECATION")
-        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-    }
+    (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
 
 /** Heavy/low-frequency — solid 500 ms pulse at full amplitude. */
 private fun testRumbleLeft(context: Context) {
     val v = getVibrator(context)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        v.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
-    } else {
-        @Suppress("DEPRECATION")
-        v.vibrate(500)
-    }
+    v.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
 }
 
 /** Light/high-frequency — rapid on/off waveform to simulate buzzy right motor. */
 private fun testRumbleRight(context: Context) {
     val v = getVibrator(context)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        v.vibrate(VibrationEffect.createWaveform(
-            longArrayOf(0, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10),
-            intArrayOf(0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0),
-            -1
-        ))
-    } else {
-        @Suppress("DEPRECATION")
-        v.vibrate(300)
-    }
+    v.vibrate(VibrationEffect.createWaveform(
+        longArrayOf(0, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10),
+        intArrayOf(0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0, 200, 0),
+        -1
+    ))
 }
