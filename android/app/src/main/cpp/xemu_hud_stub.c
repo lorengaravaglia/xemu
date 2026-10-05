@@ -1,4 +1,5 @@
 #include "xemu_hud_stub.h"
+#include "xemu_android.h"
 #include <android/log.h>
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-widescreen.h"
@@ -204,12 +205,14 @@ void xemu_hud_render(void)
     /* Compute destination rect in NDC space.
      * g_aspect_ratio:
      *   0 = Native  — largest integer multiple of Xbox 640x480, centered
-     *   1 = Auto    — what the game renders (default).  The kernel writes
-     *                 a GPIO on every video mode set (acpi_xbox.c ->
-     *                 xemu_get_widescreen(), 5 = widescreen), including the
-     *                 game's own, so this follows the mode the RUNNING GAME
-     *                 chose, not just the console setting (FINDINGS BC) --
-     *                 as desktop xemu's Auto does.
+     *   1 = Auto    — (default) follows Boxxy's Widescreen setting for
+     *                 this game, the way a real TV is set to 16:9 by hand:
+     *                 on -> 16:9 fill, off -> 4:3 pillarbox.  On component
+     *                 and composite nothing tells the TV what a game
+     *                 renders, and games need not flag it -- an anamorphic
+     *                 picture can come with a "4:3" mode set -- so the
+     *                 kernel's aspect GPIO (xemu_get_widescreen()) is only
+     *                 logged, not trusted (FINDINGS BC).
      *                 A widescreen game renders 16:9 squeezed into 640x480
      *                 and expects the TV to stretch it, so stretching is
      *                 right exactly then; a 4:3 picture must not be.
@@ -217,19 +220,23 @@ void xemu_hud_render(void)
      *   3 = 16:9    — stretch to fill viewport */
     float x0 = -1.0f, y0 = -1.0f, x1 = 1.0f, y1 = 1.0f;
     if (w > 0.0f && h > 0.0f) {
+        bool auto_wide = xemu_android_widescreen_enabled();
         if (g_aspect_ratio == 1) {
-            /* Auto: say what it decided whenever that changes. */
-            static int last_wide = -1;
-            int wide = xemu_get_widescreen();
-            if (wide != last_wide) {
-                LOGI("aspect Auto: console %s -> showing %s",
-                     wide ? "widescreen" : "4:3",
-                     wide ? "16:9 (fill)" : "4:3 (pillarbox)");
-                last_wide = wide;
+            /* Auto: log the decision, and the game's own aspect signal
+             * beside it for diagnosis, whenever either changes. */
+            static int last = -1;
+            int now = auto_wide | (xemu_get_widescreen() << 1);
+            if (now != last) {
+                LOGI("aspect Auto: widescreen setting %s -> showing %s "
+                     "(game's aspect signal: %s)",
+                     auto_wide ? "on" : "off",
+                     auto_wide ? "16:9 (fill)" : "4:3 (pillarbox)",
+                     xemu_get_widescreen() ? "widescreen" : "4:3");
+                last = now;
             }
         }
         bool four_three = g_aspect_ratio == 2 ||
-                          (g_aspect_ratio == 1 && !xemu_get_widescreen());
+                          (g_aspect_ratio == 1 && !auto_wide);
 
         if (g_aspect_ratio == 0) {
             /* Native: largest integer scale of 640×480 that fits */

@@ -132,6 +132,7 @@ void xemu_android_set_ldapr(bool enabled);
 void xemu_android_set_fast_boot(bool enabled);
 void xemu_android_set_x87_rounding(bool enabled);
 void xemu_android_set_widescreen(bool enabled);
+bool xemu_android_widescreen_enabled(void);
 void xemu_android_prepare_eeprom(const char *path);
 bool xemu_android_input_ready(void);
 

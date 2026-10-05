@@ -3367,9 +3367,24 @@ bit 0x00010000 at each launch, in `qemu_init` before the machine reads it,
 with the user-section checksum recomputed. The algorithm reproduces the
 stored checksum. It works at kernel level: the boot GPIO write follows it.
 
-**Open: Halo 2 still chose 4:3.** Halo 2 is a known widescreen title, but
-it requested 4:3 even with widescreen, and with widescreen + 480p set. Some
-other part of what the game reads -- XGetVideoFlags' AV-pack masking, the
-SMC AV-pack value, or another field -- still says "not widescreen".
+**Correction (same day): the aspect GPIO does not say what a game renders,
+so Auto now follows Boxxy's Widescreen setting instead.** Prompted by the
+user's point that on component or composite a TV never auto-switches -- you
+set it to 16:9 by hand -- Halo 2 was checked in gameplay. Cairo Station
+spawn, identical view, widescreen on vs off, both shown 4:3. The horizontal
+scale that best maps one onto the other is **1.32** (correlation 0.55,
+against 0.21 at 1.00): Halo 2 renders true anamorphic 16:9, while its own
+mode set writes GPIO 4 ("4:3").
+
+Its title logo and HUD are NOT squeezed: the motion tracker is round in the
+4:3 view and so wide on a 16:9 screen, as on hardware. That is why the
+earlier logo-width test (1032 vs 1031 px) wrongly said "4:3". Auto trusting
+the GPIO would have shown Halo 2 squeezed.
+
+Auto = the game's effective Widescreen setting (on -> 16:9 fill, off -> 4:3
+pillarbox), like a TV set by hand; the GPIO is logged beside it for
+diagnosis only. With Widescreen on, Halo 2 shows full screen with correct
+geometry.
+
 Instrumentation kept: `xbox gpio:` lines with guest PC and the `aspect Auto:`
 decision.

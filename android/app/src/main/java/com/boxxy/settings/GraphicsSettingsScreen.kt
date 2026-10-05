@@ -129,9 +129,9 @@ fun GraphicsSettingsScreen(
                         },
                     )
                     Text(
-                        "Auto shows 16:9 when the game switches to " +
-                        "widescreen and 4:3 otherwise, so the picture is " +
-                        "never stretched out of shape.",
+                        "Auto follows the Widescreen setting below, like " +
+                        "setting a TV to 16:9: on shows 16:9 full screen, " +
+                        "off shows 4:3 with bars.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -140,10 +140,10 @@ fun GraphicsSettingsScreen(
                         label = "Widescreen (16:9)",
                         subtitle = "The Xbox's own widescreen setting, as on " +
                                    "a console's dashboard. Games that support " +
-                                   "it can then draw a true 16:9 picture, " +
-                                   "which Auto shows full screen; games that " +
-                                   "do not keep drawing 4:3 and Auto keeps " +
-                                   "them 4:3. Can also be set per game. " +
+                                   "it draw a true 16:9 picture, shown full " +
+                                   "screen with Auto. Games that do not would " +
+                                   "look stretched -- leave it off for those " +
+                                   "(long-press a game \u2192 Game settings). " +
                                    "Applies the next time a game starts.",
                         checked = xboxWidescreen,
                     ) { settingsViewModel.setXboxWidescreen(it) }

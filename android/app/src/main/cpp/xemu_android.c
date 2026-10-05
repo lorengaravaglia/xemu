@@ -708,6 +708,11 @@ void xemu_android_set_widescreen(bool enabled) {
     s_widescreen_pref = enabled;
 }
 
+/* Auto aspect follows this, as a real TV's 16:9 setting would. */
+bool xemu_android_widescreen_enabled(void) {
+    return s_widescreen_pref == 1;
+}
+
 #define EEPROM_USER_CHECKSUM  0x60
 #define EEPROM_USER_SECTION   0x64
 #define EEPROM_USER_CRC_LEN   0x5C
