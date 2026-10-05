@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +45,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.res.painterResource
@@ -526,10 +529,13 @@ private fun SlotGrid(state: BottomPanelState, actions: BottomPanelActions) {
         val usable = isSave || s.occupied
         PanelTile(
             label = "Slot ${s.number}\n" + when {
-                s.occupied && isSave -> "Overwrite"
-                s.occupied           -> "Saved"
-                else                 -> "Empty"
+                !s.occupied                   -> "Empty"
+                s.savedAt != null && isSave   -> "Overwrite\n" + slotAge(s.savedAt)
+                s.savedAt != null             -> slotAge(s.savedAt)
+                isSave                        -> "Overwrite"
+                else                          -> "Saved"
             },
+            image = rememberSlotThumb(s),
             focused = focused,
             active = state.activeSlot.value == s.number,
             enabled = usable && !state.busy.value,
@@ -720,6 +726,8 @@ private fun PanelTile(
     active: Boolean = false,
     dim: Boolean = false,
     @DrawableRes icon: Int? = null,
+    /** Fills the tile behind the label, under a scrim so the text reads. */
+    image: ImageBitmap? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
@@ -740,6 +748,13 @@ private fun PanelTile(
         },
         modifier = Modifier.fillMaxSize(),
     ) {
+        if (image != null) {
+            Box(Modifier.fillMaxSize()) {
+                Image(image, contentDescription = null, contentScale = ContentScale.Crop,
+                      alpha = if (dim) 0.4f else 1f, modifier = Modifier.fillMaxSize())
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
+            }
+        }
         Column(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,

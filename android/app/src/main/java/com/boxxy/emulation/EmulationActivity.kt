@@ -1181,11 +1181,35 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
      * eight-item AlertDialog it replaced, which ran off the bottom of a
      * landscape screen and left the last slot unreachable.
      */
-    private fun showSlotPicker(isSave: Boolean) {
+    /** The eight slots, with each one's thumbnail and save time (A5). */
+    private fun slotInfos(): List<SlotInfo> {
         val existing = NativeInterface.listStates().toSet()
-        val slots = (1..8).map { n ->
-            SlotInfo(n, "${gameId}_slot_$n" in existing)
+        return (1..8).map { n ->
+            val name = "${gameId}_slot_$n"
+            val occupied = name in existing
+            SlotInfo(
+                n, occupied,
+                thumb = if (occupied) SlotThumbs.file(this, name).takeIf { it.exists() } else null,
+                savedAt = if (occupied) SlotThumbs.savedAt(this, name) else null,
+            )
         }
+    }
+
+    /**
+     * Save to a slot, recording its thumbnail.  Blocking; call off the UI
+     * thread.  The picture is taken before the save, while the scene being
+     * saved is on screen, and kept only if the save succeeds.
+     */
+    private fun saveSlotState(name: String): String? {
+        val thumb = SlotThumbs.grab(surfaceView)
+        val err = NativeInterface.saveState(name)
+        if (err == null) SlotThumbs.write(this, name, thumb)
+        thumb?.recycle()
+        return err
+    }
+
+    private fun showSlotPicker(isSave: Boolean) {
+        val slots = slotInfos()
 
         /*
          * Held outside the composable so the worker thread can drive them.
@@ -1219,7 +1243,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                         val name = "${gameId}_slot_$n"
                         Thread {
                             val err = if (isSave) {
-                                NativeInterface.saveState(name)
+                                saveSlotState(name)
                             } else {
                                 NativeInterface.loadState(name)
                             }
@@ -1658,7 +1682,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun executeQuickSave() {
         val name = "${gameId}_slot_$quickSaveSlot"
         runStateOp("Saving to slot $quickSaveSlot…", "Saved to slot $quickSaveSlot") {
-            NativeInterface.saveState(name)
+            saveSlotState(name)
         }
     }
 
@@ -1991,8 +2015,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     }
 
     private fun refreshPanelSlots() {
-        val existing = NativeInterface.listStates().toSet()
-        panelState.slots.value = (1..8).map { n -> SlotInfo(n, "${gameId}_slot_$n" in existing) }
+        panelState.slots.value = slotInfos()
     }
 
     private fun openPanelSlots(isSave: Boolean) {
@@ -2014,7 +2037,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         panelState.statusIsError.value = false
         val name = "${gameId}_slot_$number"
         Thread {
-            val err = if (isSave) NativeInterface.saveState(name) else NativeInterface.loadState(name)
+            val err = if (isSave) saveSlotState(name) else NativeInterface.loadState(name)
             runOnUiThread {
                 panelState.busy.value = false
                 refreshPanelSlots()
