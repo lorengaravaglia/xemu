@@ -167,6 +167,13 @@ class MainActivity : ComponentActivity() {
                     composable("settings/advanced") {
                         AdvancedSettingsScreen(navController, settingsViewModel)
                     }
+                    composable("game_settings/{key}?name={name}") { entry ->
+                        GameSettingsScreen(
+                            navController,
+                            gameKey = entry.arguments?.getString("key") ?: return@composable,
+                            gameName = entry.arguments?.getString("name") ?: "Game settings",
+                        )
+                    }
                 }
             }
         }

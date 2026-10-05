@@ -459,6 +459,17 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private val prefs get() = getSharedPreferences("emulation_prefs", Context.MODE_PRIVATE)
     private val mainPrefs get() = getSharedPreferences("main_prefs", Context.MODE_PRIVATE)
 
+    /** This game's key for per-game settings (A4): reads the disc's title
+     *  ID once, on first use. */
+    private val gameSettingsKey: String by lazy {
+        val iso = intent.getStringExtra("iso") ?: ""
+        if (iso.isEmpty()) "g_dashboard" else GameSettings.keyFor(this, iso)
+    }
+    private fun gameInt(key: String, default: Int) =
+        GameSettings.effectiveInt(this, gameSettingsKey, key, default)
+    private fun gameBool(key: String, default: Boolean) =
+        GameSettings.effectiveBoolean(this, gameSettingsKey, key, default)
+
     // dp → px helper
     private val Int.dp get() = (this * resources.displayMetrics.density).toInt()
 
@@ -2113,9 +2124,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
 
     /** Read graphics settings from main_prefs and push to native layer. */
     private fun applyGraphicsSettings() {
-        NativeInterface.setAspectRatio(mainPrefs.getInt("aspect_ratio", 3))
+        NativeInterface.setAspectRatio(gameInt("aspect_ratio", 3))
         NativeInterface.setFilterNearest(mainPrefs.getBoolean("filter_nearest", false))
-        NativeInterface.setSurfaceScale(mainPrefs.getInt("surface_scale", 1))
+        NativeInterface.setSurfaceScale(gameInt("surface_scale", 1))
     }
 
     /**
@@ -2129,16 +2140,20 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
          * uniprocessor guest.  Only set if the user turned the safety valve on
          * in Advanced settings. */
         NativeInterface.setAccurateMemoryOrdering(
-            mainPrefs.getBoolean("accurate_mem_ordering", false))
+            gameBool("accurate_mem_ordering", false))
 
         /* On by default; see SettingsViewModel.setFastOrderedLoads. */
         NativeInterface.setLdapr(
-            mainPrefs.getBoolean("fast_ordered_loads", true))
+            gameBool("fast_ordered_loads", true))
 
         /* On by default; see SettingsViewModel.setFastBoot.  Must be set
          * before startEmulation(), which the surface callback runs after
          * this. */
-        NativeInterface.setFastBoot(mainPrefs.getBoolean("fast_boot", true))
+        NativeInterface.setFastBoot(gameBool("fast_boot", true))
+        Log.i("xemu-android", "game settings $gameSettingsKey: " +
+              GameSettings.SPECS.joinToString { sp ->
+                  sp.prefKey + "=" + (GameSettings.override(this, gameSettingsKey, sp.prefKey)
+                                      ?: "global") })
     }
 
     /** Read overlay settings from main_prefs and apply position + visibility. */

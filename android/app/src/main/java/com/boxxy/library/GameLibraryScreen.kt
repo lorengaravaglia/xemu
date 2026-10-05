@@ -30,6 +30,7 @@ import androidx.navigation.NavController
 import com.boxxy.emulation.EmulationActivity
 import com.boxxy.emulation.EXTRA_QUICK_RESUME
 import com.boxxy.emulation.GameLaunch
+import com.boxxy.emulation.GameSettings
 import com.boxxy.emulation.QuickResume
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableIntStateOf
@@ -187,6 +188,12 @@ fun GameLibraryScreen(
                 artTarget = null
                 launchGame(context, game, settingsViewModel, quickResume = true)
             },
+            onGameSettings = {
+                artTarget = null
+                val key = GameSettings.keyFor(game.titleId, game.uri.toString())
+                navController.navigate("game_settings/$key?name=" +
+                                       android.net.Uri.encode(game.displayName))
+            },
             onChoose = { artPicker.launch(arrayOf("image/*")) },
             onReset = {
                 libraryViewModel.clearCustomArt(game)
@@ -207,6 +214,7 @@ private fun ArtworkDialog(
     game: GameEntry,
     resumeAt: Long?,
     onQuickResume: () -> Unit,
+    onGameSettings: () -> Unit,
     onChoose: () -> Unit,
     onReset: () -> Unit,
     onDismiss: () -> Unit,
@@ -226,6 +234,12 @@ private fun ArtworkDialog(
                              android.text.format.DateUtils.getRelativeTimeSpanString(
                                  resumeAt).toString())
                     }
+                }
+                OutlinedButton(
+                    onClick = onGameSettings,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Game settings")
                 }
                 Text(
                     if (game.titleId == null)

@@ -79,7 +79,25 @@ object XisoReader {
         }
     }
 
-    private fun parse(ch: FileChannel): DiscInfo? {
+    /**
+     * Just the title ID, for per-game settings at launch: the same walk as
+     * [read] without decoding the title image.  Null if [uri] is not an Xbox
+     * disc image.
+     */
+    fun readTitleId(context: Context, uri: Uri): Int? {
+        return try {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                FileInputStream(pfd.fileDescriptor).use { stream ->
+                    parse(stream.channel, withImage = false)?.titleId
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "title ID read failed for $uri: $e")
+            null
+        }
+    }
+
+    private fun parse(ch: FileChannel, withImage: Boolean = true): DiscInfo? {
         val size = ch.size()
         val base = BASE_OFFSETS.firstOrNull { b ->
             b + 33 * SECTOR <= size && readAt(ch, b + 32 * SECTOR, MEDIA_MAGIC.size)
@@ -93,7 +111,7 @@ object XisoReader {
         if (dirSize <= 0 || dirSize > 1 shl 20) return null
 
         val xbe = findEntry(ch, base, dirSector, dirSize, "default.xbe") ?: return null
-        return readXbe(ch, base + xbe.first * SECTOR, xbe.second)
+        return readXbe(ch, base + xbe.first * SECTOR, xbe.second, withImage)
     }
 
     /** Walks the directory tree, returning (startSector, size) for [want]. */
@@ -134,7 +152,8 @@ object XisoReader {
         return null
     }
 
-    private fun readXbe(ch: FileChannel, xbeOffset: Long, xbeSize: Int): DiscInfo? {
+    private fun readXbe(ch: FileChannel, xbeOffset: Long, xbeSize: Int,
+                        withImage: Boolean = true): DiscInfo? {
         val hdr = readAt(ch, xbeOffset, 0x184) ?: return null
         if (hdr.getInt(0) != 0x48454258) return null  // 'XBEH' little-endian
 
@@ -153,7 +172,9 @@ object XisoReader {
         }
         val title = nameBytes.toString(Charsets.UTF_16LE).substringBefore('\u0000').trim()
 
-        val image = readTitleImage(ch, xbeOffset, xbeSize, imageBase, numSections, sectionHdrs)
+        val image = if (withImage)
+            readTitleImage(ch, xbeOffset, xbeSize, imageBase, numSections, sectionHdrs)
+        else null
         if (title.isEmpty() && titleId == 0) return null
         return DiscInfo(title = title, titleId = titleId, titleImage = image)
     }
