@@ -2146,9 +2146,12 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
          * before startEmulation(), which the surface callback runs after
          * this. */
         NativeInterface.setFastBoot(gameBool("fast_boot", true))
+        NativeInterface.setX87Rounding(gameBool("x87_rounding", false))
         Log.i("xemu-android", "game settings $gameSettingsKey: " +
               GameSettings.SPECS.joinToString { sp ->
                   sp.prefKey + "=" + (GameSettings.override(this, gameSettingsKey, sp.prefKey)
+                                      ?: GameSettings.titleDefault(gameSettingsKey, sp.prefKey)
+                                          ?.let { "$it(title)" }
                                       ?: "global") })
     }
 

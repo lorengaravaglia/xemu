@@ -3288,3 +3288,52 @@ request their display's 60 Hz mode through `preferredDisplayModeId`, which
 would hold 60 Hz on firmware or devices where 120 Hz is reachable.
 `DisplayRate.kt`; `debug.xemu.panel60` = 0 (no request) / 1 (60, default)
 / 120 (for measuring). C8's list of heat levers loses A8 on this device.
+
+## BB. C4: THE x87 ROUNDING MODE IS HONOURED, AT NO MEASURABLE COST (2026-10-05)
+
+Section AK found Halo and THPS2x selecting directed x87 rounding millions of
+times a run, all discarded by the native FPU path. Implemented, per game.
+
+**Why FPCR alone was not enough.** The AArch64 backend converted float->int
+with FCVTNS, which always rounds to nearest whatever FPCR says, and those
+conversions (FISTP after FLDCW) are exactly the floor/cast idioms these
+games use.
+
+**Change** (`g_xemu_x87_rc`, tcg.c; set at launch from the per-game setting
+"Accurate x87 rounding", which defaults to on for Halo t4d530004 and THPS2x
+t41560001 via a built-in title default):
+
+- **Conversions** (`tcg-target.c.inc`): FRINTI (round to integral by
+  FPCR.RMode) into the reserved V31, then FCVTZS, which is exact on an
+  integral value. Under the default mode this gives FCVTNS's result.
+- **FPCR sync** (`update_fp_status`, fpu_helper.c): copies RC into
+  FPCR.RMode when the guest writes the control word, remapped (x86
+  0/1/2/3 -> ARM 0/2/1/3) and written only on change. This costs nothing
+  per TB; the `flcr` op stays unused.
+
+**Verification:**
+- **Encodings:** all six new instructions match clang's assembler byte
+  for byte.
+- **Semantics, on the Thor:** a native test of the exact sequence under
+  each x86 mode gave nearest-even (2.5->2, -2.5->-2), floor (2.7->2,
+  -2.3->-3), ceiling and truncate correctly. Under the old path Halo's
+  floor(2.7) was 3.
+- **Engagement:** FPCR syncs are 2,850,362 = 2 x 1,425,181 guest switches
+  to round-down (each set plus each restore); 0 with the setting off.
+
+**Cost:** Halo slot 7, 400 frames, launches ABBA x2:
+
+| | vCPU ms/frame | fps | >50 ms frames |
+|---|---|---|---|
+| on | 31.18, 30.90, 31.00, 30.85 (mean 30.98) | ~30.05 | 0 |
+| off | 30.98, 30.95, 31.00, 30.85 (mean 30.95) | ~30.05 | 0 |
+
+The 0.03 ms difference is inside the spread, against AK's 0.3-0.5%
+estimate: the sync runs only when the mode changes, and the conversion gains
+one instruction.
+
+**Not measured:** visible change. Neither game showed an obvious error
+before, and directed and nearest rounding agree on integral values. The
+remaining hazard, by design: a directed mode set by the guest is also seen
+by C code on the vCPU thread until the guest restores it, which these
+games do within a few instructions.

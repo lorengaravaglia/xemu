@@ -555,12 +555,12 @@ static int g_hard_fpu_no_ld80f;
  * Half the sample does the set-mode / operate / restore dance, thousands of
  * times a frame, and every one of those requests is currently discarded.
  *
- * Doing it properly is a read-modify-write of FPCR (MRS, BFI the remapped
- * RMode into bits 22-23, MSR) -- but note that FPCR is per-thread state shared
- * with every other user of FP in the vCPU thread, so a TB that changes it also
- * changes the rounding mode seen by QEMU's own C code until something sets it
- * back.  x86 has the same hazard with MXCSR.  Worth fixing deliberately with a
- * test, not as a side effect of enabling the native path.
+ * Now handled without this op (OPEN-WORK C4, FINDINGS BB): with
+ * g_xemu_x87_rc set (a per-game setting, on by default for those two titles),
+ * update_fp_status() copies RC into FPCR whenever the guest writes the
+ * control word -- once per change rather than once per TB -- and the AArch64
+ * backend converts float->int with FRINTI+FCVTZS, which honours FPCR, in
+ * place of FCVTNS, which is always nearest.  flcr itself stays skipped.
  */
 static int g_hard_fpu_no_flcr;
 

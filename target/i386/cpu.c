@@ -8673,6 +8673,8 @@ static bool cpuid_has_xsave_feature(CPUX86State *env, const ExtSaveArea *esa)
  *   0 nearest (default)  1 down (-inf)  2 up (+inf)  3 toward zero (truncate)
  */
 unsigned long long xemu_fpuc_rc_writes[4];
+/* C4: FPCR rounding-mode writes made to follow the guest (fpu_helper.c). */
+unsigned long long xemu_fpcr_syncs;
 unsigned long long xemu_fpuc_rc_changes[4];
 uint32_t xemu_fpuc_rc_first_eip[4];
 

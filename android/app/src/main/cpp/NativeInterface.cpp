@@ -176,6 +176,12 @@ Java_com_boxxy_NativeInterface_setFastBoot(JNIEnv *env, jclass clazz,
 }
 
 JNIEXPORT void JNICALL
+Java_com_boxxy_NativeInterface_setX87Rounding(JNIEnv *env, jclass clazz,
+                                              jboolean enabled) {
+    xemu_android_set_x87_rounding((bool)enabled);
+}
+
+JNIEXPORT void JNICALL
 Java_com_boxxy_NativeInterface_setSurfaceScale(JNIEnv *env, jclass clazz, jint scale) {
     xemu_android_set_surface_scale((unsigned int)scale);
 }

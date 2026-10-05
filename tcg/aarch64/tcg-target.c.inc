@@ -706,6 +706,18 @@ typedef enum {
     I3701_FCVTNSD_X = 0x9e600000, /* FCVTNS Xd, Dn */
     I3701_FCVTNSS_W = 0x1e200000, /* FCVTNS Wd, Sn */
     I3701_FCVTNSS_X = 0x9e200000, /* FCVTNS Xd, Sn */
+    /*
+     * With g_xemu_x87_rc the guest's rounding mode lives in FPCR, so the
+     * conversion must use it: FRINTI rounds to integral by FPCR.RMode, and
+     * FCVTZS of an already-integral value is exact.  Under the default mode
+     * the pair gives FCVTNS's result.
+     */
+    I3701_FRINTID   = 0x1e67c000, /* FRINTI Dd, Dn */
+    I3701_FRINTIS   = 0x1e27c000, /* FRINTI Sd, Sn */
+    I3701_FCVTZSD_W = 0x1e780000, /* FCVTZS Wd, Dn */
+    I3701_FCVTZSD_X = 0x9e780000, /* FCVTZS Xd, Dn */
+    I3701_FCVTZSS_W = 0x1e380000, /* FCVTZS Wd, Sn */
+    I3701_FCVTZSS_X = 0x9e380000, /* FCVTZS Xd, Sn */
     /* FMOV between FP and general registers: bit-for-bit reinterpret */
     I3701_FMOV_DX   = 0x9e670000, /* FMOV Dd, Xn */
     I3701_FMOV_XD   = 0x9e660000, /* FMOV Xd, Dn */
@@ -2300,6 +2312,7 @@ extern int g_ldst_pad_bytes;
 extern int g_reserve_x15;
 extern int g_ldst_stub;
 extern int g_ldapr;
+extern int g_xemu_x87_rc;
 extern int g_mb_mode;
 
 static void xemu_ldst_pad(TCGContext *s)
@@ -4014,18 +4027,39 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         tcg_out_insn(s, 3701, SCVTFD_X, a0, a1);
         break;
 
-    /* Floating point to signed integer. */
+    /* Floating point to signed integer.  See I3701_FRINTID for the
+     * x87-rounding form; TCG_VEC_TMP0 is reserved, so the source survives. */
     case INDEX_op_cvt32f_i32:
-        tcg_out_insn(s, 3701, FCVTNSS_W, a0, a1);
+        if (g_xemu_x87_rc) {
+            tcg_out_insn(s, 3701, FRINTIS, TCG_VEC_TMP0, a1);
+            tcg_out_insn(s, 3701, FCVTZSS_W, a0, TCG_VEC_TMP0);
+        } else {
+            tcg_out_insn(s, 3701, FCVTNSS_W, a0, a1);
+        }
         break;
     case INDEX_op_cvt32f_i64:
-        tcg_out_insn(s, 3701, FCVTNSS_X, a0, a1);
+        if (g_xemu_x87_rc) {
+            tcg_out_insn(s, 3701, FRINTIS, TCG_VEC_TMP0, a1);
+            tcg_out_insn(s, 3701, FCVTZSS_X, a0, TCG_VEC_TMP0);
+        } else {
+            tcg_out_insn(s, 3701, FCVTNSS_X, a0, a1);
+        }
         break;
     case INDEX_op_cvt64f_i32:
-        tcg_out_insn(s, 3701, FCVTNSD_W, a0, a1);
+        if (g_xemu_x87_rc) {
+            tcg_out_insn(s, 3701, FRINTID, TCG_VEC_TMP0, a1);
+            tcg_out_insn(s, 3701, FCVTZSD_W, a0, TCG_VEC_TMP0);
+        } else {
+            tcg_out_insn(s, 3701, FCVTNSD_W, a0, a1);
+        }
         break;
     case INDEX_op_cvt64f_i64:
-        tcg_out_insn(s, 3701, FCVTNSD_X, a0, a1);
+        if (g_xemu_x87_rc) {
+            tcg_out_insn(s, 3701, FRINTID, TCG_VEC_TMP0, a1);
+            tcg_out_insn(s, 3701, FCVTZSD_X, a0, TCG_VEC_TMP0);
+        } else {
+            tcg_out_insn(s, 3701, FCVTNSD_X, a0, a1);
+        }
         break;
 
     case INDEX_op_ld80f_f32:

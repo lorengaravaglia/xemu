@@ -160,6 +160,14 @@ int g_ldst_stub;
  * real trade is one ADD for one DMB.
  */
 int g_ldapr;
+/*
+ * Honour the guest's x87 rounding mode (OPEN-WORK C4, FINDINGS BB).  When
+ * set, the AArch64 backend converts float->int with FRINTI+FCVTZS (rounds by
+ * FPCR) instead of FCVTNS (always nearest), and update_fp_status() copies the
+ * x87 RC field into FPCR.  Set once, before emulation starts, from the
+ * per-game setting.
+ */
+int g_xemu_x87_rc;
 int g_mb_mode;        /* debug.xemu.mb_mode, measurement only */
 int g_keep_tso_stores; /* debug.xemu.tso_stores=1 restores them */
 unsigned long long xemu_op_count[XEMU_TCG_NB_OPC];

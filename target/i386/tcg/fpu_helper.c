@@ -1172,6 +1172,35 @@ void update_fp_status(CPUX86State *env)
         break;
     }
     set_floatx80_rounding_precision(rnd_prec, &env->fp_status);
+
+#if defined(XBOX) && defined(__aarch64__)
+    {
+        /*
+         * C4: the native x87 path computes in the host FPU, so the guest's
+         * rounding mode must be in FPCR.  x86 RC and ARM RMode encode the two
+         * directed modes the other way round: x86 01 = toward -inf, 10 =
+         * toward +inf; ARM 01 = toward +inf, 10 = toward -inf.  Written only
+         * when it changes (MSR FPCR is not free).
+         *
+         * FPCR is per-thread and this runs on the vCPU thread for guest
+         * writes, so a directed mode is also seen by QEMU's own C code there
+         * until the guest restores it -- which Halo and THPS2x do within a
+         * few instructions (set, FISTP, restore).
+         */
+        extern int g_xemu_x87_rc;
+        extern unsigned long long xemu_fpcr_syncs;
+        static const uint64_t x86_to_arm[4] = { 0, 2, 1, 3 };
+        if (g_xemu_x87_rc) {
+            uint64_t fpcr, want;
+            __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+            want = (fpcr & ~(3ULL << 22)) | (x86_to_arm[rnd_mode & 3] << 22);
+            if (want != fpcr) {
+                __asm__ volatile("msr fpcr, %0" : : "r"(want));
+                xemu_fpcr_syncs++;
+            }
+        }
+    }
+#endif
 }
 #endif
 

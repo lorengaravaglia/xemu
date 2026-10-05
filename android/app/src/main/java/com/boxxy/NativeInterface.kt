@@ -114,6 +114,8 @@ object NativeInterface {
 
     /** Skip the Xbox kernel's startup busy-waits; must precede startEmulation. */
     external fun setFastBoot(enabled: Boolean)
+    /** Honour the guest's x87 rounding mode (C4). Before startEmulation(). */
+    external fun setX87Rounding(enabled: Boolean)
 
     /** True once the emulated controller's USB devices exist -- a save state
      *  cannot be loaded before then. */

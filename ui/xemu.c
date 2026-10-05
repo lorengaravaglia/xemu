@@ -2522,6 +2522,13 @@ static void bench_tick(void)
              * omission is invisible and flcr need not be implemented; if it is
              * not zero, results are wrong wherever it fired.
              */
+            {
+                extern unsigned long long xemu_fpcr_syncs;
+                extern int g_xemu_x87_rc;
+                ALOGI("bench: X87 RC honoured=%d | FPCR syncs %llu (absolute; "
+                      "follows every mode change when honoured, 0 when not)",
+                      g_xemu_x87_rc, xemu_fpcr_syncs);
+            }
             ALOGI("bench: X87 RC writes n=%llu d=%llu u=%llu t=%llu | "
                   "changes n=%llu d=%llu u=%llu t=%llu | directed=%llu",
                   xemu_fpuc_rc_writes[0], xemu_fpuc_rc_writes[1],

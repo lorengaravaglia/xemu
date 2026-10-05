@@ -29,6 +29,9 @@ object GameSettings {
         val choices: List<Pair<String, String>>,
         /** The global setting, read the same way the settings screens do. */
         val global: (android.content.SharedPreferences) -> String,
+        /** Built-in per-title defaults, by game key, that win over the
+         *  global setting (but not over the user's own override). */
+        val titleDefaults: Map<String, String> = emptyMap(),
     )
 
     val SPECS = listOf(
@@ -48,7 +51,17 @@ object GameSettings {
         Spec("fast_boot", "Fast boot", "Performance",
              listOf("true" to "On", "false" to "Off"),
              { it.getBoolean("fast_boot", true).toString() }),
+        /* C4: games that switch the x87 rounding mode (FINDINGS AK) --
+         * Halo and Tony Hawk's Pro Skater 2x, millions of times a run. */
+        Spec("x87_rounding", "Accurate x87 rounding", "Compatibility",
+             listOf("false" to "Off", "true" to "On"),
+             { it.getBoolean("x87_rounding", false).toString() },
+             titleDefaults = mapOf("t4d530004" to "true", "t41560001" to "true")),
     )
+
+    /** The built-in default for [gameKey], if this title has one. */
+    fun titleDefault(gameKey: String, prefKey: String): String? =
+        SPECS.firstOrNull { it.prefKey == prefKey }?.titleDefaults?.get(gameKey)
 
     /** The key for a game whose title ID is known (the library has it). */
     fun keyFor(titleId: Int?, isoUri: String): String =
@@ -79,10 +92,12 @@ object GameSettings {
 
     fun effectiveBoolean(context: Context, gameKey: String, prefKey: String, default: Boolean): Boolean =
         override(context, gameKey, prefKey)?.toBooleanStrictOrNull()
+            ?: titleDefault(gameKey, prefKey)?.toBooleanStrictOrNull()
             ?: main(context).getBoolean(prefKey, default)
 
     fun effectiveInt(context: Context, gameKey: String, prefKey: String, default: Int): Int =
         override(context, gameKey, prefKey)?.toIntOrNull()
+            ?: titleDefault(gameKey, prefKey)?.toIntOrNull()
             ?: main(context).getInt(prefKey, default)
 
     fun main(context: Context) =

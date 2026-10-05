@@ -694,6 +694,15 @@ void xemu_android_set_fast_boot(bool enabled) {
     LOGI("fast boot: %s", enabled ? "on (kernel delays skipped)" : "off");
 }
 
+/* C4: honour the guest's x87 rounding mode.  Must be set before emulation
+ * starts -- it decides how float->int conversions are translated. */
+void xemu_android_set_x87_rounding(bool enabled) {
+    extern int g_xemu_x87_rc;
+    g_xemu_x87_rc = enabled;
+    LOGI("x87 rounding: %s", enabled ? "honoured (FPCR follows the guest)"
+                                     : "round-to-nearest only");
+}
+
 unsigned int xemu_android_get_surface_scale(void) {
     return g_surface_scale;
 }

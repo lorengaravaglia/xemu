@@ -47,9 +47,13 @@ fun GameSettingsScreen(navController: NavController, gameKey: String, gameName: 
                         specs.forEach { spec ->
                             key(spec.prefKey, version) {
                                 val current = GameSettings.override(context, gameKey, spec.prefKey)
-                                val globalLabel = spec.choices
-                                    .firstOrNull { it.first == spec.global(global) }?.second ?: "?"
-                                val defaultLabel = "Default ($globalLabel)"
+                                val titleDefault = spec.titleDefaults[gameKey]
+                                val defaultValue = titleDefault ?: spec.global(global)
+                                val valueLabel = spec.choices
+                                    .firstOrNull { it.first == defaultValue }?.second ?: "?"
+                                val defaultLabel = if (titleDefault != null)
+                                    "Default ($valueLabel \u2014 recommended for this game)"
+                                else "Default ($valueLabel)"
                                 val options = listOf(null to defaultLabel) + spec.choices
                                 Text(spec.label, style = MaterialTheme.typography.bodyMedium)
                                 SettingsDropdown(
