@@ -274,9 +274,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
      * unmatched title does not bury the result for the rest.
      */
     private suspend fun fetchMissingArt(ctx: Context, steamKey: String) {
-        val missing = _games.value.filter { it.coverUri == null }
+        /*
+         * No cover, or only the disc's own 128x128 title image -- which is
+         * exactly what the network lookup is meant to upgrade.  Counting disc
+         * art as "has artwork" meant that with a key set, nothing was ever
+         * looked up: every disc already had its title image by the time this
+         * ran.  Art the user chose, and images beside the disc file, are kept.
+         */
+        val missing = _games.value.filter { it.coverUri == null || it.coverIsDiscArt }
         if (missing.isEmpty()) {
-            _artStatus.value = ArtStatus.Ok("Every game already has artwork.")
+            _artStatus.value = ArtStatus.Ok(
+                "Every game already has artwork you chose or a cover image next to it.")
             return
         }
 
@@ -287,7 +295,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             // like "Halo - Combat Evolved (USA) (Rev 2)" matches no real
             // catalogue entry.
             val query = game.discTitle ?: game.displayName
-            when (val r = ArtworkRepository.fetchArt(ctx, query, steamKey)) {
+            var r = ArtworkRepository.fetchArt(ctx, query, steamKey)
+            /* Disc titles are sometimes all-caps or abbreviated; the file
+             * name (usually the catalogue name, e.g. a No-Intro set) may
+             * match where they do not. */
+            if (r is ArtworkRepository.ArtOutcome.NoMatch &&
+                !game.displayName.equals(query, ignoreCase = true)) {
+                r = ArtworkRepository.fetchArt(ctx, game.displayName, steamKey)
+            }
+            when (r) {
                 is ArtworkRepository.ArtOutcome.Found -> {
                     found++
                     _games.value = _games.value.map { g ->

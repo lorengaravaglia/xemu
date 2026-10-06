@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -23,6 +24,7 @@ import java.net.URL
  */
 object ArtworkRepository {
 
+    private const val TAG = "xemu-art"
     private const val STEAMGRIDDB_BASE = "https://www.steamgriddb.com/api/v2"
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 20_000
@@ -201,24 +203,38 @@ object ArtworkRepository {
             ?.optJSONObject(0)
             ?.optInt("id", -1)
             ?.takeIf { it > 0 }
-            ?: return Lookup.NoMatch
+            ?: run {
+                Log.i(TAG, "art: \"$gameName\" -> no search result")
+                return Lookup.NoMatch
+            }
 
-        // Step 2: fetch portrait grid art (600×900 preferred)
-        val gridsJson = when (val r = httpGet(
-            "$STEAMGRIDDB_BASE/grids/game/$gameId?dimensions=600x900&mime_types=jpeg,png",
-            apiKey,
-        )) {
-            is Response.Ok -> r.body
-            Response.Rejected -> return Lookup.Rejected
-            Response.Failed -> return Lookup.Unreachable
+        /*
+         * Step 2: a portrait cover.  The two standard portrait sizes first
+         * (600x900, and 660x930, which many covers use); failing both, any
+         * grid taller than it is wide.  A game that is found but only has
+         * landscape grids is reported as no match rather than shown cropped.
+         */
+        for (query in listOf("?dimensions=600x900,660x930&mime_types=jpeg,png",
+                             "?mime_types=jpeg,png")) {
+            val gridsJson = when (val r = httpGet(
+                "$STEAMGRIDDB_BASE/grids/game/$gameId$query", apiKey)) {
+                is Response.Ok -> r.body
+                Response.Rejected -> return Lookup.Rejected
+                Response.Failed -> return Lookup.Unreachable
+            }
+            val grids = JSONObject(gridsJson).optJSONArray("data")
+            val n = grids?.length() ?: 0
+            for (i in 0 until n) {
+                val g = grids!!.optJSONObject(i) ?: continue
+                val url = g.optString("url").takeIf { it.isNotEmpty() } ?: continue
+                if (g.optInt("height", 0) > g.optInt("width", 0)) {
+                    Log.i(TAG, "art: \"$gameName\" -> game $gameId, ${g.optInt("width")}x${g.optInt("height")}")
+                    return Lookup.Url(url)
+                }
+            }
+            Log.i(TAG, "art: \"$gameName\" -> game $gameId, no portrait grid in $n ($query)")
         }
-
-        val url = JSONObject(gridsJson)
-            .optJSONArray("data")
-            ?.optJSONObject(0)
-            ?.optString("url")
-            ?.takeIf { it.isNotEmpty() }
-        return if (url != null) Lookup.Url(url) else Lookup.NoMatch
+        return Lookup.NoMatch
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────
