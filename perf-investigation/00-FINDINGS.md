@@ -3388,3 +3388,49 @@ geometry.
 
 Instrumentation kept: `xbox gpio:` lines with guest PC and the `aspect Auto:`
 decision.
+
+## BD. VBLANK LOCK + PRESENT ON FLIP: ZERO JUDDER (2026-10-06)
+
+Section AZ left one slip per ~4 s. Its cause, measured: **the Thor's
+"60 Hz" panel refreshes at 59.753 Hz**. SurfaceFlinger's actual present
+times give a median 16.7356 ms, and a Choreographer-tracked vsync period
+agrees. The emulated vblank free-ran at exactly 60.000 Hz, and two clocks
+0.247 Hz apart slip by one refresh every 4.05 s, which is the AZ residue.
+
+**A second finding on the way: Boxxy showed every frame one frame late.**
+Since AZ it presented at FLIP_INCREMENT_WRITE, when the NV2A finishes a
+frame. But it displays the surface at PCRTC_START, and a game flipping in
+its vblank interrupt changes that only afterwards, ~13 ms later in Halo.
+Each present therefore showed the previous frame, at the GPU's jittery
+completion time.
+
+**Changes:**
+- **Present on flip** (`pcrtc.c`, `ui/xemu.c`): a PCRTC_START change bumps
+  `g_nv2a_flips` and wakes the render thread. While flips are happening, a
+  flip is what makes a frame new; frame_time is the fallback for code that
+  never flips. A/B: `debug.xemu.present_on_flip`.
+- **No duplicate presents** (`ui/xemu.c`): a wake with nothing new skips
+  the blit and swap. Waking on both completion and flip had doubled the
+  presents, to every vsync.
+- **Vblank lock** (`xemu_android.c` Choreographer thread; `ui/xemu.c`
+  vblank thread): each emulated vblank lands on the panel's vsync grid plus
+  a phase (`debug.xemu.vblank_phase_us`, default 1000). The thread sleeps
+  with clock_nanosleep(ABSTIME) on CLOCK_MONOTONIC, waking 13-14 us late on
+  average against g_usleep's milliseconds. A/B: `debug.xemu.vblank_lock`.
+  It locks only when the panel is ~60 Hz; a 120 Hz panel would need every
+  other vsync -- not done.
+
+**Result**, Halo slot 7, SurfaceFlinger present intervals, ~4.4 s windows,
+ABCCBA x2 in one process:
+
+| config | intervals | off-cadence |
+|---|---|---|
+| A: present at completion, free-running vblank (AZ) | 503 | 2.98% |
+| B: present on flip, free-running vblank | 501 | 2.40% |
+| **C: present on flip + vblank lock** | 502 | **0 (all exactly 2 vsyncs)** |
+
+**Trade-off:** the guest now runs at the panel's 59.753 Hz, 0.3% below a
+real NTSC Xbox's 59.94 Hz; fps reads ~29.92. vCPU ms/frame ABBA:
+on 31.17, off 30.96. The gap comes from the first (cooler) off pair; later
+pairs are equal, and a 0.4% longer frame adds ~0.14 ms of Halo's
+clock-spin time anyway.

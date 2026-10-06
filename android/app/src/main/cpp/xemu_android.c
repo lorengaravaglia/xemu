@@ -22,6 +22,9 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <vulkan/vulkan.h>
+#include <android/choreographer.h>
+#include <android/looper.h>
+#include <time.h>
 
 #define LOG_TAG "xemu-android"
 #define LOGI(...) do { \
@@ -534,6 +537,56 @@ static void *xemu_android_thread(void *opaque) {
     return NULL;
 }
 
+/*
+ * The panel's real vsync timeline, for locking the emulated vblank to it
+ * (ui/xemu.c vblank_timer_thread).  A Choreographer on its own looper thread
+ * reports each vsync of the default display (the Thor's top screen); its
+ * frame time is the vsync timestamp on CLOCK_MONOTONIC.  The period is a
+ * smoothed delta, ignoring gaps where callbacks were skipped.
+ */
+static volatile int64_t s_vsync_last_ns;
+static volatile int64_t s_vsync_period_ns;
+
+static void vsync_cb(int64_t frame_time_ns, void *data)
+{
+    int64_t prev = s_vsync_last_ns;
+    if (prev) {
+        int64_t d = frame_time_ns - prev;
+        int64_t p = s_vsync_period_ns ? s_vsync_period_ns : d;
+        /* One period (not a skipped callback): fold into a slow average. */
+        if (d > p * 3 / 4 && d < p * 5 / 4) {
+            s_vsync_period_ns = p + (d - p) / 16;
+        } else if (!s_vsync_period_ns && d > 4000000 && d < 50000000) {
+            s_vsync_period_ns = d;
+        }
+    }
+    s_vsync_last_ns = frame_time_ns;
+    AChoreographer_postFrameCallback64(AChoreographer_getInstance(), vsync_cb, NULL);
+}
+
+static void *vsync_thread(void *arg)
+{
+    (void)arg;
+    ALooper_prepare(0);
+    AChoreographer_postFrameCallback64(AChoreographer_getInstance(), vsync_cb, NULL);
+    for (;;) {
+        ALooper_pollOnce(-1, NULL, NULL, NULL);
+    }
+    return NULL;
+}
+
+/* The latest panel vsync and the period, or false until both are known. */
+bool xemu_android_vsync_timeline(int64_t *last_ns, int64_t *period_ns)
+{
+    int64_t l = s_vsync_last_ns, p = s_vsync_period_ns;
+    if (!l || !p) {
+        return false;
+    }
+    *last_ns = l;
+    *period_ns = p;
+    return true;
+}
+
 void xemu_android_start(
     const char *configPath,
     const char *mcpxPath,
@@ -568,6 +621,12 @@ void xemu_android_start(
     pthread_attr_setstacksize(&attr, 8 * 1024 * 1024); // 8MB
     pthread_create(&xemu_thread, &attr, xemu_android_thread, NULL);
     pthread_attr_destroy(&attr);
+
+    {
+        pthread_t vt;
+        pthread_create(&vt, NULL, vsync_thread, NULL);
+        pthread_detach(vt);
+    }
 }
 
 void xemu_android_stop(void) {

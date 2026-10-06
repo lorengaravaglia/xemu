@@ -143,6 +143,21 @@ void xemu_android_guest_frame_ready(void)
     }
 }
 
+/* True while the game is flipping (see present-on-flip in gl_render_frame). */
+static bool s_flipping;
+
+static bool present_on_flip(void)
+{
+    static int on = 1;
+    static unsigned calls;
+    if (calls++ % 60 == 0) {
+        char v[PROP_VALUE_MAX];
+        on = !(__system_property_get("debug.xemu.present_on_flip", v) > 0 &&
+               v[0] == '0');
+    }
+    return on;
+}
+
 static bool present_per_frame(void)
 {
     static int on = 1;
@@ -1398,32 +1413,121 @@ static void vblank_timer_callback(void *opaque)
     timer_mod_ns(vblank_timer, now + vblank_interval_ns);
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+static int64_t mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/*
+ * Vblank lock.  The emulated vblank used to free-run on its own 16.67 ms grid
+ * (and g_usleep, which wakes late by a varying amount), independent of the
+ * panel's real vsync.  The guest flips on emulated vblanks and, with
+ * present-on-flip, the frame is presented right after; if that instant drifts
+ * across the panel's latch point, a frame is shown for one vsync and its
+ * neighbour for three.  Locked, each emulated vblank lands a fixed phase after
+ * a real vsync (xemu_android_vsync_timeline(), from Choreographer), so every
+ * flip is presented in time for the next real refresh.  debug.xemu.vblank_lock
+ * =0 restores the free-running grid; debug.xemu.vblank_phase_us sets the phase.
+ */
+static bool vblank_lock_params(int64_t *phase_ns)
+{
+    static int on = 1, phase_us = 1000;
+    static unsigned calls;
+    if (calls++ % 60 == 0) {
+        char v[PROP_VALUE_MAX];
+        on = !(__system_property_get("debug.xemu.vblank_lock", v) > 0 && v[0] == '0');
+        phase_us = __system_property_get("debug.xemu.vblank_phase_us", v) > 0
+                   ? atoi(v) : 1000;
+    }
+    *phase_ns = (int64_t)phase_us * 1000;
+    return on;
+}
+
+/* The next emulated vblank after [prev]: on the panel's vsync grid plus the
+ * phase when locked, else [prev] + the nominal interval. */
+static int64_t next_vblank_deadline(int64_t prev, bool *locked)
+{
+    int64_t phase, vl, vp;
+    *locked = false;
+    if (vblank_lock_params(&phase) && vblank_interval_ns == 16666666LL &&
+        xemu_android_vsync_timeline(&vl, &vp) &&
+        llabs(vp - (int64_t)vblank_interval_ns) < 1000000) {
+        int64_t base = vl + phase;
+        int64_t target = prev + vp;
+        int64_t k = (target - base + vp / 2) / vp;       /* nearest grid line */
+        if (target - base + vp / 2 < 0) {
+            k = -((base - target + vp / 2) / vp);
+        }
+        int64_t next = base + k * vp;
+        if (next <= prev + vp / 2) {                   /* never twice per period */
+            next += vp;
+        }
+        *locked = true;
+        return next;
+    }
+    return prev + vblank_interval_ns;
+}
+#endif
+
 static void *vblank_timer_thread(void *opaque)
 {
     struct xemu_console *scon = (struct xemu_console *)opaque;
+#if !defined(__ANDROID__) && !defined(ANDROID)
     int64_t next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-#if defined(__ANDROID__) || defined(ANDROID)
+#else
+    int64_t next_vblank = mono_ns();
     int frames = 0;
+    int64_t err_sum = 0, err_max = 0;
+    int err_n = 0, locked_n = 0;
     ALOGI("vblank_timer_thread starting (thread %ld)", (long)syscall(SYS_gettid));
 #endif
 
     while (!qatomic_read(&qemu_exiting)) {
+#if !defined(__ANDROID__) && !defined(ANDROID)
         // Schedule next vblank at fixed interval (absolute deadline)
         next_vblank += vblank_interval_ns;
 
         // Wait until deadline
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (now < next_vblank) {
-#if !defined(__ANDROID__) && !defined(ANDROID)
             SDL_DelayPrecise(next_vblank - now);
-#else
-            g_usleep((next_vblank - now) / 1000);
-#endif
         } else if (now > next_vblank + vblank_interval_ns) {
             // We've fallen behind by more than one frame, reset to avoid
             // rapid-fire catch-up
             next_vblank = now;
         }
+#else
+        bool locked;
+        next_vblank = next_vblank_deadline(next_vblank, &locked);
+        int64_t now = mono_ns();
+        if (now < next_vblank) {
+            struct timespec ts = {
+                .tv_sec = next_vblank / 1000000000LL,
+                .tv_nsec = next_vblank % 1000000000LL,
+            };
+            while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {
+            }
+        } else if (now > next_vblank + (int64_t)vblank_interval_ns) {
+            /* Fallen behind by more than a frame: resume from now rather
+             * than firing a burst of catch-up vblanks. */
+            next_vblank = now;
+        }
+        {
+            /* How late the wake was against its target, for the 5 s log. */
+            int64_t err = mono_ns() - next_vblank;
+            if (err >= 0) {
+                err_sum += err;
+                err_n++;
+                if (err > err_max) {
+                    err_max = err;
+                }
+            }
+            locked_n += locked;
+        }
+#endif
 
         if (!qatomic_read(&qemu_exiting)) {
 #if defined(__ANDROID__) || defined(ANDROID)
@@ -1433,10 +1537,21 @@ static void *vblank_timer_thread(void *opaque)
              * cadence without a catch-up burst. */
             if (!runstate_is_running() && !xemu_android_surface_valid()) {
                 xemu_android_wait_for_surface();
-                next_vblank = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                next_vblank = mono_ns();
                 continue;
             }
             frames++;
+            if (frames % 300 == 0) {
+                int64_t vl, vp;
+                bool have = xemu_android_vsync_timeline(&vl, &vp);
+                ALOGI("vblank: %s, %d/300 locked | panel period %.4f ms | "
+                      "wake late avg %.0f us, max %.0f us",
+                      locked_n ? "locked to panel vsync" : "free-running",
+                      locked_n, have ? vp / 1e6 : 0.0,
+                      err_n ? err_sum / 1e3 / err_n : 0.0, err_max / 1e3);
+                err_sum = err_max = 0;
+                err_n = locked_n = 0;
+            }
 #endif
             xemu_main_loop_lock();
             process_vblank(scon);
@@ -3036,9 +3151,42 @@ static void gl_render_frame(struct xemu_console *scon)
      * cached texture otherwise — this avoids 60 redundant pfifo.lock +
      * sync_complete round-trips per second when TCG is running at <1 fps. */
     int cur_frame_time = nv2a_get_frame_time();
-    if (s_last_tex != 0 && cur_frame_time == s_last_synced_frame_time) {
+    /*
+     * Present on flip.  A game that flips in its vblank interrupt changes
+     * the front buffer (PCRTC_START) after the frame is complete, so a
+     * completed frame_time alone would show the previous frame, one frame
+     * late and at the GPU's jittery completion time.  While flips are
+     * happening, a new flip is what makes a frame new; code that never
+     * flips (boot, some menus) falls back to frame_time.
+     * debug.xemu.present_on_flip=0 restores frame_time only, for A/B.
+     */
+    extern volatile unsigned int g_nv2a_flips;
+    static unsigned int s_last_synced_flips, s_flips_seen;
+    static int64_t s_flip_seen_ms;
+    unsigned int cur_flips = g_nv2a_flips;
+    {
+        int64_t nowms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        if (cur_flips != s_flips_seen) {
+            s_flips_seen = cur_flips;
+            s_flip_seen_ms = nowms;
+        }
+        s_flipping = present_on_flip() && nowms - s_flip_seen_ms < 500;
+    }
+    bool new_frame = s_flipping ? cur_flips != s_last_synced_flips
+                                : cur_frame_time != s_last_synced_frame_time;
+    if (s_last_tex != 0 && !new_frame) {
         tex = s_last_tex;
         s_fp.reused++;
+        if (present_per_frame()) {
+            /*
+             * Woken, but nothing new to show (e.g. the completion wake while
+             * the game flips on vblank).  Presenting the same image again
+             * costs a blit, a swap and a composition, and puts a duplicate
+             * buffer in the compositor's queue that can delay the real next
+             * frame; the panel keeps showing the last one by itself.
+             */
+            goto skip_render;
+        }
     } else {
         {
             int64_t sync_t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -3052,6 +3200,7 @@ static void gl_render_frame(struct xemu_console *scon)
         s_last_tex = tex;
         if (tex != 0) {
             s_last_synced_frame_time = cur_frame_time;
+            s_last_synced_flips = cur_flips;
             g_rendered_frame_count++;
             s_rl_new_frame = cur_frame_time;
             s_fpw.new_frames++;

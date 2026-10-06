@@ -69,6 +69,9 @@ uint64_t pcrtc_read(void *opaque, hwaddr addr, unsigned int size)
     return r;
 }
 
+/* Flips seen (front-buffer address changes); read by the render thread. */
+volatile unsigned int g_nv2a_flips;
+
 void pcrtc_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
@@ -96,6 +99,22 @@ void pcrtc_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         val &= 0x07FFFFFF;
         // assert(val < memory_region_size(d->vram));
         ALOGI_PCRTC("pcrtc: NV_PCRTC_START 0x%x -> 0x%x", (unsigned)d->pcrtc.start, (unsigned)val);
+#if defined(__ANDROID__)
+        if (val != d->pcrtc.start) {
+            /*
+             * A flip: the frame the game wants on screen changed.  This is
+             * the moment a real Xbox shows it (games flip in their vblank
+             * interrupt), so the render thread presents on it rather than on
+             * the earlier FLIP_INCREMENT_WRITE, when the front buffer still
+             * holds the previous frame.  See ui/xemu.c, present-on-flip.
+             */
+            extern volatile unsigned int g_nv2a_flips;
+            extern void xemu_android_guest_frame_ready(void);
+            d->pcrtc.start = val;
+            g_nv2a_flips++;
+            xemu_android_guest_frame_ready();
+        }
+#endif
         d->pcrtc.start = val;
 
         NV2A_DPRINTF("PCRTC_START - %x %x %x %x\n",
