@@ -40,6 +40,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val _rows = MutableStateFlow(prefs.getInt("grid_rows", 1))
     val rows: StateFlow<Int> = _rows
 
+    /** Background art (heroes/logos) behind the library; on by default. */
+    private val _backgroundArt = MutableStateFlow(prefs.getBoolean("background_art", true))
+    val backgroundArt: StateFlow<Boolean> = _backgroundArt
+
+    fun setBackgroundArt(on: Boolean) {
+        _backgroundArt.value = on
+        prefs.edit().putBoolean("background_art", on).apply()
+    }
+
+    /** View mode: 0 = Showcase (background art with one short row of cards),
+     *  1 = one row, 2 = two rows. */
     fun setRows(n: Int) {
         _rows.value = n
         prefs.edit().putInt("grid_rows", n).apply()
@@ -107,11 +118,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             // Read titles and art out of the discs themselves. This needs no
             // network and no key, so it is what fills the grid in practice.
             resolveDiscInfo(ctx)
+            applyCachedExtras(ctx)
 
             // Only then try the network, which can upgrade a 128x128 title
             // image to a proper cover if the user has supplied a key.
             if (steamGridDbKey.isNotEmpty()) {
                 fetchMissingArt(ctx, steamGridDbKey)
+                fetchExtras(ctx, steamGridDbKey)
             }
         }
     }
@@ -244,6 +257,101 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ── Background art (heroes and logos) ────────────────────────────────────
+
+    /** The game the library is showing the background of: the focused card,
+     *  or the one nearest the centre.  Shared with the dual-screen showcase. */
+    private val _selectedUri = MutableStateFlow<Uri?>(null)
+    val selectedUri: StateFlow<Uri?> = _selectedUri
+
+    fun select(uri: Uri?) {
+        if (uri != null && uri != _selectedUri.value) _selectedUri.value = uri
+    }
+
+    private val extrasLock = kotlinx.coroutines.sync.Mutex()
+
+    /** Fetch missing heroes/logos in the background (the library calls this
+     *  when a key is set).  Misses are remembered, so this is cheap to repeat. */
+    fun fetchBackgrounds(key: String) {
+        if (key.isEmpty() || _games.value.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!extrasLock.tryLock()) return@launch
+            try {
+                applyCachedExtras(getApplication())
+                fetchExtras(getApplication(), key)
+            } finally {
+                extrasLock.unlock()
+            }
+        }
+    }
+
+    /**
+     * Names to search SteamGridDB with, most specific first: the file name
+     * with No-Intro tags like "(USA) (Rev 2)" removed, then the disc title.
+     * Disc titles are often short ("Halo", which matched Halo: Spartan
+     * Assault) or abbreviated ("MGS2 SUBSTANCE"), so they come second.
+     * Covers, heroes and logos use the same order, so a game's images come
+     * from the same match.
+     */
+    private fun extraNames(g: GameEntry) = searchNames(g)
+
+    private fun searchNames(g: GameEntry): List<String> {
+        val cleaned = g.displayName.replace(Regex("\\s*[(\\[][^)\\]]*[)\\]]"), "").trim()
+        return listOfNotNull(cleaned.ifEmpty { null }, g.displayName, g.discTitle)
+            .distinctBy { it.lowercase() }
+    }
+
+    /** Heroes and logos already downloaded, under either name. */
+    private fun applyCachedExtras(ctx: Context) {
+        _games.value = _games.value.map { g ->
+            val names = extraNames(g)
+            val hero = names.map { ArtworkRepository.heroFile(ctx, it) }.firstOrNull { it.exists() }
+            val logo = names.map { ArtworkRepository.logoFile(ctx, it) }.firstOrNull { it.exists() }
+            g.copy(heroUri = hero?.let { Uri.fromFile(it) }, logoUri = logo?.let { Uri.fromFile(it) })
+        }
+    }
+
+    /**
+     * Look up a hero and a logo for every game still without them, disc title
+     * first, then file name.  A miss is remembered on disk (Re-fetch forgets
+     * it), so launches do not repeat searches that cannot succeed.
+     */
+    private suspend fun fetchExtras(ctx: Context, key: String) {
+        var heroes = 0
+        for (game in _games.value) {
+            for (extra in ArtworkRepository.Extra.values()) {
+                val current = _games.value.firstOrNull { it.uri == game.uri } ?: continue
+                if ((extra == ArtworkRepository.Extra.HERO && current.heroUri != null) ||
+                    (extra == ArtworkRepository.Extra.LOGO && current.logoUri != null)) continue
+                for (name in extraNames(current)) {
+                    val dest = if (extra == ArtworkRepository.Extra.HERO)
+                        ArtworkRepository.heroFile(ctx, name) else ArtworkRepository.logoFile(ctx, name)
+                    if (ArtworkRepository.knownMissing(dest)) continue
+                    when (val r = ArtworkRepository.fetchExtra(name, extra, dest, key)) {
+                        is ArtworkRepository.ArtOutcome.Found -> {
+                            val u = Uri.fromFile(r.file)
+                            _games.value = _games.value.map { g ->
+                                if (g.uri != game.uri) g
+                                else if (extra == ArtworkRepository.Extra.HERO) g.copy(heroUri = u)
+                                else g.copy(logoUri = u)
+                            }
+                            if (extra == ArtworkRepository.Extra.HERO) heroes++
+                            break
+                        }
+                        is ArtworkRepository.ArtOutcome.KeyRejected,
+                        is ArtworkRepository.ArtOutcome.Unreachable -> return
+                        else -> {}
+                    }
+                }
+            }
+        }
+        val s = _artStatus.value
+        if (heroes > 0 && s is ArtStatus.Ok) {
+            _artStatus.value = ArtStatus.Ok(s.message.removeSuffix(".") +
+                "; backgrounds for $heroes.")
+        }
+    }
+
     /** Stores a user-picked image as [game]'s art. No-op if the disc had no title ID. */
     fun setCustomArt(game: GameEntry, src: Uri) {
         val titleId = game.titleId ?: return
@@ -294,14 +402,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             // Search with the disc's own title where we have it; a filename
             // like "Halo - Combat Evolved (USA) (Rev 2)" matches no real
             // catalogue entry.
-            val query = game.discTitle ?: game.displayName
-            var r = ArtworkRepository.fetchArt(ctx, query, steamKey)
-            /* Disc titles are sometimes all-caps or abbreviated; the file
-             * name (usually the catalogue name, e.g. a No-Intro set) may
-             * match where they do not. */
-            if (r is ArtworkRepository.ArtOutcome.NoMatch &&
-                !game.displayName.equals(query, ignoreCase = true)) {
-                r = ArtworkRepository.fetchArt(ctx, game.displayName, steamKey)
+            /* Most specific name first; see searchNames(). */
+            var r: ArtworkRepository.ArtOutcome = ArtworkRepository.ArtOutcome.NoMatch
+            for (query in searchNames(game)) {
+                r = ArtworkRepository.fetchArt(ctx, query, steamKey)
+                if (r !is ArtworkRepository.ArtOutcome.NoMatch) break
             }
             when (r) {
                 is ArtworkRepository.ArtOutcome.Found -> {

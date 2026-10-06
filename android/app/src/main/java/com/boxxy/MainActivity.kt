@@ -121,6 +121,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /* Dual-screen library: controller navigation drives the card list on the
+     * lower screen, whichever display was touched last. */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean =
+        com.boxxy.library.LibraryPresentation.forwardKey(event) || super.dispatchKeyEvent(event)
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)

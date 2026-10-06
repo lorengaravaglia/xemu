@@ -184,6 +184,17 @@ fun SystemSettingsScreen(
                         )
                         val artStatus by libraryViewModel.artStatus.collectAsState()
                         val busy = artStatus is LibraryViewModel.ArtStatus.Working
+                        val backgroundArt by libraryViewModel.backgroundArt.collectAsState()
+
+                        SettingsSwitchRow(
+                            label = "Background art",
+                            subtitle = "Show the selected game's wide artwork and " +
+                                       "logo behind the library (from SteamGridDB, " +
+                                       "downloaded with the key above). The " +
+                                       "Showcase view and the dual-screen library " +
+                                       "are built on it.",
+                            checked = backgroundArt,
+                        ) { libraryViewModel.setBackgroundArt(it) }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(

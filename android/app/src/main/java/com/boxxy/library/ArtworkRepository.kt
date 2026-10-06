@@ -46,6 +46,71 @@ object ArtworkRepository {
     fun cachedFile(context: Context, displayName: String): File =
         File(artworkDir(context), "${gameKey(displayName)}.jpg")
 
+    /** Wide background art (SteamGridDB "hero"), shown behind the library. */
+    fun heroFile(context: Context, name: String): File =
+        File(artworkDir(context), "hero_${gameKey(name)}.img")
+
+    /** The game's title logo on transparency, drawn over the hero. */
+    fun logoFile(context: Context, name: String): File =
+        File(artworkDir(context), "logo_${gameKey(name)}.img")
+
+    /** Marker for "looked, there is none", so a title without a hero is not
+     *  searched again on every launch.  Re-fetch deletes these too. */
+    private fun noneMarker(file: File) = File(file.path + ".none")
+
+    fun knownMissing(file: File) = noneMarker(file).exists()
+
+    enum class Extra(val endpoint: String, val sizes: String) {
+        HERO("heroes", "1920x620,3840x1240"),
+        LOGO("logos", ""),
+    }
+
+    /**
+     * Fetch a hero or logo for [name] into [dest].  Heroes must be wide
+     * (3:1-ish -- portrait or square art would be cropped to nothing); logos
+     * are taken as they come.
+     */
+    suspend fun fetchExtra(
+        name: String,
+        extra: Extra,
+        dest: File,
+        apiKey: String,
+    ): ArtOutcome = withContext(Dispatchers.IO) {
+        if (dest.exists()) return@withContext ArtOutcome.Found(dest)
+        if (apiKey.isEmpty()) return@withContext ArtOutcome.NoKey
+        val id = when (val g = searchGameId(name, apiKey)) {
+            is IdLookup.Id -> g.id
+            IdLookup.Rejected -> return@withContext ArtOutcome.KeyRejected
+            IdLookup.Unreachable -> return@withContext ArtOutcome.Unreachable
+            IdLookup.NoMatch -> return@withContext ArtOutcome.NoMatch
+        }
+        val queries = buildList {
+            if (extra.sizes.isNotEmpty()) add("?dimensions=${extra.sizes}&mime_types=jpeg,png")
+            add("?mime_types=png,jpeg")
+        }
+        for (q in queries) {
+            val body = when (val r = httpGet("$STEAMGRIDDB_BASE/${extra.endpoint}/game/$id$q", apiKey)) {
+                is Response.Ok -> r.body
+                Response.Rejected -> return@withContext ArtOutcome.KeyRejected
+                Response.Failed -> return@withContext ArtOutcome.Unreachable
+            }
+            val items = JSONObject(body).optJSONArray("data") ?: continue
+            for (i in 0 until items.length()) {
+                val it = items.optJSONObject(i) ?: continue
+                val url = it.optString("url").takeIf { u -> u.isNotEmpty() } ?: continue
+                val w = it.optInt("width", 0)
+                val h = it.optInt("height", 0)
+                if (extra == Extra.HERO && !(h > 0 && w >= 2 * h)) continue
+                Log.i(TAG, "${extra.name.lowercase()}: \"$name\" -> game $id, ${w}x$h")
+                return@withContext downloadTo(url, dest)?.let { f -> ArtOutcome.Found(f) }
+                    ?: ArtOutcome.Unreachable
+            }
+        }
+        Log.i(TAG, "${extra.name.lowercase()}: \"$name\" -> game $id, none suitable")
+        noneMarker(dest).createNewFile()
+        ArtOutcome.NoMatch
+    }
+
     /**
      * Cache location for art extracted from the disc itself, keyed by title ID
      * rather than name — the ID is stable across renames and regional variants.
@@ -176,6 +241,7 @@ object ArtworkRepository {
      * choice the user made by hand.
      */
     fun clearNetworkArt(context: Context) {
+        idCache.clear()
         artworkDir(context).listFiles()?.forEach { f ->
             if (!f.name.startsWith("custom_") && !f.name.startsWith("disc_")) f.delete()
         }
@@ -190,23 +256,40 @@ object ArtworkRepository {
         data object Unreachable : Lookup
     }
 
-    private fun fetchFromSteamGridDB(gameName: String, apiKey: String): Lookup {
-        // Step 1: search for the game ID
+    private sealed interface IdLookup {
+        data class Id(val id: Int) : IdLookup
+        data object Rejected : IdLookup
+        data object NoMatch : IdLookup
+        data object Unreachable : IdLookup
+    }
+
+    /* Search results for this session: a cover, a hero and a logo for the
+     * same title share one search. */
+    private val idCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private fun searchGameId(gameName: String, apiKey: String): IdLookup {
+        idCache[gameName.lowercase()]?.let { return if (it > 0) IdLookup.Id(it) else IdLookup.NoMatch }
         val encoded = Uri.encode(gameName)
         val searchJson = when (val r = httpGet("$STEAMGRIDDB_BASE/search/autocomplete/$encoded", apiKey)) {
             is Response.Ok -> r.body
-            Response.Rejected -> return Lookup.Rejected
-            Response.Failed -> return Lookup.Unreachable
+            Response.Rejected -> return IdLookup.Rejected
+            Response.Failed -> return IdLookup.Unreachable
         }
-        val gameId = JSONObject(searchJson)
-            .optJSONArray("data")
-            ?.optJSONObject(0)
-            ?.optInt("id", -1)
-            ?.takeIf { it > 0 }
-            ?: run {
-                Log.i(TAG, "art: \"$gameName\" -> no search result")
-                return Lookup.NoMatch
-            }
+        val id = JSONObject(searchJson).optJSONArray("data")?.optJSONObject(0)
+            ?.optInt("id", -1)?.takeIf { it > 0 } ?: -1
+        idCache[gameName.lowercase()] = id
+        if (id <= 0) Log.i(TAG, "art: \"$gameName\" -> no search result")
+        return if (id > 0) IdLookup.Id(id) else IdLookup.NoMatch
+    }
+
+    private fun fetchFromSteamGridDB(gameName: String, apiKey: String): Lookup {
+        // Step 1: search for the game ID
+        val gameId = when (val g = searchGameId(gameName, apiKey)) {
+            is IdLookup.Id -> g.id
+            IdLookup.Rejected -> return Lookup.Rejected
+            IdLookup.Unreachable -> return Lookup.Unreachable
+            IdLookup.NoMatch -> return Lookup.NoMatch
+        }
 
         /*
          * Step 2: a portrait cover.  The two standard portrait sizes first

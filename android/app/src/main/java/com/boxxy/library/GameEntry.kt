@@ -21,4 +21,8 @@ data class GameEntry(
      * portrait aspect a real cover assumes.
      */
     val coverIsDiscArt: Boolean = false,
+    /** Wide background art (SteamGridDB hero), if any. */
+    val heroUri: Uri? = null,
+    /** Title logo with transparency, drawn over the hero, if any. */
+    val logoUri: Uri? = null,
 )
