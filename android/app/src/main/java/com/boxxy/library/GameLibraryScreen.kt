@@ -230,18 +230,6 @@ fun GameLibraryScreen(
             footer = if (useDual) { g -> ShowcaseDetails(g, resumeRefresh) } else null,
         )
     }
-    if (artShown) {
-        /* Keeps the title and icons legible over light artwork. */
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(160.dp)
-                .background(androidx.compose.ui.graphics.Brush.verticalGradient(
-                    0f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.75f),
-                    0.45f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.6f),
-                    1f to androidx.compose.ui.graphics.Color.Transparent))
-        )
-    }
     Scaffold(
         containerColor = if (artShown)
             androidx.compose.ui.graphics.Color.Transparent
@@ -254,25 +242,38 @@ fun GameLibraryScreen(
                         titleContentColor = androidx.compose.ui.graphics.Color.White,
                         actionIconContentColor = androidx.compose.ui.graphics.Color.White)
                 else TopAppBarDefaults.topAppBarColors(),
-                title = { Text(stringResource(R.string.app_name)) },
+                title = {
+                    Text(stringResource(R.string.app_name),
+                         style = if (artShown) LocalTextStyle.current.merge(TEXT_SHADOW)
+                                 else LocalTextStyle.current)
+                },
                 actions = {
-                    /* Showcase -> one row -> two rows. */
+                    /* Showcase -> one row -> two rows.  In dual-screen mode
+                     * the top screen is always the showcase, so Showcase and
+                     * one row would look the same: there it is just one row
+                     * <-> two rows (Showcase's setting is kept for when the
+                     * second screen is off). */
                     IconButton(onClick = {
-                        libraryViewModel.setRows(when (rows) { 0 -> 1; 1 -> 2; else -> 0 })
+                        libraryViewModel.setRows(
+                            if (useDual) { if (rows == 2) 0 else 2 }
+                            else when (rows) { 0 -> 1; 1 -> 2; else -> 0 })
                     }) {
-                        Icon(
-                            when (rows) {
-                                0 -> Icons.Default.ViewCarousel
-                                1 -> Icons.Default.GridView
-                                else -> Icons.Default.ViewAgenda
-                            },
-                            contentDescription = when (rows) {
-                                0 -> "Showcase view"; 1 -> "One row"; else -> "Two rows"
-                            },
-                        )
+                        val icon = when {
+                            rows == 2 -> Icons.Default.ViewAgenda
+                            rows == 0 || useDual -> Icons.Default.ViewCarousel
+                            else -> Icons.Default.GridView
+                        }
+                        val label = when {
+                            rows == 2 -> "Two rows"
+                            useDual -> "One row"
+                            rows == 0 -> "Showcase view"
+                            else -> "One row"
+                        }
+                        if (artShown) ShadowedIcon(icon, label) else Icon(icon, contentDescription = label)
                     }
                     IconButton(onClick = { navController.navigate("settings") }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        if (artShown) ShadowedIcon(Icons.Default.Settings, "Settings")
+                        else Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
                 }
             )
@@ -432,14 +433,15 @@ private fun ShowcaseDetails(game: GameEntry, refresh: Int) {
     ) {
         /* Without a logo the name already stands in its place above. */
         if (game.logoUri != null) {
-            Text(game.displayName, style = MaterialTheme.typography.headlineMedium,
+            Text(game.displayName,
+                 style = MaterialTheme.typography.headlineMedium.merge(TEXT_SHADOW),
                  color = androidx.compose.ui.graphics.Color.White)
         }
         if (resumeAt != null) {
             Text("Quick resume available \u00b7 saved " +
                  android.text.format.DateUtils.getRelativeTimeSpanString(resumeAt),
-                 style = MaterialTheme.typography.bodyLarge,
-                 color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f))
+                 style = MaterialTheme.typography.bodyLarge.merge(TEXT_SHADOW),
+                 color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.85f))
         }
     }
 }

@@ -34,9 +34,23 @@ import coil.compose.AsyncImage
 /** Native shape of a SteamGridDB hero (1920x620, 3840x1240). */
 private const val HERO_ASPECT = 1920f / 620f
 
-/* The scrim over the blurred backdrop, and the colour the hero's bottom edge
- * fades into -- the same, so the band dissolves into the backdrop. */
-private val SCRIM = Color.Black.copy(alpha = 0.5f)
+/* A light scrim over the blurred backdrop only; the legibility darkening is
+ * one gradient over everything (see [shade]), so no part of the screen is a
+ * separately darkened band. */
+private val SCRIM = Color.Black.copy(alpha = 0.25f)
+
+/** A white icon with a soft shadow, for use over artwork. */
+@Composable
+fun ShadowedIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, contentDescription: String?) {
+    Box {
+        androidx.compose.material3.Icon(icon, null, tint = Color.Black.copy(alpha = 0.7f),
+             modifier = Modifier.padding(top = 2.dp).blur(3.dp))
+        androidx.compose.material3.Icon(icon, contentDescription, tint = Color.White)
+    }
+}
+
+/** Soft shadow for white text over artwork. */
+val TEXT_SHADOW = TextStyle(shadow = Shadow(Color.Black.copy(alpha = 0.8f), Offset(0f, 2f), 10f))
 
 /**
  * The selected game's background art: used as the library's Showcase view, as
@@ -110,6 +124,19 @@ fun GameShowcase(
                 }
             }
 
+            /* One continuous shade over the backdrop and hero together:
+             * light behind the top bar, clear across the artwork, deepening
+             * toward the bottom where details and cards sit.  Under the logo,
+             * so the logo keeps its own colours. */
+            val bandFrac = (bandHeight / maxHeight).coerceIn(0.3f, 0.9f)
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
+                0f to Color.Black.copy(alpha = 0.55f),
+                0.13f to Color.Black.copy(alpha = 0.35f),
+                0.3f to Color.Transparent,
+                bandFrac * 0.85f to Color.Transparent,
+                1f to Color.Black.copy(alpha = 0.6f),
+            )))
+
             /* Logo (or name) in the hero's sparse centre; without a hero, in
              * the same place, so the layout does not jump between games. */
             Box(
@@ -126,7 +153,7 @@ fun GameShowcase(
                     Text(
                         g.displayName,
                         style = MaterialTheme.typography.displaySmall.merge(
-                            TextStyle(shadow = Shadow(Color.Black, Offset(0f, 3f), 12f))),
+                            TEXT_SHADOW),
                         color = Color.White,
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 48.dp),
