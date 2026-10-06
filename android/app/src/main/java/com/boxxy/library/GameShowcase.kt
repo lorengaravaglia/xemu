@@ -87,7 +87,8 @@ fun GameShowcase(
                      * Soft edge: the hero's own transparency falls off over
                      * the lower part of the band, so it dissolves into the
                      * blurred copy of itself underneath rather than ending in
-                     * a line.  (Darkening the edge instead still left a seam
+                     * a line.  The fall-off is kept to the bottom 30% so the
+                     * artwork itself stays sharp.  (Darkening the edge instead still left a seam
                      * wherever the brightness differed.)  Offscreen
                      * compositing lets DstIn mask just this layer.
                      */
@@ -101,7 +102,7 @@ fun GameShowcase(
                                 drawContent()
                                 drawRect(
                                     Brush.verticalGradient(
-                                        0.45f to Color.Black, 1f to Color.Transparent),
+                                        0.7f to Color.Black, 1f to Color.Transparent),
                                     blendMode = BlendMode.DstIn,
                                 )
                             },

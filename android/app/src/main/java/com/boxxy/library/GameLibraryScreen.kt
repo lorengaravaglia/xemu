@@ -3,6 +3,7 @@ package com.boxxy.library
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
@@ -144,6 +145,10 @@ fun GameLibraryScreen(
             ?.let { libraryViewModel.select(android.net.Uri.parse(it)) }
     }
 
+    val activity = context as? androidx.activity.ComponentActivity
+    val useDual = dualDisplay != null && activity != null && games.isNotEmpty()
+    val artShown = (backgroundArt || useDual) && games.isNotEmpty()
+
     val cards: @Composable (Modifier) -> Unit = { mod ->
         LazyHorizontalGrid(
             state = gridState,
@@ -170,6 +175,10 @@ fun GameLibraryScreen(
                 }) {
                     GameCard(
                         game = game,
+                        /* With background art, the card being shown; otherwise
+                         * the one with controller focus. */
+                        highlighted = if (artShown) game.uri == selectedGame?.uri
+                                      else focusedKey == game.uri.toString(),
                         onClick = { launchGame(context, game, settingsViewModel) },
                         onLongClick = { artTarget = game },
                         onResume = resumeAt?.let {
@@ -184,8 +193,6 @@ fun GameLibraryScreen(
 
     /* Dual screen: the cards go to the lower screen's window. */
     val bottomContent = remember { mutableStateOf<(@Composable () -> Unit)?>(null) }
-    val activity = context as? androidx.activity.ComponentActivity
-    val useDual = dualDisplay != null && activity != null && games.isNotEmpty()
     SideEffect {
         bottomContent.value = if (useDual) {
             {
@@ -215,7 +222,7 @@ fun GameLibraryScreen(
     }
 
     Box(Modifier.fillMaxSize()) {
-    if ((backgroundArt || useDual) && games.isNotEmpty()) {
+    if (artShown) {
         GameShowcase(
             game = selectedGame,
             modifier = Modifier.fillMaxSize(),
@@ -223,15 +230,29 @@ fun GameLibraryScreen(
             footer = if (useDual) { g -> ShowcaseDetails(g, resumeRefresh) } else null,
         )
     }
+    if (artShown) {
+        /* Keeps the title and icons legible over light artwork. */
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(160.dp)
+                .background(androidx.compose.ui.graphics.Brush.verticalGradient(
+                    0f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.75f),
+                    0.45f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.6f),
+                    1f to androidx.compose.ui.graphics.Color.Transparent))
+        )
+    }
     Scaffold(
-        containerColor = if ((backgroundArt || useDual) && games.isNotEmpty())
+        containerColor = if (artShown)
             androidx.compose.ui.graphics.Color.Transparent
         else MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                colors = if ((backgroundArt || useDual) && games.isNotEmpty())
+                colors = if (artShown)
                     TopAppBarDefaults.topAppBarColors(
-                        containerColor = androidx.compose.ui.graphics.Color.Transparent)
+                        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        titleContentColor = androidx.compose.ui.graphics.Color.White,
+                        actionIconContentColor = androidx.compose.ui.graphics.Color.White)
                 else TopAppBarDefaults.topAppBarColors(),
                 title = { Text(stringResource(R.string.app_name)) },
                 actions = {
@@ -420,8 +441,5 @@ private fun ShowcaseDetails(game: GameEntry, refresh: Int) {
                  style = MaterialTheme.typography.bodyLarge,
                  color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f))
         }
-        Text("Choose a game on the lower screen. Long-press for options.",
-             style = MaterialTheme.typography.bodyMedium,
-             color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.6f))
     }
 }

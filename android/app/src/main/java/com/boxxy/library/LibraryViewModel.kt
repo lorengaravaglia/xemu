@@ -37,7 +37,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val artStatus: StateFlow<ArtStatus?> = _artStatus
 
     /** Rows of cards shown at once; the grid scrolls sideways within them. */
-    private val _rows = MutableStateFlow(prefs.getInt("grid_rows", 1))
+    private val _rows = MutableStateFlow(prefs.getInt("grid_rows", 0))
     val rows: StateFlow<Int> = _rows
 
     /** Background art (heroes/logos) behind the library; on by default. */

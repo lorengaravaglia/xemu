@@ -1,5 +1,8 @@
 package com.boxxy.library
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -10,8 +13,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
@@ -27,7 +32,12 @@ fun GameCard(
     onLongClick: () -> Unit = {},
     /** Non-null when a quick-resume point exists: the alternate way in. */
     onResume: (() -> Unit)? = null,
+    /** The selected card: a white border and a slight lift. */
+    highlighted: Boolean = false,
 ) {
+    val borderColor by animateColorAsState(
+        if (highlighted) Color.White else Color.Transparent, label = "cardBorder")
+    val scale by animateFloatAsState(if (highlighted) 1.04f else 1f, label = "cardScale")
     /*
      * The click handling sits on the inner Box rather than Card's own onClick
      * overload, because long-press needs combinedClickable and Card has no such
@@ -36,8 +46,11 @@ fun GameCard(
      * corners.
      */
     Card(
-        modifier = Modifier.aspectRatio(0.75f),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+        modifier = Modifier
+            .aspectRatio(0.75f)
+            .graphicsLayer { scaleX = scale; scaleY = scale },
+        elevation = CardDefaults.cardElevation(defaultElevation = if (highlighted) 10.dp else 4.dp),
+        border = BorderStroke(3.dp, borderColor),
     ) {
         Box(
             modifier = Modifier
