@@ -1432,6 +1432,10 @@ static int64_t mono_ns(void)
  * flip is presented in time for the next real refresh.  debug.xemu.vblank_lock
  * =0 restores the free-running grid; debug.xemu.vblank_phase_us sets the phase.
  */
+#include "../android/app/src/main/cpp/vblank_lock.h"
+
+static int s_vblank_n_vsyncs = 1;
+
 static bool vblank_lock_params(int64_t *phase_ns)
 {
     static int on = 1, phase_us = 1000;
@@ -1447,26 +1451,20 @@ static bool vblank_lock_params(int64_t *phase_ns)
 }
 
 /* The next emulated vblank after [prev]: on the panel's vsync grid plus the
- * phase when locked, else [prev] + the nominal interval. */
-static int64_t next_vblank_deadline(int64_t prev, bool *locked)
+ * phase when locked (every n-th vsync on a 120 Hz-class panel), else [prev] +
+ * the nominal interval.  The maths is vblank_lock.h's, tested off-device. */
+static int64_t next_vblank_deadline(int64_t prev, bool *locked, int *n_vsyncs)
 {
     int64_t phase, vl, vp;
     *locked = false;
     if (vblank_lock_params(&phase) && vblank_interval_ns == 16666666LL &&
-        xemu_android_vsync_timeline(&vl, &vp) &&
-        llabs(vp - (int64_t)vblank_interval_ns) < 1000000) {
-        int64_t base = vl + phase;
-        int64_t target = prev + vp;
-        int64_t k = (target - base + vp / 2) / vp;       /* nearest grid line */
-        if (target - base + vp / 2 < 0) {
-            k = -((base - target + vp / 2) / vp);
+        xemu_android_vsync_timeline(&vl, &vp)) {
+        int64_t next = vblank_next_deadline(prev, (int64_t)vblank_interval_ns,
+                                            phase, vl, vp, n_vsyncs);
+        if (next) {
+            *locked = true;
+            return next;
         }
-        int64_t next = base + k * vp;
-        if (next <= prev + vp / 2) {                   /* never twice per period */
-            next += vp;
-        }
-        *locked = true;
-        return next;
     }
     return prev + vblank_interval_ns;
 }
@@ -1501,7 +1499,8 @@ static void *vblank_timer_thread(void *opaque)
         }
 #else
         bool locked;
-        next_vblank = next_vblank_deadline(next_vblank, &locked);
+        int n_vsyncs = 1;
+        next_vblank = next_vblank_deadline(next_vblank, &locked, &n_vsyncs);
         int64_t now = mono_ns();
         if (now < next_vblank) {
             struct timespec ts = {
@@ -1526,6 +1525,7 @@ static void *vblank_timer_thread(void *opaque)
                 }
             }
             locked_n += locked;
+            s_vblank_n_vsyncs = n_vsyncs;
         }
 #endif
 
@@ -1544,10 +1544,10 @@ static void *vblank_timer_thread(void *opaque)
             if (frames % 300 == 0) {
                 int64_t vl, vp;
                 bool have = xemu_android_vsync_timeline(&vl, &vp);
-                ALOGI("vblank: %s, %d/300 locked | panel period %.4f ms | "
-                      "wake late avg %.0f us, max %.0f us",
+                ALOGI("vblank: %s, %d/300 locked, every %d vsync(s) | panel "
+                      "period %.4f ms | wake late avg %.0f us, max %.0f us",
                       locked_n ? "locked to panel vsync" : "free-running",
-                      locked_n, have ? vp / 1e6 : 0.0,
+                      locked_n, s_vblank_n_vsyncs, have ? vp / 1e6 : 0.0,
                       err_n ? err_sum / 1e3 / err_n : 0.0, err_max / 1e3);
                 err_sum = err_max = 0;
                 err_n = locked_n = 0;

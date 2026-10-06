@@ -23,6 +23,7 @@
 #include <EGL/eglext.h>
 #include <vulkan/vulkan.h>
 #include <android/choreographer.h>
+#include "vblank_lock.h"
 #include <android/looper.h>
 #include <time.h>
 
@@ -541,26 +542,16 @@ static void *xemu_android_thread(void *opaque) {
  * The panel's real vsync timeline, for locking the emulated vblank to it
  * (ui/xemu.c vblank_timer_thread).  A Choreographer on its own looper thread
  * reports each vsync of the default display (the Thor's top screen); its
- * frame time is the vsync timestamp on CLOCK_MONOTONIC.  The period is a
- * smoothed delta, ignoring gaps where callbacks were skipped.
+ * frame time is the vsync timestamp on CLOCK_MONOTONIC.  The period
+ * tracking (skipped callbacks ignored, refresh-rate changes followed) is in
+ * vblank_lock.h, tested off-device by android/tools/vblank-lock-test.c.
  */
-static volatile int64_t s_vsync_last_ns;
-static volatile int64_t s_vsync_period_ns;
+static VblankTracker s_vsync;   /* written only by the vsync thread */
 
 static void vsync_cb(int64_t frame_time_ns, void *data)
 {
-    int64_t prev = s_vsync_last_ns;
-    if (prev) {
-        int64_t d = frame_time_ns - prev;
-        int64_t p = s_vsync_period_ns ? s_vsync_period_ns : d;
-        /* One period (not a skipped callback): fold into a slow average. */
-        if (d > p * 3 / 4 && d < p * 5 / 4) {
-            s_vsync_period_ns = p + (d - p) / 16;
-        } else if (!s_vsync_period_ns && d > 4000000 && d < 50000000) {
-            s_vsync_period_ns = d;
-        }
-    }
-    s_vsync_last_ns = frame_time_ns;
+    (void)data;
+    vblank_track_vsync(&s_vsync, frame_time_ns);
     AChoreographer_postFrameCallback64(AChoreographer_getInstance(), vsync_cb, NULL);
 }
 
@@ -578,7 +569,9 @@ static void *vsync_thread(void *arg)
 /* The latest panel vsync and the period, or false until both are known. */
 bool xemu_android_vsync_timeline(int64_t *last_ns, int64_t *period_ns)
 {
-    int64_t l = s_vsync_last_ns, p = s_vsync_period_ns;
+    /* Racy by design: two aligned 64-bit loads; a torn pair is one vsync
+     * stale at worst and the next deadline corrects it. */
+    int64_t l = s_vsync.last_ns, p = s_vsync.period_ns;
     if (!l || !p) {
         return false;
     }

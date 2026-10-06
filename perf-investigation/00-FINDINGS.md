@@ -3417,8 +3417,8 @@ completion time.
   a phase (`debug.xemu.vblank_phase_us`, default 1000). The thread sleeps
   with clock_nanosleep(ABSTIME) on CLOCK_MONOTONIC, waking 13-14 us late on
   average against g_usleep's milliseconds. A/B: `debug.xemu.vblank_lock`.
-  It locks only when the panel is ~60 Hz; a 120 Hz panel would need every
-  other vsync -- not done.
+  Since the follow-up below, it also locks to every n-th vsync on 120 Hz-class
+  panels.
 
 **Result**, Halo slot 7, SurfaceFlinger present intervals, ~4.4 s windows,
 ABCCBA x2 in one process:
@@ -3434,3 +3434,24 @@ real NTSC Xbox's 59.94 Hz; fps reads ~29.92. vCPU ms/frame ABBA:
 on 31.17, off 30.96. The gap comes from the first (cooler) off pair; later
 pairs are equal, and a 0.4% longer frame adds ~0.14 ms of Halo's
 clock-spin time anyway.
+
+**Follow-up (same day): refresh-rate changes and 120 Hz.** The maths moved to
+`android/app/src/main/cpp/vblank_lock.h`, pure so it can be tested
+off-device (`android/tools/vblank-lock-test.c`), because the Thor cannot run
+at 120 Hz. Two changes:
+
+- **The period tracker follows a new refresh rate.** It previously ignored
+  any interval more than 25% off its estimate (meant for skipped
+  callbacks), so it could never follow a refresh-rate change. With the old
+  rule the test shows **120 -> 60 Hz stepping two 60 Hz vsyncs per
+  emulated vblank: the game at half speed**. Now 8 matching intervals in a
+  row are accepted as the new rate.
+- **The lock steps n vsyncs** wherever n x period is within 1 ms of
+  16.67 ms: every 2nd vsync at 120 Hz, none at 50 or 90 Hz.
+
+Test: 9/9 scenarios pass (60, 59.753, 59.94 and 120 Hz; 60 Hz with every
+7th callback lost; 120->60 and 60->120 at 3 s; 90 and 50 Hz staying
+unlocked). Every locked deadline lands within 0.2 ms of a real vsync plus
+the phase, at the right step. With rate changes disabled, the two switch
+cases fail, so the test can fail. On the Thor: locked 300/300 every 1 vsync;
+377/377 present intervals exactly 2 vsyncs.
