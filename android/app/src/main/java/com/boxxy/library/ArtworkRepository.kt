@@ -210,6 +210,9 @@ object ArtworkRepository {
         val dest = cachedFile(context, displayName)
         if (dest.exists()) return@withContext ArtOutcome.Found(dest)
         if (steamGridDbKey.isEmpty()) return@withContext ArtOutcome.NoKey
+        /* Looked before and found nothing: not again until Re-fetch clears
+         * the marker.  The library fetches automatically on every launch. */
+        if (knownMissing(dest)) return@withContext ArtOutcome.NoMatch
 
         when (val found = fetchFromSteamGridDB(displayName, steamGridDbKey)) {
             is Lookup.Url ->
@@ -217,7 +220,10 @@ object ArtworkRepository {
                     ?.let { ArtOutcome.Found(it) }
                     ?: ArtOutcome.Unreachable
             Lookup.Rejected -> ArtOutcome.KeyRejected
-            Lookup.NoMatch -> ArtOutcome.NoMatch
+            Lookup.NoMatch -> {
+                noneMarker(dest).createNewFile()
+                ArtOutcome.NoMatch
+            }
             Lookup.Unreachable -> ArtOutcome.Unreachable
         }
 

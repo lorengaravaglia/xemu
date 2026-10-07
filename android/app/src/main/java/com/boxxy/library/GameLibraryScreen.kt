@@ -10,9 +10,12 @@ import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.ViewCarousel
 import androidx.compose.material3.*
@@ -89,7 +92,7 @@ fun GameLibraryScreen(
                 it,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
-            libraryViewModel.addDirectory(it, steamGridDbKey)
+            libraryViewModel.addDirectory(it)
         }
     }
 
@@ -120,6 +123,8 @@ fun GameLibraryScreen(
      * background along with it.
      */
     val gridState = rememberLazyGridState()
+    val favorite by libraryViewModel.favorite.collectAsState()
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var focusedKey by remember { mutableStateOf<String?>(null) }
     val centreKey by remember {
         derivedStateOf {
@@ -136,9 +141,10 @@ fun GameLibraryScreen(
                 ?.key as? String
         }
     }
-    /* Heroes and logos arrive in the background once games are known. */
+    /* Covers, heroes and logos arrive in the background whenever games are
+     * found or added (silently; Settings' Re-fetch is the reporting path). */
     LaunchedEffect(steamGridDbKey, games.size) {
-        libraryViewModel.fetchBackgrounds(steamGridDbKey)
+        libraryViewModel.autoFetchArt(steamGridDbKey)
     }
     LaunchedEffect(focusedKey, centreKey, games.size) {
         (focusedKey ?: centreKey ?: games.firstOrNull()?.uri?.toString())
@@ -341,6 +347,14 @@ fun GameLibraryScreen(
                 navController.navigate("game_settings/$key?name=" +
                                        android.net.Uri.encode(game.displayName))
             },
+            isFavorite = favorite == game.uri.toString(),
+            onToggleFavorite = {
+                artTarget = null
+                libraryViewModel.setFavorite(
+                    if (favorite == game.uri.toString()) null else game.uri)
+                /* Show where it went: the favorite is now first. */
+                scope.launch { gridState.animateScrollToItem(0) }
+            },
             onChoose = { artPicker.launch(arrayOf("image/*")) },
             onReset = {
                 libraryViewModel.clearCustomArt(game)
@@ -362,6 +376,8 @@ private fun ArtworkDialog(
     resumeAt: Long?,
     onQuickResume: () -> Unit,
     onGameSettings: () -> Unit,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
     onChoose: () -> Unit,
     onReset: () -> Unit,
     onDismiss: () -> Unit,
@@ -387,6 +403,17 @@ private fun ArtworkDialog(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Game settings")
+                }
+                /* One favorite: it always sits first in the list. */
+                OutlinedButton(
+                    onClick = onToggleFavorite,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                         contentDescription = null,
+                         modifier = Modifier.size(ButtonDefaults.IconSize))
+                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                    Text(if (isFavorite) "Remove favorite" else "Set as favorite")
                 }
                 Text(
                     if (game.titleId == null)

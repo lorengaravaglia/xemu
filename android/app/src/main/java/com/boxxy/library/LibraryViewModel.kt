@@ -8,7 +8,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import java.io.File
@@ -20,8 +23,25 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("library_prefs", Context.MODE_PRIVATE)
 
+    /** Every game found, alphabetical; the art code works on this. */
     private val _games = MutableStateFlow<List<GameEntry>>(emptyList())
-    val games: StateFlow<List<GameEntry>> = _games
+
+    /** The one favorite game (its URI), shown first in the library. */
+    private val _favorite = MutableStateFlow(prefs.getString("favorite_uri", null))
+    val favorite: StateFlow<String?> = _favorite
+
+    fun setFavorite(uri: Uri?) {
+        _favorite.value = uri?.toString()
+        prefs.edit().apply {
+            if (uri == null) remove("favorite_uri") else putString("favorite_uri", uri.toString())
+        }.apply()
+    }
+
+    /** What the library shows: the favorite first, the rest alphabetical. */
+    val games: StateFlow<List<GameEntry>> = combine(_games, _favorite) { list, fav ->
+        val first = list.firstOrNull { it.uri.toString() == fav }
+        if (first == null) list else listOf(first) + (list - first)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _dirs = MutableStateFlow<List<Uri>>(emptyList())
     val dirs: StateFlow<List<Uri>> = _dirs
@@ -269,16 +289,30 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private val extrasLock = kotlinx.coroutines.sync.Mutex()
+    @Volatile private var autoFetchAgain = false
 
-    /** Fetch missing heroes/logos in the background (the library calls this
-     *  when a key is set).  Misses are remembered, so this is cheap to repeat. */
-    fun fetchBackgrounds(key: String) {
+    /**
+     * Fetch whatever art is missing -- covers, heroes, logos -- in the
+     * background.  The library calls this whenever the key or the number of
+     * games changes (app start, a folder added), so new games get art without
+     * anyone pressing Re-fetch.  Failures are silent, and misses are
+     * remembered on disk, so repeating it is cheap.  A request that arrives
+     * while a pass is running makes that pass go round once more rather than
+     * being dropped, so games added mid-fetch are not skipped.
+     */
+    fun autoFetchArt(key: String) {
         if (key.isEmpty() || _games.value.isEmpty()) return
+        autoFetchAgain = true
         viewModelScope.launch(Dispatchers.IO) {
             if (!extrasLock.tryLock()) return@launch
             try {
-                applyCachedExtras(getApplication())
-                fetchExtras(getApplication(), key)
+                while (autoFetchAgain) {
+                    autoFetchAgain = false
+                    val ctx = getApplication<Application>()
+                    fetchMissingArt(ctx, key, quiet = true)
+                    applyCachedExtras(ctx)
+                    fetchExtras(ctx, key)
+                }
             } finally {
                 extrasLock.unlock()
             }
@@ -381,7 +415,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
      * summary. Individual failures are counted rather than announced, so one
      * unmatched title does not bury the result for the rest.
      */
-    private suspend fun fetchMissingArt(ctx: Context, steamKey: String) {
+    private suspend fun fetchMissingArt(ctx: Context, steamKey: String, quiet: Boolean = false) {
+        /* The automatic pass fails silently: nothing goes to the Settings
+         * status line, which belongs to the user's own Re-fetch. */
+        fun report(status: ArtStatus) { if (!quiet) _artStatus.value = status }
         /*
          * No cover, or only the disc's own 128x128 title image -- which is
          * exactly what the network lookup is meant to upgrade.  Counting disc
@@ -391,8 +428,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
          */
         val missing = _games.value.filter { it.coverUri == null || it.coverIsDiscArt }
         if (missing.isEmpty()) {
-            _artStatus.value = ArtStatus.Ok(
-                "Every game already has artwork you chose or a cover image next to it.")
+            report(ArtStatus.Ok(
+                "Every game already has artwork you chose or a cover image next to it."))
             return
         }
 
@@ -421,28 +458,28 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 // A bad key or a dead connection applies to every remaining
                 // game, so stop rather than repeat the same failure N times.
                 is ArtworkRepository.ArtOutcome.KeyRejected -> {
-                    _artStatus.value = ArtStatus.Problem(
-                        "That key was rejected. Check it on steamgriddb.com and paste it again.")
+                    report(ArtStatus.Problem(
+                        "That key was rejected. Check it on steamgriddb.com and paste it again."))
                     return
                 }
                 is ArtworkRepository.ArtOutcome.Unreachable -> {
-                    _artStatus.value = ArtStatus.Problem(
-                        "Could not reach steamgriddb.com. Check the network and try again.")
+                    report(ArtStatus.Problem(
+                        "Could not reach steamgriddb.com. Check the network and try again."))
                     return
                 }
                 is ArtworkRepository.ArtOutcome.NoKey -> {
-                    _artStatus.value = ArtStatus.Problem(
-                        "No API key set, so only artwork from the discs is available.")
+                    report(ArtStatus.Problem(
+                        "No API key set, so only artwork from the discs is available."))
                     return
                 }
             }
         }
-        _artStatus.value = when {
+        report(when {
             found == 0 -> ArtStatus.Problem(
                 "No matches for $unmatched game${if (unmatched == 1) "" else "s"}. " +
                 "Long-press a game to choose artwork yourself.")
             unmatched == 0 -> ArtStatus.Ok("Found artwork for $found.")
             else -> ArtStatus.Ok("Found artwork for $found; no match for $unmatched.")
-        }
+        })
     }
 }
