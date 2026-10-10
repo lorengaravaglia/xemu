@@ -76,6 +76,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun InGameMenu(
     initialOverlayLabel: String,
+    initialPerfLabel: String,
     exitLabel: String,
     recordingLabel: String,
     isRecordingBusy: Boolean,
@@ -83,6 +84,7 @@ fun InGameMenu(
     visibleState: MutableTransitionState<Boolean>,
     onFullyHidden: () -> Unit,
     onCycleOverlay: () -> String,
+    onTogglePerf: () -> String,
     onSaveState: () -> Unit,
     onLoadState: () -> Unit,
     onMapControls: () -> Unit,
@@ -145,13 +147,19 @@ fun InGameMenu(
                  * lives in Advanced settings.)
                  */
                 var overlayLabel by remember { mutableStateOf(initialOverlayLabel) }
+                var perfLabel by remember { mutableStateOf(initialPerfLabel) }
 
                 MenuSectionLabel("Display")
                 MenuRow(
-                    label = "Overlay",
+                    label = "Touch controls",
                     value = overlayLabel,
                     dismissesMenu = false,
                 ) { overlayLabel = onCycleOverlay() }
+                MenuRow(
+                    label = "Performance",
+                    value = perfLabel,
+                    dismissesMenu = false,
+                ) { perfLabel = onTogglePerf() }
 
                 MenuSeparator()
                 MenuSectionLabel("Save States")

@@ -146,6 +146,7 @@ class BottomPanelState {
 
     /* Menu tab labels -- the in-game menu's, set by the activity. */
     val overlayLabel = mutableStateOf("")
+    val perfLabel = mutableStateOf("")
     val recordingLabel = mutableStateOf("Record input")
     val recordingBusy = mutableStateOf(false)
     /** "Exit to library", or "Exit game" when a frontend started the game. */
@@ -177,11 +178,12 @@ class BottomPanelState {
         const val MAX_QUICK_ACTIONS = 7
 
         const val MENU_OVERLAY = 0
-        const val MENU_MAP_CONTROLS = 1
-        const val MENU_RECORD = 2
-        const val MENU_PLAY_RECORDING = 3
-        const val MENU_EXIT = 4
-        const val MENU_TILES = 5
+        const val MENU_PERF = 1
+        const val MENU_MAP_CONTROLS = 2
+        const val MENU_RECORD = 3
+        const val MENU_PLAY_RECORDING = 4
+        const val MENU_EXIT = 5
+        const val MENU_TILES = 6
     }
 }
 
@@ -193,7 +195,7 @@ class BottomPanelState {
  */
 enum class QuickAction {
     PAUSE, QUICK_SAVE, QUICK_LOAD, QUICK_SLOT, SAVE, LOAD, SCREENSHOT,
-    OVERLAY, MAP_CONTROLS, RECORD, PLAY_RECORDING;
+    OVERLAY, PERF_OVERLAY, MAP_CONTROLS, RECORD, PLAY_RECORDING;
 
     companion object {
         val DEFAULTS = listOf(PAUSE, QUICK_SAVE, QUICK_LOAD, QUICK_SLOT, SAVE, LOAD, SCREENSHOT)
@@ -444,7 +446,8 @@ private fun quickLabel(state: BottomPanelState, a: QuickAction): String {
         QuickAction.SAVE -> "Save…"
         QuickAction.LOAD -> "Load…"
         QuickAction.SCREENSHOT -> "Screenshot"
-        QuickAction.OVERLAY -> "Overlay\n${state.overlayLabel.value}"
+        QuickAction.OVERLAY -> "Touch controls\n${state.overlayLabel.value}"
+        QuickAction.PERF_OVERLAY -> "Performance\n${state.perfLabel.value}"
         QuickAction.MAP_CONTROLS -> "Map controls"
         QuickAction.RECORD -> state.recordingLabel.value
         QuickAction.PLAY_RECORDING -> "Play recording"
@@ -574,7 +577,8 @@ private fun SubScreenHeader(
 @Composable
 private fun MenuGrid(state: BottomPanelState, actions: BottomPanelActions) {
     val labels = listOf(
-        "Overlay\n${state.overlayLabel.value}",
+        "Touch controls\n${state.overlayLabel.value}",
+        "Performance\n${state.perfLabel.value}",
         "Map controls",
         state.recordingLabel.value,
         "Play recording",

@@ -23,6 +23,9 @@ fun OverlaySettingsScreen(
     val overlayShowShaders   by settingsViewModel.overlayShowShaders.collectAsState()
     val overlayShowUsage     by settingsViewModel.overlayShowUsage.collectAsState()
 
+    val perfOverlay by settingsViewModel.perfOverlay.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(Unit) { settingsViewModel.refreshPerfOverlay() }
+
     SettingsSubScreenScaffold("Overlay", navController) { padding ->
         Column(
             modifier = Modifier
@@ -33,6 +36,16 @@ fun OverlaySettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Spacer(Modifier.height(0.dp))
+
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    SettingsSwitchRow("Show performance overlay",
+                        subtitle = "Also in the in-game menu. The choices below are kept while it is off.",
+                        checked = perfOverlay) {
+                        settingsViewModel.setPerfOverlay(it)
+                    }
+                }
+            }
 
             SettingsSectionLabel("Position")
             OutlinedCard(modifier = Modifier.fillMaxWidth()) {

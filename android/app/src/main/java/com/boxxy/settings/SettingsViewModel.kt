@@ -1,6 +1,7 @@
 package com.boxxy.settings
 
 import com.boxxy.NativeInterface
+import com.boxxy.emulation.PREF_PERF_OVERLAY
 
 import android.app.Application
 import android.content.Context
@@ -356,6 +357,23 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _overlayShowUsage = MutableStateFlow(prefs.getBoolean("overlay_show_usage", false))
     val overlayShowUsage: StateFlow<Boolean> = _overlayShowUsage
+
+    /** Master switch; also flipped from the in-game menu, in the emulator's
+     *  own process, so [refreshPerfOverlay] re-reads it from disk. */
+    private val _perfOverlay = MutableStateFlow(prefs.getBoolean(PREF_PERF_OVERLAY, true))
+    val perfOverlay: StateFlow<Boolean> = _perfOverlay
+
+    fun setPerfOverlay(value: Boolean) {
+        _perfOverlay.value = value
+        prefs.edit().putBoolean(PREF_PERF_OVERLAY, value).apply()
+    }
+
+    @Suppress("DEPRECATION")   // MODE_MULTI_PROCESS: still the only way to drop the per-process cache
+    fun refreshPerfOverlay() {
+        val fresh = getApplication<Application>()
+            .getSharedPreferences("main_prefs", Context.MODE_MULTI_PROCESS)
+        _perfOverlay.value = fresh.getBoolean(PREF_PERF_OVERLAY, true)
+    }
 
     fun setOverlayPosition(value: String) {
         _overlayPosition.value = value

@@ -86,6 +86,9 @@ private const val AUTO_SAVE_MIN_PLAY_MS = 15_000L
 /** How long "Compiling shaders" stays up after the last compile. */
 private const val SHADER_BADGE_HOLD_MS = 1000L
 
+/** Master switch for the performance overlay (main_prefs). */
+const val PREF_PERF_OVERLAY = "overlay_enabled"
+
 class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
     private lateinit var surfaceView: SurfaceView
@@ -1190,6 +1193,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         showOverlay(Gravity.TOP or Gravity.END, topPx, 16.dp) { transition, onHidden ->
             InGameMenu(
                 initialOverlayLabel = overlayModeLabel(),
+                initialPerfLabel = perfOverlayLabel(),
                 exitLabel = if (launchedExternally) "Exit Game" else "Exit to Library",
                 recordingLabel = when {
                     InputRecorder.isRecording -> "Stop Recording"
@@ -1201,6 +1205,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 visibleState = transition,
                 onFullyHidden = onHidden,
                 onCycleOverlay = { cycleOverlayMode() },
+                onTogglePerf = { togglePerfOverlay() },
                 onSaveState = { dismissOverlay(); showSlotPicker(isSave = true) },
                 onLoadState = { dismissOverlay(); showSlotPicker(isSave = false) },
                 onMapControls = {
@@ -1967,6 +1972,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 QuickAction.LOAD           -> openPanelSlots(isSave = false)
                 QuickAction.SCREENSHOT     -> takeScreenshot()
                 QuickAction.OVERLAY        -> panelState.overlayLabel.value = cycleOverlayMode()
+                QuickAction.PERF_OVERLAY   -> panelState.perfLabel.value = togglePerfOverlay()
                 QuickAction.MAP_CONTROLS   -> startActivity(
                     Intent(this@EmulationActivity, MappingActivity::class.java))
                 QuickAction.RECORD         -> {
@@ -2013,6 +2019,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             when (index) {
                 BottomPanelState.MENU_OVERLAY ->
                     panelState.overlayLabel.value = cycleOverlayMode()
+                BottomPanelState.MENU_PERF ->
+                    panelState.perfLabel.value = togglePerfOverlay()
                 BottomPanelState.MENU_MAP_CONTROLS -> startActivity(
                     Intent(this@EmulationActivity, MappingActivity::class.java))
                 BottomPanelState.MENU_RECORD -> {
@@ -2038,6 +2046,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     /** Refresh the menu's live labels from the settings they show. */
     private fun refreshPanelMenuLabels() {
         panelState.overlayLabel.value = overlayModeLabel()
+        panelState.perfLabel.value = perfOverlayLabel()
         panelState.recordingLabel.value = when {
             InputRecorder.isRecording -> "Stop recording"
             InputRecorder.isPlaying   -> "Playback active"
@@ -2095,6 +2104,17 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             }
         }.start()
     }
+
+    /** Show or hide the whole performance overlay; returns the new label. */
+    private fun togglePerfOverlay(): String {
+        val on = !mainPrefs.getBoolean(PREF_PERF_OVERLAY, true)
+        mainPrefs.edit().putBoolean(PREF_PERF_OVERLAY, on).apply()
+        applyOverlaySettings()
+        return perfOverlayLabel()
+    }
+
+    private fun perfOverlayLabel() =
+        if (mainPrefs.getBoolean(PREF_PERF_OVERLAY, true)) "On" else "Off"
 
     private fun toggleFpsOverlay() {
         val showFps = !mainPrefs.getBoolean("overlay_show_fps", true)
@@ -2226,8 +2246,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         cpuLine.visibility       = if (showUsage)     View.VISIBLE else View.GONE
         gpuLine.visibility       = if (showUsage)     View.VISIBLE else View.GONE
 
+        /* The master switch (in-game menu) hides the whole box but keeps
+         * the per-metric choices made in Settings. */
+        val enabled = mainPrefs.getBoolean(PREF_PERF_OVERLAY, true)
         val anyVisible = showFps || showFrametime || showMemory || showShaders || showUsage
-        overlayContainer.visibility = if (anyVisible) View.VISIBLE else View.GONE
+        overlayContainer.visibility = if (enabled && anyVisible) View.VISIBLE else View.GONE
 
         val position = mainPrefs.getString("overlay_position", "TOP_LEFT") ?: "TOP_LEFT"
         val gravity = when (position) {
