@@ -3483,3 +3483,48 @@ pipeline cache).
 **Next:** a drop that happens without the label is not a compile. That
 splits the Halo/Halo 2 reports into compile stutter (fix: cache coverage or
 async compile) and real load (the C items).
+
+## BF. PIPELINE CHURN WAS THE BLEND CONSTANT; CACHE SAVES OFF THE RENDER THREAD (2026-10-10)
+
+**The user confirmed** that Halo's fps drops coincide with the "Compiling
+shaders" label (section BE). Their session log showed three costs:
+
+1. Real compiles of first-seen shaders: SPIR-V ~18 ms each, driver pipelines
+   ~20 ms each. Any one of them overruns a frame, since NV2A already uses
+   ~14 ms of the 33.
+2. **2,378 pipeline creations in 6 s.** These were cache hits, but cost
+   255 ms of work in total.
+3. The pipeline-cache snapshot (`vkGetPipelineCacheData`, 14 MB) taken on
+   the pfifo thread: 6-12 ms after each compile burst.
+
+**The churn, measured.** A diagnostic, `debug.xemu.pipe_diff=1` in
+`draw.c`, finds for each new pipeline an existing one differing in exactly
+one key component. On slot 7 + `walk_fps_dip`:
+- 3,584 misses in total;
+- **BLENDCOLOR 2,998**, shader 308, SETUPRASTER 105, CONTROL_0 81, other 92.
+
+The blend constant was baked into every draw pipeline, and Halo animates it
+per frame for the health-pack effect, so each new value needed a whole
+pipeline.
+
+**Fix:**
+- `VK_DYNAMIC_STATE_BLEND_CONSTANTS` on draw pipelines;
+- BLENDCOLOR removed from the key and from the dirty check;
+- `vkCmdSetBlendConstants` in `begin_draw` before every draw.
+
+The value is the same register read at the same point, so the output is
+unchanged by construction. All draw paths go through `begin_draw`, and the
+clear pipeline already set its own constants.
+
+**Result:** slot 7 plus the replay, run twice, created **0 new pipelines**
+(previously ~3,450 per run). Warm-cache pipeline creation stayed in cache-hit
+territory: 95 pipelines in 3 ms.
+
+**Cache save:** the snapshot now runs on the writer thread with the file
+write. Pipeline caches are internally synchronised. One save runs at a time,
+a request made during a save is retried, and finalize waits for any save in
+flight. Verified with a cold boot: saves landed and nothing crashed.
+
+**Not done:** the remaining churn sources (SETUPRASTER, CONTROL_0) are each
+under 3% of misses. The real fix for first-seen compiles is asynchronous
+compilation (next).

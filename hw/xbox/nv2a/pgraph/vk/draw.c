@@ -23,6 +23,9 @@
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 #include <math.h>
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/system_properties.h>
+#endif
 
 void pgraph_vk_draw_begin(NV2AState *d)
 {
@@ -159,49 +162,58 @@ static bool pipeline_cache_header_matches(PGRAPHVkState *r, const char *buf,
                    VK_UUID_SIZE);
 }
 
+/*
+ * The whole save runs on its own thread: the snapshot (vkGetPipelineCacheData,
+ * ~6 ms for a 14 MB cache -- the part that used to stall the pfifo thread) and
+ * the file write.  Pipeline caches are internally synchronized, so pipeline
+ * creation can continue meanwhile.  One save at a time: a save requested while
+ * one is in flight is retried at the next tick.  finalize waits for it.
+ */
 typedef struct PipelineCacheWrite {
-    void *data;
-    size_t size;
+    VkDevice device;
+    VkPipelineCache cache;
 } PipelineCacheWrite;
 
-/* The ~1 MB file write runs on its own thread; only the snapshot is taken on
- * the pfifo thread.  A second save cannot overlap the first: saves are
- * seconds apart and each is one write + rename. */
+static int pipeline_cache_save_in_flight;
+
 static void *pipeline_cache_write_thread(void *opaque)
 {
     PipelineCacheWrite *w = opaque;
-    g_autofree char *path = pipeline_cache_path();
-    g_file_set_contents(path, w->data, w->size, NULL);
-    g_free(w->data);
+    int64_t t0 = g_get_monotonic_time();
+    size_t size = 0;
+    void *data = NULL;
+    if (vkGetPipelineCacheData(w->device, w->cache, &size, NULL) == VK_SUCCESS &&
+        size > 0) {
+        data = g_malloc(size);
+        if (vkGetPipelineCacheData(w->device, w->cache, &size, data) ==
+            VK_SUCCESS) {
+            g_autofree char *path = pipeline_cache_path();
+            g_file_set_contents(path, data, size, NULL);
+            qatomic_inc(&pgraph_vk_cache_stats.pipeline_cache_saves);
+            qatomic_add(&pgraph_vk_cache_stats.pipeline_cache_save_us,
+                        g_get_monotonic_time() - t0);
+            qatomic_set(&pgraph_vk_cache_stats.pipeline_cache_bytes, size);
+        }
+        g_free(data);
+    }
     g_free(w);
+    qatomic_set(&pipeline_cache_save_in_flight, 0);
     return NULL;
 }
 
-static void save_pipeline_cache(PGRAPHVkState *r)
+/* Returns false if a save is already running (the caller retries later). */
+static bool save_pipeline_cache(PGRAPHVkState *r)
 {
-    int64_t t0 = g_get_monotonic_time();
-    size_t size = 0;
-    if (vkGetPipelineCacheData(r->device, r->vk_pipeline_cache, &size, NULL) !=
-            VK_SUCCESS || size == 0) {
-        return;
+    if (qatomic_cmpxchg(&pipeline_cache_save_in_flight, 0, 1) != 0) {
+        return false;
     }
     PipelineCacheWrite *w = g_new0(PipelineCacheWrite, 1);
-    w->data = g_malloc(size);
-    if (vkGetPipelineCacheData(r->device, r->vk_pipeline_cache, &size,
-                               w->data) != VK_SUCCESS) {
-        g_free(w->data);
-        g_free(w);
-        return;
-    }
-    w->size = size;
+    w->device = r->device;
+    w->cache = r->vk_pipeline_cache;
     QemuThread thread;
     qemu_thread_create(&thread, "vk.pcache_write", pipeline_cache_write_thread,
                        w, QEMU_THREAD_DETACHED);
-
-    qatomic_inc(&pgraph_vk_cache_stats.pipeline_cache_saves);
-    qatomic_add(&pgraph_vk_cache_stats.pipeline_cache_save_us,
-                g_get_monotonic_time() - t0);
-    qatomic_set(&pgraph_vk_cache_stats.pipeline_cache_bytes, size);
+    return true;
 }
 
 static void log_cache_stats(void)
@@ -242,11 +254,10 @@ void pgraph_vk_pipeline_cache_tick(PGRAPHState *pg)
         now - r->pipeline_cache_last_new_us < PIPELINE_CACHE_SETTLE_US) {
         return;
     }
-    r->pipeline_cache_dirty = false;
-    if (g_config.perf.cache_shaders) {
-        save_pipeline_cache(r);
-        log_cache_stats();
+    if (g_config.perf.cache_shaders && !save_pipeline_cache(r)) {
+        return;     /* a save is still running: stay dirty, retry next tick */
     }
+    r->pipeline_cache_dirty = false;
 }
 
 /*
@@ -326,6 +337,9 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
     g_free(r->pipeline_cache_entries);
     r->pipeline_cache_entries = NULL;
 
+    while (qatomic_read(&pipeline_cache_save_in_flight)) {
+        g_usleep(1000);     /* a background save still reads the cache */
+    }
     vkDestroyPipelineCache(r->device, r->vk_pipeline_cache, NULL);
 }
 
@@ -804,8 +818,9 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
         return true;
     }
 
+    /* No BLENDCOLOR: it is dynamic state, set on every draw. */
     const unsigned int regs[] = {
-        NV_PGRAPH_BLEND,       NV_PGRAPH_BLENDCOLOR,  NV_PGRAPH_CONTROL_0,
+        NV_PGRAPH_BLEND,                              NV_PGRAPH_CONTROL_0,
         NV_PGRAPH_CONTROL_1,   NV_PGRAPH_CONTROL_2,   NV_PGRAPH_CONTROL_3,
         NV_PGRAPH_SETUPRASTER, NV_PGRAPH_ZOFFSETBIAS, NV_PGRAPH_ZOFFSETFACTOR,
     };
@@ -858,6 +873,74 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
     for (int i = 0; i < ARRAY_SIZE(regs); i++) {
         key->regs[i] = pgraph_reg_r(pg, regs[i]);
     }
+    key->regs[1] = 0;   /* BLENDCOLOR: dynamic state, not part of the key */
+}
+
+/*
+ * Diagnostic (debug.xemu.pipe_diff=1): for each new pipeline, look for an
+ * existing one that differs in a single key component -- that component
+ * alone is why another pipeline was needed.  Tallies are logged every 256
+ * misses.  Off by default; the scan is O(cache) per miss.
+ */
+static bool pipe_diff_enabled(void)
+{
+#if defined(__ANDROID__) || defined(ANDROID)
+    static int on;
+    static unsigned calls;
+    if (calls++ % 256 == 0) {
+        char v[PROP_VALUE_MAX];
+        on = __system_property_get("debug.xemu.pipe_diff", v) > 0 && v[0] == '1';
+    }
+    return on;
+#else
+    return false;
+#endif
+}
+
+enum { PD_CLEAR, PD_RENDER_PASS, PD_SHADER, PD_VERTEX, PD_REG0, PD_NONE = PD_REG0 + 9, PD_COUNT };
+static const char *const pd_names[PD_COUNT] = {
+    "clear", "render_pass", "shader", "vertex",
+    "BLEND", "BLENDCOLOR", "CONTROL_0", "CONTROL_1", "CONTROL_2", "CONTROL_3",
+    "SETUPRASTER", "ZOFFSETBIAS", "ZOFFSETFACTOR", "multi/new",
+};
+
+/* Bitmask of the components in which a and b differ. */
+static uint32_t pipe_key_diff(const PipelineKey *a, const PipelineKey *b)
+{
+    uint32_t m = 0;
+    if (a->clear != b->clear) m |= 1u << PD_CLEAR;
+    if (memcmp(&a->render_pass_state, &b->render_pass_state, sizeof(a->render_pass_state))) m |= 1u << PD_RENDER_PASS;
+    if (memcmp(&a->shader_state, &b->shader_state, sizeof(a->shader_state))) m |= 1u << PD_SHADER;
+    if (memcmp(a->binding_descriptions, b->binding_descriptions, sizeof(a->binding_descriptions)) ||
+        memcmp(a->attribute_descriptions, b->attribute_descriptions, sizeof(a->attribute_descriptions))) m |= 1u << PD_VERTEX;
+    for (int i = 0; i < 9; i++) {
+        if (a->regs[i] != b->regs[i]) m |= 1u << (PD_REG0 + i);
+    }
+    return m;
+}
+
+static void pipe_diff_note(PGRAPHVkState *r, const PipelineKey *key)
+{
+    static uint64_t tally[PD_COUNT], misses;
+    int reason = PD_NONE;
+    for (int i = 0; i < 2048; i++) {
+        PipelineBinding *e = &r->pipeline_cache_entries[i];
+        if (e->pipeline == VK_NULL_HANDLE) continue;
+        uint32_t m = pipe_key_diff(&e->key, key);
+        if (m && !(m & (m - 1))) {           /* exactly one component */
+            reason = __builtin_ctz(m);
+            break;
+        }
+    }
+    tally[reason]++;
+    if (++misses % 256 == 0) {
+        char line[512];
+        int n = snprintf(line, sizeof(line), "pipe_diff: %" PRIu64 " misses |", misses);
+        for (int i = 0; i < PD_COUNT && n < (int)sizeof(line); i++) {
+            if (tally[i]) n += snprintf(line + n, sizeof(line) - n, " %s=%" PRIu64, pd_names[i], tally[i]);
+        }
+        fprintf(stderr, "%s\n", line);
+    }
 }
 
 static void create_pipeline(PGRAPHState *pg)
@@ -899,6 +982,9 @@ static void create_pipeline(PGRAPHState *pg)
 
     NV2A_VK_DPRINTF("Cache miss");
     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_GEN);
+    if (pipe_diff_enabled()) {
+        pipe_diff_note(r, &key);
+    }
 
     memcpy(&snode->key, &key, sizeof(key));
 
@@ -1049,8 +1135,6 @@ static void create_pipeline(PGRAPHState *pg)
         .colorWriteMask = write_mask,
     };
 
-    float blend_constant[4] = { 0, 0, 0, 0 };
-
     if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
         color_blend_attachment.blendEnable = VK_TRUE;
 
@@ -1077,9 +1161,6 @@ static void create_pipeline(PGRAPHState *pg)
             pgraph_blend_equation_vk_map[equation];
         color_blend_attachment.alphaBlendOp =
             pgraph_blend_equation_vk_map[equation];
-
-        uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
-        pgraph_argb_pack32_to_rgba_float(blend_color, blend_constant);
     }
 
     VkPipelineColorBlendStateCreateInfo color_blending = {
@@ -1088,15 +1169,19 @@ static void create_pipeline(PGRAPHState *pg)
         .logicOp = VK_LOGIC_OP_COPY,
         .attachmentCount = r->color_binding ? 1 : 0,
         .pAttachments = r->color_binding ? &color_blend_attachment : NULL,
-        .blendConstants[0] = blend_constant[0],
-        .blendConstants[1] = blend_constant[1],
-        .blendConstants[2] = blend_constant[2],
-        .blendConstants[3] = blend_constant[3],
     };
 
-    VkDynamicState dynamic_states[3] = { VK_DYNAMIC_STATE_VIEWPORT,
-                                         VK_DYNAMIC_STATE_SCISSOR };
-    int num_dynamic_states = 2;
+    /*
+     * Blend constants are dynamic, set per draw (see the draw path), and
+     * BLENDCOLOR is left out of the pipeline key.  Games animate it -- Halo's
+     * full-screen health-pack effect changes it every frame -- and baked in,
+     * each new value cost a whole pipeline: 2998 of 3584 pipeline misses in
+     * one replay (FINDINGS BF).
+     */
+    VkDynamicState dynamic_states[4] = { VK_DYNAMIC_STATE_VIEWPORT,
+                                         VK_DYNAMIC_STATE_SCISSOR,
+                                         VK_DYNAMIC_STATE_BLEND_CONSTANTS };
+    int num_dynamic_states = 3;
 
     snode->has_dynamic_line_width =
         (r->enabled_physical_device_features.wideLines == VK_TRUE) &&
@@ -1661,6 +1746,13 @@ static void begin_draw(PGRAPHState *pg)
     }
 
     if (!pg->clearing) {
+        /* Dynamic in every draw pipeline, so it must be set before each
+         * draw; it can change without the pipeline changing. */
+        float blend_constant[4];
+        pgraph_argb_pack32_to_rgba_float(
+            pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR), blend_constant);
+        vkCmdSetBlendConstants(r->command_buffer, blend_constant);
+
         bind_descriptor_sets(pg);
         push_vertex_attr_values(pg);
     }
