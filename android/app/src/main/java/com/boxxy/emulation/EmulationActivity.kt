@@ -83,6 +83,9 @@ const val EXTRA_RELAUNCH_WAIT_PID = "relaunch_wait_pid"
  */
 private const val AUTO_SAVE_MIN_PLAY_MS = 15_000L
 
+/** How long "Compiling shaders" stays up after the last compile. */
+private const val SHADER_BADGE_HOLD_MS = 1000L
+
 class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
     private lateinit var surfaceView: SurfaceView
@@ -218,12 +221,36 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private lateinit var pgraphLine: TextView
     private lateinit var memoryLine: TextView
     private lateinit var shadersLine: TextView
+    private lateinit var shaderBadge: TextView
     private lateinit var cpuLine: TextView
     private lateinit var gpuLine: TextView
     private val usageSampler = UsageSampler()
     private val fpsHandler = Handler(Looper.getMainLooper())
     private var lastFrameCount = 0
     private var lastFpsTime = 0L
+    /* Polled faster than the overlay: a compile burst is often under a
+     * second, and the label should appear while it is happening. */
+    private val shaderBadgeRunnable = object : Runnable {
+        override fun run() {
+            val ms = NativeInterface.getMsSinceShaderCompile()
+            val show = ms in 0 until SHADER_BADGE_HOLD_MS
+            val v = if (show) View.VISIBLE else View.GONE
+            if (shaderBadge.visibility != v) shaderBadge.visibility = v
+            fpsHandler.postDelayed(this, 100)
+        }
+    }
+
+    private fun placeShaderBadge() {
+        val topLeft = (mainPrefs.getString("overlay_position", "TOP_LEFT") ?: "TOP_LEFT") == "TOP_LEFT"
+        val below = topLeft && overlayContainer.visibility == View.VISIBLE
+        val lp = shaderBadge.layoutParams as FrameLayout.LayoutParams
+        val top = if (below) 16.dp + overlayContainer.height + 8.dp else 16.dp
+        if (lp.topMargin != top) {
+            lp.topMargin = top
+            shaderBadge.layoutParams = lp
+        }
+    }
+
     private val fpsRunnable = object : Runnable {
         override fun run() {
             val now = System.currentTimeMillis()
@@ -533,6 +560,29 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             FrameLayout.LayoutParams.WRAP_CONTENT,
         ))
 
+        // ── "Compiling shaders" label (top-left) ──────────────────────────────
+        /* Shown while the renderer is compiling, so a stutter can be told
+         * apart from a slow scene at a glance.  Same scrim as the MENU pill,
+         * square rather than a pill.  Always on: it only appears when a
+         * compile has just happened, which a warm cache makes rare. */
+        shaderBadge = TextView(this).apply {
+            text = "Compiling shaders\u2026"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = rectDrawable(overlayScrimColor())
+            setPadding(12.dp, 6.dp, 12.dp, 6.dp)
+            visibility = View.GONE
+        }
+        root.addView(shaderBadge, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START,
+        ).apply { topMargin = 16.dp; leftMargin = 16.dp })
+        /* Below the perf overlay when that is in the same corner. */
+        overlayContainer.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            v.post { placeShaderBadge() }   /* not mid-layout */
+        }
+
         // ── Menu button pill (top-right corner) ───────────────────────────────
         menuBtn = TextView(this).apply {
             text = "MENU"
@@ -639,6 +689,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         lastFpsTime = 0L
         usageSampler.reset()
         fpsHandler.post(fpsRunnable)
+        fpsHandler.post(shaderBadgeRunnable)
         rumbleHandler.post(rumbleRunnable)
         // Exported (not RECEIVER_NOT_EXPORTED) so `adb shell am broadcast` (uid=shell)
         // can reach it — shell is NOT exempt from the exported-receiver check on this
@@ -671,6 +722,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     override fun onPause() {
         super.onPause()
         fpsHandler.removeCallbacks(fpsRunnable)
+        fpsHandler.removeCallbacks(shaderBadgeRunnable)
         rumbleHandler.removeCallbacks(rumbleRunnable)
         unregisterReceiver(playbackReceiver)
         vibrator.cancel()
@@ -2196,6 +2248,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             rightMargin  = if (position.endsWith("RIGHT"))    margin else 0
         }
         overlayContainer.layoutParams = lp
+        placeShaderBadge()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

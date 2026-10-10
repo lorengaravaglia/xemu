@@ -122,6 +122,7 @@ void xemu_android_set_voice_workers(int n);
 /* Returns the running total of GL shader programs compiled this session.
  * Increments each time pgraph_gl_compile_shader() succeeds. */
 int xemu_android_get_compiled_shader_count(void);
+int64_t xemu_android_ms_since_shader_compile(void);
 
 /* Internal resolution scale factor passed to nv2a_set_surface_scale_factor().
  * Set before or just after startEmulation; applied on first frame after QEMU init.

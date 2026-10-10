@@ -108,6 +108,11 @@ Java_com_boxxy_NativeInterface_getCompiledShaderCount(JNIEnv *env, jclass clazz)
     return xemu_android_get_compiled_shader_count();
 }
 
+JNIEXPORT jlong JNICALL
+Java_com_boxxy_NativeInterface_getMsSinceShaderCompile(JNIEnv *env, jclass clazz) {
+    return xemu_android_ms_since_shader_compile();
+}
+
 JNIEXPORT void JNICALL
 Java_com_boxxy_NativeInterface_setSurface(JNIEnv *env, jclass clazz, jobject surface) {
     if (surface == nullptr) {

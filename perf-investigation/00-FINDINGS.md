@@ -3455,3 +3455,31 @@ unlocked). Every locked deadline lands within 0.2 ms of a real vsync plus
 the phase, at the right step. With rate changes disabled, the two switch
 cases fail, so the test can fail. On the Thor: locked 300/300 every 1 vsync;
 377/377 present intervals exactly 2 vsyncs.
+
+## BE. SHADER COMPILES MADE VISIBLE; THE OVERLAY'S COUNT WAS DEAD ON VULKAN (2026-10-09)
+
+The user sees occasional frame-rate drops in Halo and Halo 2 and could not
+tell whether they were shader compiles. Two findings:
+
+- **The overlay's "Shaders" count was a broken probe on Vulkan,** the default
+  renderer. It read `g_shaders_compiled_count`, which only the OpenGL
+  renderer increments, so on Vulkan it showed 0 whatever happened.
+- **Fix:** one counter and timestamp, `pgraph_note_shader_compile()` in
+  `pgraph.c`, now records real compiles only:
+  - OpenGL program compiles;
+  - Vulkan GLSL->SPIR-V compiles, i.e. SPIR-V disk-cache misses;
+  - Vulkan pipelines taking 2 ms or more. Under 2 ms means the pipeline
+    cache served it; the threshold is `PIPELINE_COMPILED_THRESHOLD_US`.
+- **On screen:** a "Compiling shaders…" label at the top left, below the perf
+  overlay when that shares the corner. It shows for 1 s after any compile
+  (polled at 10 Hz).
+
+**Verified:** Halo from cold, with the Vulkan caches moved aside, showed the
+label during the boot bursts: 45 SPIR-V compiles and 29 pipelines (547 ms).
+From warm it stayed hidden: 0 compiles, 45 disk hits, 29 pipelines in 0 ms.
+The user's caches were restored afterwards (706 SPIR-V files, 14.5 MB
+pipeline cache).
+
+**Next:** a drop that happens without the label is not a compile. That
+splits the Halo/Halo 2 reports into compile stutter (fix: cache coverage or
+async compile) and real load (the C items).

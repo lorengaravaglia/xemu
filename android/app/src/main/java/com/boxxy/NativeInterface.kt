@@ -75,8 +75,11 @@ object NativeInterface {
      */
     external fun getWorstFrameTimeMs(): Int
 
-    /** Returns the running total of GL shader programs compiled this session. */
+    /** Real shader compiles this session (either renderer; cache hits excluded). */
     external fun getCompiledShaderCount(): Int
+
+    /** Milliseconds since the last real shader compile, or -1 if none yet. */
+    external fun getMsSinceShaderCompile(): Long
 
     /**
      * Set the display aspect ratio.

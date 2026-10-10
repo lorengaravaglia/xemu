@@ -1275,5 +1275,6 @@ GLuint pgraph_gl_compile_shader(const char *vs_src, const char *fs_src)
 #endif
 
     g_shaders_compiled_count++;
+    pgraph_note_shader_compile();
     return prog;
 }

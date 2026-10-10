@@ -265,6 +265,7 @@ static void pipeline_created(PGRAPHVkState *r, int64_t start_us)
     if (now - start_us >= PIPELINE_COMPILED_THRESHOLD_US) {
         r->pipeline_cache_dirty = true;
         r->pipeline_cache_last_new_us = now;
+        pgraph_note_shader_compile();      /* the driver compiled it */
     }
 }
 

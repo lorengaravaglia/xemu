@@ -298,6 +298,15 @@ void pgraph_renderer_register(const PGRAPHRenderer *renderer);
 
 extern NV2AState *g_nv2a;
 
+/*
+ * Shader compile activity, for the on-screen "Compiling shaders" label and
+ * the perf overlay's count.  Real compiles only -- shaders or pipelines a
+ * cache served are not counted.  Written by the renderer, read by the UI.
+ */
+extern int g_shader_compiles;
+extern int64_t g_shader_compile_last_us;   /* g_get_monotonic_time(), 0 = never */
+void pgraph_note_shader_compile(void);
+
 // FIXME: Add new function pgraph_is_texture_sampler_active()
 
 static inline uint32_t pgraph_reg_r(PGRAPHState *pg, unsigned int r)

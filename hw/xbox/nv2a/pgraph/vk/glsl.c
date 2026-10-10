@@ -484,6 +484,7 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
         int64_t t2 = g_get_monotonic_time();
         qatomic_inc(&pgraph_vk_cache_stats.spv_compiles);
         qatomic_add(&pgraph_vk_cache_stats.spv_compile_us, t2 - t1);
+        pgraph_note_shader_compile();
         if (use_disk) {
             spv_cache_store(stage, glsl, glsl_len, info->spirv);
         }

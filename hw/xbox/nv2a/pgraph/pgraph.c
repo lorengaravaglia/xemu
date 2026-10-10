@@ -45,6 +45,15 @@
 
 NV2AState *g_nv2a;
 
+int g_shader_compiles;
+int64_t g_shader_compile_last_us;
+
+void pgraph_note_shader_compile(void)
+{
+    qatomic_inc(&g_shader_compiles);
+    qatomic_set(&g_shader_compile_last_us, g_get_monotonic_time());
+}
+
 uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;

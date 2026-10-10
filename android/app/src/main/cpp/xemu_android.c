@@ -639,9 +639,24 @@ ANativeWindow *xemu_android_get_window(void) {
  * custom driver via adrenotools_open_libvulkan(). Falls back to the system
  * loader (returns NULL) on any failure.
  */
-extern int g_shaders_compiled_count;
+/* Real shader compiles this session, either renderer (pgraph.c). */
+extern int g_shader_compiles;
+extern int64_t g_shader_compile_last_us;
 int xemu_android_get_compiled_shader_count(void) {
-    return g_shaders_compiled_count;
+    return g_shader_compiles;
+}
+
+/* Milliseconds since the last real shader compile, or -1 if none yet.
+ * The stamp is g_get_monotonic_time(), i.e. CLOCK_MONOTONIC in us. */
+int64_t xemu_android_ms_since_shader_compile(void) {
+    int64_t last = __atomic_load_n(&g_shader_compile_last_us, __ATOMIC_RELAXED);
+    if (!last) {
+        return -1;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    return (now_us - last) / 1000;
 }
 
 /* Internal resolution scale — stored here, applied in gl_render_frame (ui/xemu.c)
