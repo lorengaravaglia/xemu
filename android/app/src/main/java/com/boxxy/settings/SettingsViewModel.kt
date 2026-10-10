@@ -223,6 +223,19 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
      * by ear (FINDINGS AW).  Applied at the next launch -- the emulation
      * process reads it before it starts.
      */
+    /**
+     * Compile shaders and pipelines on worker threads, skipping the draws
+     * that need them until ready (FINDINGS BG).  On by default: a first-seen
+     * shader otherwise costs ~20 ms on the render thread, a dropped frame.
+     */
+    private val _asyncShaders = MutableStateFlow(prefs.getBoolean("async_shaders", true))
+    val asyncShaders: StateFlow<Boolean> = _asyncShaders
+
+    fun setAsyncShaders(value: Boolean) {
+        _asyncShaders.value = value
+        prefs.edit().putBoolean("async_shaders", value).apply()
+    }
+
     private val _fastBoot = MutableStateFlow(prefs.getBoolean("fast_boot", true))
     val fastBoot: StateFlow<Boolean> = _fastBoot
 

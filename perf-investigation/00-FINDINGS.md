@@ -3528,3 +3528,52 @@ flight. Verified with a cold boot: saves landed and nothing crashed.
 **Not done:** the remaining churn sources (SETUPRASTER, CONTROL_0) are each
 under 3% of misses. The real fix for first-seen compiles is asynchronous
 compilation (next).
+
+## BG. BACKGROUND SHADER COMPILATION: NO FRAME OVER 50 ms FROM A COLD CACHE (2026-10-10)
+
+The fix for the compile stutter in section BF: setting "Compile shaders in
+background", on by default, also overridable per game.
+
+**How it works:**
+- **SPIR-V:** a shader missing from the disk cache is compiled on a worker
+  (`pgraph_vk_create_shader_module_async`). Disk hits stay synchronous.
+- **Pipelines:** first requested with
+  `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT`
+  (`VK_EXT_pipeline_creation_cache_control`, which Turnip 26.2 has). A
+  driver-cache hit is created and drawn at once; only
+  `VK_PIPELINE_COMPILE_REQUIRED` goes to a worker. Without the extension,
+  pipelines stay synchronous.
+- **Skipping:** a draw whose shaders or pipeline are pending is skipped:
+  `begin_pre_draw` returns false, and the four draw paths return.
+  Bookkeeping (draw_time, surface dirty) proceeds as if drawn.
+- **Threading:** two workers (`GThreadPool`). Workers touch only their job.
+  The pfifo thread installs results (`pgraph_vk_drain_compile_jobs`, at
+  `create_pipeline` and the per-frame tick) or discards them if the
+  pipeline entry was evicted (its `pending_job` no longer matches). Jobs
+  hold module refs; finalize waits for all jobs.
+
+**Measured:** Halo, caches moved aside (cold), boot + slot 7, 240-frame
+benchmark, ABBA across processes. Cold needs a fresh process; the effect is
+far larger than drift.
+
+| async | worst frame | frames > 50 ms | skipped draws (whole session) |
+|---|---|---|---|
+| on | 35 ms | 0 | 11,392 |
+| off | 50 ms | 1 | 0 |
+| off | 50 ms | 1 | 0 |
+| on | 35 ms | 0 | 10,949 |
+
+- **Engagement checked:** the setting's log line was present, cache control
+  was on, and the skip counter was non-zero only with async on.
+- **Warm cache, async on:** 13 skipped draws, worst 35 ms, 0 over 50 ms.
+- **The settled image matches async off** (screenshot comparison, slot 7).
+
+**Harness mistake caught:** the first ABBA batch ran on the previously
+installed APK, because the new build was never installed. The cache-stats
+line lacked the new "async" field and the setting's log line was absent,
+which is what exposed it (rule 1). That batch also showed two ~1.2 s single
+frames in 4 runs on the old build. Not seen in 8 runs since; unexplained.
+
+**Trade-off:** a newly seen object or effect can be missing for a frame or
+two, once. Compile throughput is unchanged (~2.1 s of CPU cold for Halo's
+boot), just off the render thread.

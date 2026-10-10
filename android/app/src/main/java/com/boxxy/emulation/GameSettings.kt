@@ -56,6 +56,9 @@ object GameSettings {
         Spec("fast_boot", "Fast boot", "Performance",
              listOf("true" to "On", "false" to "Off"),
              { it.getBoolean("fast_boot", true).toString() }),
+        Spec("async_shaders", "Compile shaders in background", "Performance",
+             listOf("true" to "On", "false" to "Off"),
+             { it.getBoolean("async_shaders", true).toString() }),
         /* C4: games that switch the x87 rounding mode (FINDINGS AK) --
          * Halo and Tony Hawk's Pro Skater 2x, millions of times a run. */
         Spec("x87_rounding", "Accurate x87 rounding", "Compatibility",

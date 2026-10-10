@@ -494,6 +494,55 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     return info;
 }
 
+ShaderModuleInfo *pgraph_vk_create_shader_module_async(
+    PGRAPHVkState *r, VkShaderStageFlagBits stage, const char *glsl)
+{
+    if (!g_vk_async_compile || !spv_disk_cache_enabled()) {
+        return pgraph_vk_create_shader_module_from_glsl(r, stage, glsl);
+    }
+    ShaderModuleInfo *info = g_malloc0(sizeof(*info));
+    info->glsl = strdup(glsl);
+
+    size_t glsl_len = strlen(glsl);
+    int64_t t0 = g_get_monotonic_time();
+    info->spirv = spv_cache_load(stage, glsl, glsl_len);
+    if (info->spirv) {
+        qatomic_inc(&pgraph_vk_cache_stats.spv_disk_hits);
+        qatomic_add(&pgraph_vk_cache_stats.spv_disk_us,
+                    g_get_monotonic_time() - t0);
+        info->module = pgraph_vk_create_shader_module_from_spv(r, info->spirv);
+        init_layout_from_spv(info);
+        return info;
+    }
+    info->pending = true;
+    pgraph_vk_queue_module_compile(r, info, stage);
+    return info;
+}
+
+void pgraph_vk_compile_module(PGRAPHVkState *r, VkShaderStageFlagBits stage,
+                              const char *glsl, GByteArray **spirv,
+                              VkShaderModule *module)
+{
+    int64_t t0 = g_get_monotonic_time();
+    *spirv = pgraph_vk_compile_glsl_to_spv(
+        vk_shader_stage_to_glslang_stage(stage), glsl);
+    qatomic_inc(&pgraph_vk_cache_stats.spv_compiles);
+    qatomic_add(&pgraph_vk_cache_stats.spv_compile_us,
+                g_get_monotonic_time() - t0);
+    pgraph_note_shader_compile();
+    spv_cache_store(stage, glsl, strlen(glsl), *spirv);
+    *module = pgraph_vk_create_shader_module_from_spv(r, *spirv);
+}
+
+void pgraph_vk_finish_module(ShaderModuleInfo *info, GByteArray *spirv,
+                             VkShaderModule module)
+{
+    info->spirv = spirv;
+    info->module = module;
+    init_layout_from_spv(info);
+    info->pending = false;
+}
+
 static void finalize_uniform_layout(ShaderUniformLayout *layout)
 {
     for (int i = 0; i < layout->num_uniforms; i++) {

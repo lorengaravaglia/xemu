@@ -181,6 +181,12 @@ Java_com_boxxy_NativeInterface_setFastBoot(JNIEnv *env, jclass clazz,
 }
 
 JNIEXPORT void JNICALL
+Java_com_boxxy_NativeInterface_setAsyncShaders(JNIEnv *env, jclass clazz,
+                                               jboolean enabled) {
+    xemu_android_set_async_shaders((bool)enabled);
+}
+
+JNIEXPORT void JNICALL
 Java_com_boxxy_NativeInterface_setWidescreen(JNIEnv *env, jclass clazz,
                                              jboolean enabled) {
     xemu_android_set_widescreen((bool)enabled);

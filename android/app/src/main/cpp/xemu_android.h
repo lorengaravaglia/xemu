@@ -131,6 +131,7 @@ void xemu_android_set_surface_scale(unsigned int scale);
 void xemu_android_set_accurate_mem_ordering(bool enabled);
 void xemu_android_set_ldapr(bool enabled);
 void xemu_android_set_fast_boot(bool enabled);
+void xemu_android_set_async_shaders(bool enabled);
 void xemu_android_set_x87_rounding(bool enabled);
 void xemu_android_set_widescreen(bool enabled);
 bool xemu_android_widescreen_enabled(void);

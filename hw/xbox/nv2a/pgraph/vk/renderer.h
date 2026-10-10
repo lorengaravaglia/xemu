@@ -78,6 +78,7 @@ typedef struct PipelineBinding {
     VkRenderPass render_pass;
     unsigned int draw_time;
     bool has_dynamic_line_width;
+    struct CompileJob *pending_job;   /* compiling in the background */
 } PipelineBinding;
 
 enum Buffer {
@@ -147,6 +148,7 @@ typedef struct SurfaceBinding {
 
 typedef struct ShaderModuleInfo {
     int refcnt;
+    bool pending;           /* compiling in the background (draw.c) */
     char *glsl;
     GByteArray *spirv;
     VkShaderModule module;
@@ -164,6 +166,7 @@ typedef struct PGRAPHVkCacheStats {
     uint64_t pipelines, pipeline_us;
     uint64_t pipeline_cache_saves, pipeline_cache_save_us;
     uint64_t pipeline_cache_bytes;
+    uint64_t skipped_draws;     /* waiting on a background compile */
 } PGRAPHVkCacheStats;
 extern PGRAPHVkCacheStats pgraph_vk_cache_stats;
 
@@ -205,6 +208,7 @@ typedef struct ShaderBinding {
         ShaderModuleInfo *module_info;
         PshUniformLocs uniform_locs;
     } psh;
+    bool locs_pending;      /* uniform locations wait for pending modules */
 } ShaderBinding;
 
 typedef struct TextureKey {
@@ -354,6 +358,11 @@ typedef struct PGRAPHVkState {
     bool debug_utils_extension_enabled;
     bool custom_border_color_extension_enabled;
     bool memory_budget_extension_enabled;
+    bool pipeline_cache_control_enabled;
+
+    /* Background shader/pipeline compilation (draw.c). */
+    GThreadPool *compile_pool;
+    GAsyncQueue *compile_done;
 
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;
@@ -496,6 +505,17 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
 void pgraph_vk_ref_shader_module(ShaderModuleInfo *info);
 void pgraph_vk_unref_shader_module(PGRAPHVkState *r, ShaderModuleInfo *info);
 void pgraph_vk_destroy_shader_module(PGRAPHVkState *r, ShaderModuleInfo *info);
+/* Background compilation: a disk-cache hit (or async off) returns a ready
+ * module as above; a miss returns a pending one and queues its compile. */
+ShaderModuleInfo *pgraph_vk_create_shader_module_async(
+    PGRAPHVkState *r, VkShaderStageFlagBits stage, const char *glsl);
+/* Worker side: GLSL -> SPIR-V (+ disk cache store) -> VkShaderModule. */
+void pgraph_vk_compile_module(PGRAPHVkState *r, VkShaderStageFlagBits stage,
+                              const char *glsl, GByteArray **spirv,
+                              VkShaderModule *module);
+/* pfifo side: install a finished compile into its pending module. */
+void pgraph_vk_finish_module(ShaderModuleInfo *info, GByteArray *spirv,
+                             VkShaderModule module);
 
 // buffer.c
 void pgraph_vk_init_buffers(NV2AState *d);
@@ -584,6 +604,7 @@ void pgraph_vk_init_shaders(PGRAPHState *pg);
 void pgraph_vk_finalize_shaders(PGRAPHState *pg);
 void pgraph_vk_update_descriptor_sets(PGRAPHState *pg);
 void pgraph_vk_bind_shaders(PGRAPHState *pg);
+bool pgraph_vk_shader_binding_ready(ShaderBinding *binding);
 
 // reports.c
 void pgraph_vk_init_reports(PGRAPHState *pg);
@@ -606,6 +627,13 @@ typedef enum FinishReason {
 } FinishReason;
 
 // draw.c
+/* Compile shaders and pipelines in the background, skipping draws until
+ * they are ready (set per launch, before emulation starts). */
+extern int g_vk_async_compile;
+void pgraph_vk_queue_module_compile(PGRAPHVkState *r, ShaderModuleInfo *info,
+                                    VkShaderStageFlagBits stage);
+void pgraph_vk_drain_compile_jobs(PGRAPHVkState *r);
+void pgraph_vk_finalize_compile_jobs(PGRAPHVkState *r);
 void pgraph_vk_init_pipelines(PGRAPHState *pg);
 void pgraph_vk_pipeline_cache_tick(PGRAPHState *pg);
 void pgraph_vk_finalize_pipelines(PGRAPHState *pg);

@@ -101,6 +101,7 @@ static void pipeline_cache_entry_init(Lru *lru, LruNode *node,
     snode->layout = VK_NULL_HANDLE;
     snode->pipeline = VK_NULL_HANDLE;
     snode->draw_time = 0;
+    snode->pending_job = NULL;
 }
 
 static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
@@ -111,6 +112,10 @@ static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
     assert((!r->in_command_buffer ||
             snode->draw_time < r->command_buffer_start_time) &&
            "Pipeline evicted while in use!");
+
+    /* A compile still running for it: orphan the job, whose result is
+     * then destroyed when it is drained. */
+    snode->pending_job = NULL;
 
     vkDestroyPipeline(r->device, snode->pipeline, NULL);
     snode->pipeline = VK_NULL_HANDLE;
@@ -223,28 +228,35 @@ static void log_cache_stats(void)
             "vk-cache: glsl gen %" PRIu64 " ms | spv compiled %" PRIu64 " (%" PRIu64 " ms)"
             " disk-hit %" PRIu64 " (%" PRIu64 " ms)"
             " | pipelines %" PRIu64 " (%" PRIu64 " ms)"
-            " | pcache saves %" PRIu64 " (%" PRIu64 " ms, %" PRIu64 " KB)\n",
+            " | pcache saves %" PRIu64 " (%" PRIu64 " ms, %" PRIu64 " KB)"
+            " | async %s, skipped draws %" PRIu64 "\n",
             s->glsl_gen_us / 1000,
             s->spv_compiles, s->spv_compile_us / 1000,
             s->spv_disk_hits, s->spv_disk_us / 1000,
             s->pipelines, s->pipeline_us / 1000,
             s->pipeline_cache_saves, s->pipeline_cache_save_us / 1000,
-            s->pipeline_cache_bytes / 1024);
+            s->pipeline_cache_bytes / 1024,
+            g_vk_async_compile ? "on" : "off", s->skipped_draws);
 }
 
 /* Called once per frame on the pfifo thread, after the display is released. */
 void pgraph_vk_pipeline_cache_tick(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
-    static uint64_t logged_pipelines;
+    static uint64_t logged_pipelines, logged_skips;
     static int64_t last_log_us;
     int64_t now = g_get_monotonic_time();
 
-    /* Stats line whenever pipelines were created, at most every 10 s. */
+    pgraph_vk_drain_compile_jobs(r);
+
+    /* Stats line whenever pipelines were created or draws skipped, at most
+     * every 10 s. */
     uint64_t pipelines = qatomic_read(&pgraph_vk_cache_stats.pipelines);
-    if (pipelines != logged_pipelines &&
+    uint64_t skips = qatomic_read(&pgraph_vk_cache_stats.skipped_draws);
+    if ((pipelines != logged_pipelines || skips != logged_skips) &&
         now - last_log_us >= 10 * G_USEC_PER_SEC) {
         logged_pipelines = pipelines;
+        logged_skips = skips;
         last_log_us = now;
         log_cache_stats();
     }
@@ -267,6 +279,16 @@ void pgraph_vk_pipeline_cache_tick(PGRAPHState *pg)
  * dirty the cache -- otherwise every warm session re-saves an identical blob.
  */
 #define PIPELINE_COMPILED_THRESHOLD_US 2000
+
+/* A background pipeline compile was installed: count it, and save the
+ * cache once things settle, as for a slow inline one. */
+static void pipeline_compiled_async(PGRAPHVkState *r, int64_t us)
+{
+    qatomic_inc(&pgraph_vk_cache_stats.pipelines);
+    qatomic_add(&pgraph_vk_cache_stats.pipeline_us, us);
+    r->pipeline_cache_dirty = true;
+    r->pipeline_cache_last_new_us = g_get_monotonic_time();
+}
 
 static void pipeline_created(PGRAPHVkState *r, int64_t start_us)
 {
@@ -416,6 +438,8 @@ void pgraph_vk_init_pipelines(PGRAPHState *pg)
 void pgraph_vk_finalize_pipelines(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    pgraph_vk_finalize_compile_jobs(r);
 
     finalize_clear_shaders(pg);
     finalize_pipeline_cache(pg);
@@ -877,6 +901,210 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
 }
 
 /*
+ * Background compilation (setting "Compile shaders in background").
+ *
+ * A shader the SPIR-V disk cache lacks (~18 ms to compile) or a pipeline the
+ * driver's cache lacks (~20 ms) used to be built inline on the pfifo thread,
+ * and either one overran a 33 ms frame: the stutter the user saw coincide
+ * with "Compiling shaders" (FINDINGS BE/BF).  With this on, such work goes to
+ * worker threads and the draws that need it are skipped until it is ready --
+ * a frame or two of a missing object instead of a hitch, once per new shader.
+ *
+ * Only real compiles are deferred: SPIR-V found on disk is used at once, and
+ * pipelines are first requested with FAIL_ON_PIPELINE_COMPILE_REQUIRED, so a
+ * pipeline the driver has cached is created and drawn immediately.  Without
+ * that extension, pipelines stay synchronous (shaders are still deferred).
+ *
+ * Threading: workers touch only their job.  The LRUs, module refcounts and
+ * PipelineBindings belong to the pfifo thread, which installs finished jobs in
+ * pgraph_vk_drain_compile_jobs() -- or discards them, if the pipeline entry
+ * was evicted meanwhile (its pending_job no longer points at the job).
+ */
+int g_vk_async_compile;
+
+typedef struct PipelineCreateCopy {
+    VkPipelineShaderStageCreateInfo stages[3];
+    VkVertexInputBindingDescription bindings[NV2A_VERTEXSHADER_ATTRIBUTES];
+    VkVertexInputAttributeDescription attributes[NV2A_VERTEXSHADER_ATTRIBUTES];
+    VkPipelineVertexInputStateCreateInfo vertex_input;
+    VkPipelineInputAssemblyStateCreateInfo input_assembly;
+    VkPipelineViewportStateCreateInfo viewport;
+    VkPipelineRasterizationStateCreateInfo rasterizer;
+    VkPipelineMultisampleStateCreateInfo multisampling;
+    VkPipelineDepthStencilStateCreateInfo depth_stencil;
+    VkPipelineColorBlendAttachmentState blend_attachment;
+    VkPipelineColorBlendStateCreateInfo blending;
+    VkDynamicState dynamic_states[4];
+    VkPipelineDynamicStateCreateInfo dynamic;
+    VkGraphicsPipelineCreateInfo info;
+} PipelineCreateCopy;
+
+typedef struct CompileJob {
+    bool is_pipeline;
+    PGRAPHVkState *r;
+    int64_t us;                         /* worker time */
+
+    /* Shader module */
+    ShaderModuleInfo *module_info;      /* ref held until drained */
+    VkShaderStageFlagBits stage;
+    char *glsl;
+    GByteArray *spirv;
+    VkShaderModule module;
+
+    /* Pipeline */
+    PipelineBinding *snode;
+    ShaderModuleInfo *stage_modules[3]; /* refs held until drained */
+    int num_stage_modules;
+    PipelineCreateCopy create;          /* owns the layout until installed */
+    VkPipeline pipeline;
+    VkResult result;
+} CompileJob;
+
+/* Deep copy, so the create info outlives create_pipeline's stack frame. */
+static void copy_pipeline_create_info(PipelineCreateCopy *c,
+                                      const VkGraphicsPipelineCreateInfo *in)
+{
+    c->info = *in;
+    c->info.flags &= ~VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT;
+
+    memcpy(c->stages, in->pStages, in->stageCount * sizeof(c->stages[0]));
+    c->info.pStages = c->stages;
+
+    c->vertex_input = *in->pVertexInputState;
+    memcpy(c->bindings, c->vertex_input.pVertexBindingDescriptions,
+           c->vertex_input.vertexBindingDescriptionCount * sizeof(c->bindings[0]));
+    memcpy(c->attributes, c->vertex_input.pVertexAttributeDescriptions,
+           c->vertex_input.vertexAttributeDescriptionCount *
+               sizeof(c->attributes[0]));
+    c->vertex_input.pVertexBindingDescriptions = c->bindings;
+    c->vertex_input.pVertexAttributeDescriptions = c->attributes;
+    c->info.pVertexInputState = &c->vertex_input;
+
+    c->input_assembly = *in->pInputAssemblyState;
+    c->info.pInputAssemblyState = &c->input_assembly;
+    c->viewport = *in->pViewportState;
+    c->info.pViewportState = &c->viewport;
+    c->rasterizer = *in->pRasterizationState;
+    c->rasterizer.pNext = NULL;
+    c->info.pRasterizationState = &c->rasterizer;
+    c->multisampling = *in->pMultisampleState;
+    c->info.pMultisampleState = &c->multisampling;
+    if (in->pDepthStencilState) {
+        c->depth_stencil = *in->pDepthStencilState;
+        c->info.pDepthStencilState = &c->depth_stencil;
+    }
+    c->blending = *in->pColorBlendState;
+    if (c->blending.attachmentCount) {
+        c->blend_attachment = c->blending.pAttachments[0];
+        c->blending.pAttachments = &c->blend_attachment;
+    }
+    c->info.pColorBlendState = &c->blending;
+    c->dynamic = *in->pDynamicState;
+    memcpy(c->dynamic_states, c->dynamic.pDynamicStates,
+           c->dynamic.dynamicStateCount * sizeof(c->dynamic_states[0]));
+    c->dynamic.pDynamicStates = c->dynamic_states;
+    c->info.pDynamicState = &c->dynamic;
+}
+
+static void compile_worker(gpointer data, gpointer user_data)
+{
+    CompileJob *j = data;
+    PGRAPHVkState *r = j->r;
+    int64_t t0 = g_get_monotonic_time();
+
+    if (j->is_pipeline) {
+        j->result = vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache,
+                                              1, &j->create.info, NULL,
+                                              &j->pipeline);
+        pgraph_note_shader_compile();
+    } else {
+        pgraph_vk_compile_module(r, j->stage, j->glsl, &j->spirv, &j->module);
+    }
+    j->us = g_get_monotonic_time() - t0;
+    g_async_queue_push(r->compile_done, j);
+}
+
+static void queue_compile_job(PGRAPHVkState *r, CompileJob *j)
+{
+    if (!r->compile_pool) {
+        r->compile_done = g_async_queue_new();
+        /* Two workers: the vCPU and NV2A threads keep their own cores. */
+        r->compile_pool = g_thread_pool_new(compile_worker, NULL, 2, TRUE, NULL);
+    }
+    j->r = r;
+    pgraph_note_shader_compile();   /* label up while it runs */
+    g_thread_pool_push(r->compile_pool, j, NULL);
+}
+
+void pgraph_vk_queue_module_compile(PGRAPHVkState *r, ShaderModuleInfo *info,
+                                    VkShaderStageFlagBits stage)
+{
+    CompileJob *j = g_new0(CompileJob, 1);
+    j->module_info = info;
+    pgraph_vk_ref_shader_module(info);
+    j->stage = stage;
+    j->glsl = g_strdup(info->glsl);
+    queue_compile_job(r, j);
+}
+
+static void pipeline_compiled_async(PGRAPHVkState *r, int64_t us);
+
+/* pfifo thread: install whatever has finished.  Cheap when nothing has. */
+void pgraph_vk_drain_compile_jobs(PGRAPHVkState *r)
+{
+    if (!r->compile_done) {
+        return;
+    }
+    CompileJob *j;
+    while ((j = g_async_queue_try_pop(r->compile_done))) {
+        if (!j->is_pipeline) {
+            pgraph_vk_finish_module(j->module_info, j->spirv, j->module);
+            pgraph_vk_unref_shader_module(r, j->module_info);
+            g_free(j->glsl);
+        } else {
+            bool live = j->snode && j->snode->pending_job == j;
+            if (live && j->result == VK_SUCCESS) {
+                j->snode->pipeline = j->pipeline;
+                j->snode->layout = j->create.info.layout;
+                j->snode->render_pass = j->create.info.renderPass;
+                j->snode->pending_job = NULL;
+                pipeline_compiled_async(r, j->us);
+            } else {
+                if (j->result == VK_SUCCESS) {
+                    vkDestroyPipeline(r->device, j->pipeline, NULL);
+                } else {
+                    fprintf(stderr, "vk: background pipeline compile failed "
+                                    "(%d)\\n", j->result);
+                }
+                vkDestroyPipelineLayout(r->device, j->create.info.layout, NULL);
+                if (live) {
+                    /* Failed: forget it; the next draw tries again inline. */
+                    j->snode->pending_job = NULL;
+                }
+            }
+            for (int i = 0; i < j->num_stage_modules; i++) {
+                pgraph_vk_unref_shader_module(r, j->stage_modules[i]);
+            }
+        }
+        g_free(j);
+    }
+}
+
+/* Renderer teardown: let running and queued jobs finish, then install or
+ * discard them while the device still exists. */
+void pgraph_vk_finalize_compile_jobs(PGRAPHVkState *r)
+{
+    if (!r->compile_pool) {
+        return;
+    }
+    g_thread_pool_free(r->compile_pool, FALSE, TRUE);
+    r->compile_pool = NULL;
+    pgraph_vk_drain_compile_jobs(r);
+    g_async_queue_unref(r->compile_done);
+    r->compile_done = NULL;
+}
+
+/*
  * Diagnostic (debug.xemu.pipe_diff=1): for each new pipeline, look for an
  * existing one that differs in a single key component -- that component
  * alone is why another pipeline was needed.  Tallies are logged every 256
@@ -943,15 +1171,24 @@ static void pipe_diff_note(PGRAPHVkState *r, const PipelineKey *key)
     }
 }
 
-static void create_pipeline(PGRAPHState *pg)
+/* Returns false when the draw must be skipped: its shaders or pipeline are
+ * still compiling in the background (g_vk_async_compile). */
+static bool create_pipeline(PGRAPHState *pg)
 {
     NV2A_VK_DGROUP_BEGIN("Creating pipeline");
 
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    pgraph_vk_drain_compile_jobs(r);
     pgraph_vk_bind_textures(d);
     pgraph_vk_bind_shaders(pg);
+
+    if (!pgraph_vk_shader_binding_ready(r->shader_binding)) {
+        r->pipeline_binding = NULL;   /* forces a full lookup next draw */
+        NV2A_VK_DGROUP_END();
+        return false;
+    }
 
     // FIXME: If nothing was dirty, don't even try creating the key or hashing.
     //        Just use the same pipeline.
@@ -963,7 +1200,7 @@ static void create_pipeline(PGRAPHState *pg)
     if (r->pipeline_binding && !pipeline_dirty) {
         NV2A_VK_DPRINTF("Cache hit");
         NV2A_VK_DGROUP_END();
-        return;
+        return true;
     }
 
     PipelineKey key;
@@ -977,7 +1214,12 @@ static void create_pipeline(PGRAPHState *pg)
         r->pipeline_binding_changed = r->pipeline_binding != snode;
         r->pipeline_binding = snode;
         NV2A_VK_DGROUP_END();
-        return;
+        return true;
+    }
+    if (snode->pending_job) {
+        r->pipeline_binding = NULL;
+        NV2A_VK_DGROUP_END();
+        return false;
     }
 
     NV2A_VK_DPRINTF("Cache miss");
@@ -1262,8 +1504,41 @@ static void create_pipeline(PGRAPHState *pg)
     };
     VkPipeline pipeline;
     int64_t create_start_us = g_get_monotonic_time();
-    VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
-                                       &pipeline_create_info, NULL, &pipeline));
+    if (g_vk_async_compile && r->pipeline_cache_control_enabled) {
+        /* Cached by the driver: created now.  Otherwise compile it in the
+         * background and skip the draws that need it until it is ready. */
+        pipeline_create_info.flags |=
+            VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT;
+        VkResult res = vkCreateGraphicsPipelines(
+            r->device, r->vk_pipeline_cache, 1, &pipeline_create_info, NULL,
+            &pipeline);
+        if (res == VK_PIPELINE_COMPILE_REQUIRED_EXT) {
+            CompileJob *j = g_new0(CompileJob, 1);
+            j->is_pipeline = true;
+            j->snode = snode;
+            copy_pipeline_create_info(&j->create, &pipeline_create_info);
+            ShaderBinding *b = r->shader_binding;
+            ShaderModuleInfo *mods[3] = { b->vsh.module_info,
+                                          b->geom.module_info,
+                                          b->psh.module_info };
+            for (int i = 0; i < 3; i++) {
+                if (mods[i]) {
+                    pgraph_vk_ref_shader_module(mods[i]);
+                    j->stage_modules[j->num_stage_modules++] = mods[i];
+                }
+            }
+            snode->pending_job = j;
+            queue_compile_job(r, j);
+            r->pipeline_binding = NULL;
+            NV2A_VK_DGROUP_END();
+            return false;
+        }
+        VK_CHECK(res);
+    } else {
+        VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
+                                           &pipeline_create_info, NULL,
+                                           &pipeline));
+    }
     pipeline_created(r, create_start_us);
 
     snode->pipeline = pipeline;
@@ -1275,6 +1550,7 @@ static void create_pipeline(PGRAPHState *pg)
     r->pipeline_binding_changed = true;
 
     NV2A_VK_DGROUP_END();
+    return true;
 }
 
 static void push_vertex_attr_values(PGRAPHState *pg)
@@ -1615,7 +1891,8 @@ void pgraph_vk_end_nondraw_commands(PGRAPHState *pg, VkCommandBuffer cmd)
 // buffer. For other reasons though (like descriptor set amount, surface
 // changes, etc) we do flush often.
 
-static void begin_pre_draw(PGRAPHState *pg)
+/* Returns false if the draw is to be skipped (create_pipeline). */
+static bool begin_pre_draw(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
@@ -1625,8 +1902,8 @@ static void begin_pre_draw(PGRAPHState *pg)
 
     if (pg->clearing) {
         create_clear_pipeline(pg);
-    } else {
-        create_pipeline(pg);
+    } else if (!create_pipeline(pg)) {
+        return false;
     }
 
     bool render_pass_dirty = r->pipeline_binding->render_pass != r->render_pass;
@@ -1649,6 +1926,7 @@ static void begin_pre_draw(PGRAPHState *pg)
     }
 
     pgraph_vk_ensure_command_buffer(pg);
+    return true;
 }
 
 static float clamp_line_width_to_device_limits(PGRAPHState *pg, float width)
@@ -2320,7 +2598,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
         sync_vertex_ram_buffer(pg);
         VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element);
 
-        begin_pre_draw(pg);
+        if (!begin_pre_draw(pg)) {
+            /* Shaders/pipeline still compiling in the background. */
+            qatomic_inc(&pgraph_vk_cache_stats.skipped_draws);
+            NV2A_VK_DGROUP_END();
+            return;
+        }
         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
                                      "Draw Arrays");
@@ -2360,7 +2643,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
         sync_vertex_ram_buffer(pg);
         VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element + 1);
 
-        begin_pre_draw(pg);
+        if (!begin_pre_draw(pg)) {
+            /* Shaders/pipeline still compiling in the background. */
+            qatomic_inc(&pgraph_vk_cache_stats.skipped_draws);
+            NV2A_VK_DGROUP_END();
+            return;
+        }
         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element + 1);
         VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
             pg, pg->inline_elements, index_data_size);
@@ -2402,7 +2690,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
         }
         ensure_buffer_space(pg, BUFFER_VERTEX_INLINE_STAGING, offset);
 
-        begin_pre_draw(pg);
+        if (!begin_pre_draw(pg)) {
+            /* Shaders/pipeline still compiling in the background. */
+            qatomic_inc(&pgraph_vk_cache_stats.skipped_draws);
+            NV2A_VK_DGROUP_END();
+            return;
+        }
         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
             pg, data, sizes, r->num_active_vertex_attribute_descriptions);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
@@ -2445,7 +2738,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
         pgraph_vk_bind_vertex_attributes(d, 0, index_count - 1, true,
                                          vertex_size, index_count - 1);
 
-        begin_pre_draw(pg);
+        if (!begin_pre_draw(pg)) {
+            /* Shaders/pipeline still compiling in the background. */
+            qatomic_inc(&pgraph_vk_cache_stats.skipped_draws);
+            NV2A_VK_DGROUP_END();
+            return;
+        }
         void *inline_array_data = pg->inline_array;
         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
             pg, &inline_array_data, &inline_array_data_size, 1);

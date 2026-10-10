@@ -2218,6 +2218,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
          * before startEmulation(), which the surface callback runs after
          * this. */
         NativeInterface.setFastBoot(gameBool("fast_boot", true))
+        NativeInterface.setAsyncShaders(gameBool("async_shaders", true))
         NativeInterface.setX87Rounding(gameBool("x87_rounding", false))
         /* Into the EEPROM before the machine reads it (qemu_init). */
         NativeInterface.setWidescreen(gameBool("xbox_widescreen", false))

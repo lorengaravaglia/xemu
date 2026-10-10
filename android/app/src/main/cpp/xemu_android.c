@@ -764,6 +764,18 @@ void xemu_android_set_fast_boot(bool enabled) {
 }
 
 /*
+ * Background shader compilation (Vulkan renderer, pgraph/vk/draw.c): shaders
+ * and pipelines no cache has are compiled on worker threads and the draws
+ * that need them skipped until ready, instead of stalling the frame
+ * (FINDINGS BG).  Set before emulation starts.
+ */
+void xemu_android_set_async_shaders(bool enabled) {
+    extern int g_vk_async_compile;
+    g_vk_async_compile = enabled;
+    LOGI("background shader compilation: %s", enabled ? "on" : "off");
+}
+
+/*
  * The Xbox's own widescreen setting (EEPROM VideoFlags), applied per launch
  * from Boxxy's (per-game) setting.  Games that support widescreen read it and
  * render 16:9; the kernel then reports it, and Auto aspect shows 16:9.

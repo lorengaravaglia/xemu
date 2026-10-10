@@ -21,6 +21,7 @@ fun GraphicsSettingsScreen(
 ) {
     val context = LocalContext.current
     val renderer      by settingsViewModel.renderer.collectAsState()
+    val asyncShaders  by settingsViewModel.asyncShaders.collectAsState()
     val driverEnabled by settingsViewModel.driverEnabled.collectAsState()
     val driverLabel   by settingsViewModel.driverLabel.collectAsState()
     val aspectRatio   by settingsViewModel.aspectRatio.collectAsState()
@@ -202,6 +203,16 @@ fun GraphicsSettingsScreen(
                             )
                         },
                     )
+                    HorizontalDivider()
+                    SettingsSwitchRow(
+                        label = "Compile shaders in background",
+                        subtitle = "Removes the stutter when a game shows " +
+                                   "something new. An object or effect may " +
+                                   "be missing for a frame or two the first " +
+                                   "time it appears. Vulkan only; applies " +
+                                   "the next time a game starts.",
+                        checked = asyncShaders,
+                    ) { settingsViewModel.setAsyncShaders(it) }
                 }
             }
 

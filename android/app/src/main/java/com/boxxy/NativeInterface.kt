@@ -117,6 +117,9 @@ object NativeInterface {
 
     /** Skip the Xbox kernel's startup busy-waits; must precede startEmulation. */
     external fun setFastBoot(enabled: Boolean)
+
+    /** Background shader compilation (Vulkan); set before startEmulation(). */
+    external fun setAsyncShaders(enabled: Boolean)
     /** Honour the guest's x87 rounding mode (C4). Before startEmulation(). */
     external fun setX87Rounding(enabled: Boolean)
     /** The Xbox's widescreen setting (EEPROM VideoFlags). Before startEmulation(). */

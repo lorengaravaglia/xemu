@@ -294,7 +294,25 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     key.psh.glsl_opts.tex_binding = PSH_TEX_BINDING;
     binding->psh.module_info = get_and_ref_shader_module_for_key(r, &key);
 
-    update_shader_uniform_locs(binding);
+    /* Locations come from the compiled modules' layouts; with background
+     * compilation they may not exist yet (pgraph_vk_shader_binding_ready). */
+    binding->locs_pending = true;
+    pgraph_vk_shader_binding_ready(binding);
+}
+
+/* True once every module of the binding has compiled; fills in the uniform
+ * locations the first time that is so. */
+bool pgraph_vk_shader_binding_ready(ShaderBinding *binding)
+{
+    if (binding->vsh.module_info->pending || binding->psh.module_info->pending ||
+        (binding->geom.module_info && binding->geom.module_info->pending)) {
+        return false;
+    }
+    if (binding->locs_pending) {
+        update_shader_uniform_locs(binding);
+        binding->locs_pending = false;
+    }
+    return true;
 }
 
 static void shader_cache_entry_post_evict(Lru *lru, LruNode *node)
@@ -352,7 +370,7 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
     qatomic_add(&pgraph_vk_cache_stats.glsl_gen_us,
                 g_get_monotonic_time() - gen_start_us);
 
-    module->module_info = pgraph_vk_create_shader_module_from_glsl(
+    module->module_info = pgraph_vk_create_shader_module_async(
         r, module->key.kind, mstring_get_str(code));
     pgraph_vk_ref_shader_module(module->module_info);
     mstring_unref(code);
@@ -515,6 +533,13 @@ void pgraph_vk_bind_shaders(PGRAPHState *pg)
         }
     } else {
         nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);
+    }
+
+    /* Still compiling: the draw will be skipped (create_pipeline), and the
+     * uniforms are rebuilt from state in full on the first ready draw. */
+    if (!pgraph_vk_shader_binding_ready(r->shader_binding)) {
+        NV2A_VK_DGROUP_END();
+        return;
     }
 
     update_shader_uniforms(pg);

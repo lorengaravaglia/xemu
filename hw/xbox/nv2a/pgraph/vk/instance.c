@@ -366,6 +366,12 @@ static void add_optional_device_extension_names(
     r->memory_budget_extension_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
         VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+
+    /* Lets a pipeline be created only if the cache already has it, so
+     * background compilation (draw.c) defers just the real compiles. */
+    r->pipeline_cache_control_enabled = add_extension_if_available(
+        available_extensions, enabled_extension_names,
+        VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME);
 }
 
 static bool check_device_support_required_extensions(VkPhysicalDevice device)
@@ -563,6 +569,31 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         };
         next_struct = &custom_border_features;
     }
+
+    VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT cache_control_features;
+    if (r->pipeline_cache_control_enabled) {
+        VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT query = {
+            .sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT,
+        };
+        VkPhysicalDeviceFeatures2 features2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &query,
+        };
+        vkGetPhysicalDeviceFeatures2(r->physical_device, &features2);
+        r->pipeline_cache_control_enabled = query.pipelineCreationCacheControl;
+    }
+    if (r->pipeline_cache_control_enabled) {
+        cache_control_features = (VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT){
+            .sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT,
+            .pipelineCreationCacheControl = VK_TRUE,
+            .pNext = next_struct,
+        };
+        next_struct = &cache_control_features;
+    }
+    fprintf(stderr, "vk: pipeline creation cache control %s\n",
+            r->pipeline_cache_control_enabled ? "on" : "unavailable");
 
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
