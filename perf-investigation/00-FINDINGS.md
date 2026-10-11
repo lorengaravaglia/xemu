@@ -3841,3 +3841,80 @@ throughout). On battery, from 35.5 °C, same 20-minute soak:
   apps targeting API 23+ cannot write.
 - The practical route is to tell the player: suggest Fan → Customize →
   max for heavy games.
+
+---
+
+## BK. THE PFIFO THREAD RE-HASHES CLEAN TEXTURES; FIXING IT EXPOSES LOCK WAITS (2026-10-11)
+
+**Where the process's CPU goes on slot 1** (simpleperf, 12 s, heavy part;
+41,351 samples ≈ 1.72 cores):
+- vCPU: generated code 38%, our C code 15%. Helpers are therefore **28%
+  of vCPU time**, not the 14-18% in C6's note.
+- NV2A pfifo thread: ~29% (46% of a core).
+- APU: ~9%.
+- Our compiled C code is ~41% of the process, all of it already `-O3
+  -march=armv8.2-a -mtune=cortex-x3`. XXH3 is NEON-vectorized already.
+
+**The pfifo thread's biggest symbol is XXH3, at 30.6%.** It comes from
+texture validation in `pgraph_vk_bind_textures`. New per-10 s counters
+(`vk-tex:` log line) give the cause:
+
+| | first slot-1 load after launch | after a second load |
+|---|---|---|
+| texture binds | ~540,000 | ~540,000 |
+| content hashes | 300 | **517,000** |
+| … re-hashing an already-hashed range, no write since | 0 | **517,000** |
+| … contents unchanged | 0 | **517,000** |
+| bytes hashed | 24 MB | **23 GB (2.3 GB/s)** |
+| real uploads | ~300 | ~300 |
+| single-page dirty tests | 6.4 M | 6.4 M |
+
+**Bug:**
+- On a cache hit, nothing clears `possibly_dirty` or the dirty range after
+  hashing. Upstream xemu has the same (only the cache-miss path resets it).
+- Once a write touches a cached texture, every later bind re-hashes it.
+  A state load rewriting VRAM triggers this, and so would streaming.
+- Section 4296658096's per-page scheme made each hash cover only the
+  range, but the range is never consumed.
+- The first-load measurement looks clean because new textures start clean.
+
+**Fix, measured in one process** (ABBA ×2, slot 1, 600 frames;
+`debug.xemu.tex_reset`):
+
+| | pfifo CPU | hashed / 10 s | uploads | vCPU ms | frames > 50 ms |
+|---|---|---|---|---|---|
+| old | 48-51% | 23 GB | ~299 | 31.45 | 8, 12, 8, 13 |
+| reset | **31-32%** | 24 MB | ~294 | 31.36 | **40, 49, 36, 36** |
+
+- **Power:** pfifo -36%.
+- **Correctness:** uploads are unchanged, so no update was lost.
+- **But the tail got ~4x worse, in every pair**, reproduced again at
+  18/21 vs 36/38. The vCPU did the same work, even slightly cheaper
+  (89 vs 92 Mcyc in normal frames, less memory contention). Yet
+  wall/frame rose 33.7 → 34.8 ms and util fell 94 → 91%, with slow
+  frames every 2-3 frames (`SLOWGAPS 1 2 2 2 …`).
+
+**Not DVFS:** pfifo stays on cpu3-6 and that cluster sits at 2803 MHz in
+both arms (sampled at 5 Hz).
+
+**It is lock waiting.** An off-CPU profile of the vCPU (`--trace-offcpu`,
+8 s per arm):
+- The vCPU is **blocked in `pthread_mutex_lock` for 25.6% (old) and 28.8%
+  (reset) of its time.** The difference is ~1.1 ms/frame, matching the
+  extra wall time.
+- Waits by site:
+  - ~62% from `cpu_exec_loop` / `mttcg_cpu_thread_fn` (BQL);
+  - 18% `pgraph_read` (pfifo.lock + pgraph.lock);
+  - 9% `user_read` (pfifo.lock);
+  - 2% `pfifo_read`.
+- The guest polls NV2A registers, and each read queues behind locks the
+  pfifo thread holds.
+
+**Disposition:**
+- The reset is kept but off: `debug.xemu.tex_reset=1`.
+- Counters stay on (one log line per 10 s).
+- **The lead now is the vCPU's ~9 ms/frame blocked on NV2A locks.** Why it
+  grows when pfifo does less work is unexplained; lock handoff (an unfair
+  mutex re-acquired by a busy thread) is the first hypothesis to test.
+- C6/C7 are deprioritized: the hot C code is already optimized, and the
+  contention dwarfs anything flags could buy.

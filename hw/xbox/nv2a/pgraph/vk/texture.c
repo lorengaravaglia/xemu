@@ -29,6 +29,9 @@
 #include "qemu/fast-hash.h"
 #include "qemu/lru.h"
 #include "renderer.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/system_properties.h>
+#endif
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode);
 
@@ -426,6 +429,7 @@ static void mark_textures_possibly_dirty_visitor(Lru *lru, LruNode *node, void *
 
     if (overlapping) {
         tnode->possibly_dirty = true;
+        tnode->range_hashed = false;
         if (tnode->dirty_start > tnode->dirty_end) {
             tnode->dirty_start = test->addr;
             tnode->dirty_end = test->end;
@@ -454,6 +458,22 @@ void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
 }
 
 /*
+ * Texture-validation counters (FINDINGS BK), logged every 10 s on the pfifo
+ * thread.  Measurement only; all touched on the pfifo thread, so plain ints.
+ */
+static struct {
+    uint64_t binds;          /* create_texture() calls */
+    uint64_t hits, misses;
+    uint64_t hashed;         /* texture_content_hash() calls that hashed */
+    uint64_t hashed_full;    /* ... of which full (fresh node or reshape) */
+    uint64_t hashed_stale;   /* hit, range already hashed, no write since */
+    uint64_t pages, bytes;   /* pages / bytes put through XXH3 */
+    uint64_t unchanged;      /* hashed on a hit, contents the same */
+    uint64_t uploads;        /* hashed on a hit, contents changed */
+    uint64_t dirty_pages_tested, dirty_pages_found;
+} tex_stats;
+
+/*
  * Test and clear the NV2A texture dirty bits, reporting the range of pages that
  * were actually dirty rather than just whether any were.
  *
@@ -476,8 +496,10 @@ static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size,
     *dirty_end = 0;
 
     for (; page < end; page += TARGET_PAGE_SIZE) {
+        tex_stats.dirty_pages_tested++;
         if (memory_region_test_and_clear_dirty(d->vram, page, TARGET_PAGE_SIZE,
                                                DIRTY_MEMORY_NV2A_TEX)) {
+            tex_stats.dirty_pages_found++;
             if (!any) {
                 *dirty_start = page;
             }
@@ -508,6 +530,50 @@ static bool check_texture_possibly_dirty(NV2AState *d,
         pgraph_vk_mark_textures_possibly_dirty(d, ds, de - ds + 1);
     }
     return possibly_dirty;
+}
+
+/*
+ * debug.xemu.tex_reset=1 clears a cached texture's dirty state once it has
+ * been hashed (FINDINGS BK).  Off by default: it cuts the pfifo thread's CPU
+ * by a third, but on slot 1 it raised frames over 50 ms ~4x through longer
+ * vCPU waits on the NV2A locks, which are not yet understood.
+ */
+static bool tex_reset;
+
+static void tex_stats_maybe_log(void)
+{
+    static int64_t last_us;
+    int64_t now = g_get_monotonic_time();
+
+    if (last_us == 0) {
+        last_us = now;
+        return;
+    }
+    if (now - last_us < 10 * G_USEC_PER_SEC) {
+        return;
+    }
+    fprintf(stderr,
+            "vk-tex: %.1f s | binds %" PRIu64 " hit %" PRIu64 " miss %" PRIu64
+            " | hashed %" PRIu64 " (full %" PRIu64 ", stale %" PRIu64 ")"
+            " pages %" PRIu64 " MB %" PRIu64
+            " | unchanged %" PRIu64 " uploads %" PRIu64
+            " | dirty-check pages %" PRIu64 " found %" PRIu64
+            " | reset %d\n",
+            (now - last_us) / 1e6, tex_stats.binds, tex_stats.hits,
+            tex_stats.misses, tex_stats.hashed, tex_stats.hashed_full,
+            tex_stats.hashed_stale, tex_stats.pages, tex_stats.bytes >> 20,
+            tex_stats.unchanged, tex_stats.uploads,
+            tex_stats.dirty_pages_tested, tex_stats.dirty_pages_found,
+            tex_reset);
+    memset(&tex_stats, 0, sizeof(tex_stats));
+    last_us = now;
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        char v[PROP_VALUE_MAX] = { 0 };
+        tex_reset = __system_property_get("debug.xemu.tex_reset", v) > 0 &&
+                    v[0] == '1';
+    }
+#endif
 }
 
 /*
@@ -552,7 +618,11 @@ static uint64_t texture_content_hash(TextureBinding *binding, hwaddr base,
         unsigned int off = i * TARGET_PAGE_SIZE;
         unsigned int len = MIN(TARGET_PAGE_SIZE, length - off);
         binding->page_hashes[i] = fast_hash((const uint8_t *)data + off, len);
+        tex_stats.pages++;
+        tex_stats.bytes += len;
     }
+    tex_stats.hashed++;
+    tex_stats.hashed_full += rehash_all;
 
     /*
      * Combine by hashing the page-hash array: it is a thousandth the size of
@@ -1242,18 +1312,23 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     TextureBinding *snode = container_of(node, TextureBinding, node);
     bool binding_found = snode->image != VK_NULL_HANDLE;
 
+    tex_stats.binds++;
     if (binding_found) {
+        tex_stats.hits++;
         NV2A_VK_DPRINTF("Cache hit");
         r->texture_bindings[texture_idx] = snode;
         possibly_dirty |= snode->possibly_dirty;
     } else {
+        tex_stats.misses++;
         possibly_dirty = true;
     }
 
+    bool newly_dirty = false;
     if (!surface_to_texture && !possibly_dirty_checked) {
-        possibly_dirty |= check_texture_possibly_dirty(
+        newly_dirty = check_texture_possibly_dirty(
             d, texture_vram_offset, texture_length, texture_palette_vram_offset,
             texture_palette_data_size);
+        possibly_dirty |= newly_dirty;
     }
 
     // Calculate hash of texture data, if necessary
@@ -1278,9 +1353,33 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                 copy_surface_to_texture(pg, surface, snode);
             }
         } else {
+            if (possibly_dirty) {
+                tex_stats.hashed_stale += snode->range_hashed;
+                snode->range_hashed = true;
+                if (content_hash != snode->hash) {
+                    tex_stats.uploads++;
+                } else {
+                    tex_stats.unchanged++;
+                }
+            }
             if (possibly_dirty && content_hash != snode->hash) {
                 upload_texture_image(pg, texture_idx, snode);
                 snode->hash = content_hash;
+            }
+            /*
+             * The dirty range has now been hashed, so consume it (opt-in,
+             * see tex_reset).  Nothing clears it on a cache hit otherwise: once any write touched a
+             * cached texture -- a state load rewriting VRAM, a new area
+             * streaming in -- every later bind re-hashed it in full and
+             * found it unchanged.  Measured at 517,000 hashes / 23 GB per
+             * 10 s on slot 1, 30.6% of the pfifo thread (FINDINGS BK).
+             * New writes are not lost: they set fresh dirty bits, which the
+             * next check_texture_possibly_dirty() turns into a new range.
+             */
+            if (possibly_dirty && tex_reset) {
+                snode->possibly_dirty = false;
+                snode->dirty_start = ~(hwaddr)0;
+                snode->dirty_end = 0;
             }
         }
 
@@ -1293,6 +1392,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     memcpy(&snode->key, &key, sizeof(key));
     snode->current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     snode->possibly_dirty = false;
+    snode->range_hashed = false;
     snode->dirty_start = ~(hwaddr)0;
     snode->dirty_end = 0;
     snode->hash = content_hash;
@@ -1514,6 +1614,7 @@ void pgraph_vk_bind_textures(NV2AState *d)
     // FIXME: Mark textures that are sourced from surfaces so we can track them
 
     r->texture_bindings_changed = false;
+    tex_stats_maybe_log();
 
     if (!check_textures_dirty(pg)) {
         NV2A_VK_DPRINTF("Not dirty");

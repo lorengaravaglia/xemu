@@ -233,6 +233,7 @@ typedef struct TextureBinding {
     VmaAllocation allocation;
     VkSampler sampler;
     bool possibly_dirty;
+    bool range_hashed;  /* stats: dirty range already hashed, no new writes */
     /*
      * VRAM range accumulated since the last content hash, so only the pages
      * the guest actually wrote need re-hashing.  Inclusive; empty when
