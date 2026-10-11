@@ -54,12 +54,85 @@ void pgraph_note_shader_compile(void)
     qatomic_set(&g_shader_compile_last_us, g_get_monotonic_time());
 }
 
+/*
+ * NV_PGRAPH_SURFACE holds the flip counters.  With nv2a_lockfree the guest's
+ * INCREMENT write advances READ_3D without pg->lock, so every writer of this
+ * register uses an atomic read-modify-write.  `inc` advances the field modulo
+ * MODULO_3D (as the original code did, 0 when the modulo is 0); otherwise the
+ * field is set to `value`.
+ */
+static uint32_t pgraph_surface_update(PGRAPHState *pg, uint32_t mask, bool inc,
+                                      uint32_t value, bool atomic_dirty)
+{
+    uint32_t *p = &pg->regs_[NV_PGRAPH_SURFACE];
+    uint32_t old = qatomic_read(p), nv, seen;
+
+    for (;;) {
+        uint32_t v = value;
+        nv = old;
+        if (inc) {
+            uint32_t m = GET_MASK(old, NV_PGRAPH_SURFACE_MODULO_3D);
+            v = m ? (GET_MASK(old, mask) + 1) % m : 0;
+        }
+        SET_MASK(nv, mask, v);
+        seen = qatomic_cmpxchg(p, old, nv);
+        if (seen == old) {
+            break;
+        }
+        old = seen;
+    }
+    if (nv != old) {
+        if (atomic_dirty) {
+            set_bit_atomic(NV_PGRAPH_SURFACE / sizeof(uint32_t), pg->regs_dirty);
+        } else {
+            bitmap_set(pg->regs_dirty, NV_PGRAPH_SURFACE / sizeof(uint32_t), 1);
+        }
+    }
+    return nv;
+}
+
 uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
     PGRAPHState *pg = &d->pgraph;
 
-    qemu_mutex_lock(&pg->lock);
+    /*
+     * Side-effect-free status reads, without pg->lock (FINDINGS BL).  The
+     * pfifo thread holds that lock for a whole draw, so a poll waited up to
+     * ~6 ms -- ~1.5 ms a frame on slot 1, most of it INCREMENT, which the
+     * guest reads back in its vblank handler.  INCREMENT is written only by
+     * the guest (pgraph_write, this vCPU).  INTR bits are raised under the
+     * BQL, which this MMIO access holds, and the line is level-triggered, so
+     * a read cannot miss one.
+     */
+    if (qatomic_read(&g_nv2a_lockfree)) {
+        uint64_t r;
+        bool fast = true;
+
+        switch (addr) {
+        case NV_PGRAPH_INTR:
+            r = qatomic_read(&pg->pending_interrupts);
+            break;
+        case NV_PGRAPH_INTR_EN:
+            r = qatomic_read(&pg->enabled_interrupts);
+            break;
+        case NV_PGRAPH_INCREMENT:
+            r = qatomic_read(&pg->regs_[addr]);
+            break;
+        default:
+            fast = false;
+            r = 0;
+            break;
+        }
+        if (fast) {
+            g_nv2a_lock_stats[NV2A_LK_PGRAPH_RD].n++;
+            nv2a_reg_log_read(NV_PGRAPH, addr, size, r);
+            return r;
+        }
+    }
+
+    nv2a_timed_lock(&pg->lock, NV2A_LK_PGRAPH_RD);
+    nv2a_note_addr(NV_PGRAPH, addr);
 
     uint64_t r = 0;
     switch (addr) {
@@ -102,8 +175,32 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     nv2a_reg_log_write(NV_PGRAPH, addr, size, val);
 
-    qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
-    qemu_mutex_lock(&pg->lock);
+    /*
+     * The flip-complete INCREMENT, from the guest's vblank handler once a
+     * frame, without pfifo.lock or pg->lock (FINDINGS BL).  Locked, it waited
+     * behind whole draws: ~1.5 ms a frame on slot 1, on the vCPU's critical
+     * path.  READ_3D is advanced atomically (see pgraph_surface_update), and
+     * the store precedes the kick, so a pfifo thread stalled for this flip
+     * sees it when it wakes.
+     */
+    if (qatomic_read(&g_nv2a_lockfree) && addr == NV_PGRAPH_INCREMENT) {
+        g_nv2a_lock_stats[NV2A_LK_PGRAPH_WR_PG].n++;
+        if (val & NV_PGRAPH_INCREMENT_READ_3D) {
+            uint32_t s = pgraph_surface_update(pg, NV_PGRAPH_SURFACE_READ_3D,
+                                               true, 0, true);
+            ALOGI_PGRAPH("pgraph: INCREMENT_READ_3D -> READ_3D=%u WRITE_3D=%u (flip complete)",
+                         (unsigned)GET_MASK(s, NV_PGRAPH_SURFACE_READ_3D),
+                         (unsigned)GET_MASK(s, NV_PGRAPH_SURFACE_WRITE_3D));
+            (void)s;
+            nv2a_profile_increment();
+            pfifo_kick_lockless(d);
+        }
+        return;
+    }
+
+    nv2a_timed_lock(&d->pfifo.lock, NV2A_LK_PGRAPH_WR_FIFO); // FIXME: Factor out fifo lock here
+    nv2a_timed_lock(&pg->lock, NV2A_LK_PGRAPH_WR_PG);
+    nv2a_note_addr(0x100 | NV_PGRAPH, addr);   /* block | 0x100 = write */
 
     switch (addr) {
     case NV_PGRAPH_INTR:
@@ -135,12 +232,8 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         break;
     case NV_PGRAPH_INCREMENT:
         if (val & NV_PGRAPH_INCREMENT_READ_3D) {
-            PG_SET_MASK(NV_PGRAPH_SURFACE,
-                     NV_PGRAPH_SURFACE_READ_3D,
-                     (PG_GET_MASK(NV_PGRAPH_SURFACE,
-                              NV_PGRAPH_SURFACE_READ_3D)+1)
-                        % PG_GET_MASK(NV_PGRAPH_SURFACE,
-                                   NV_PGRAPH_SURFACE_MODULO_3D) );
+            pgraph_surface_update(pg, NV_PGRAPH_SURFACE_READ_3D, true, 0,
+                                  false);
             ALOGI_PGRAPH("pgraph: INCREMENT_READ_3D -> READ_3D=%u WRITE_3D=%u (flip complete)",
                          (unsigned)PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D),
                          (unsigned)PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D));
@@ -920,20 +1013,20 @@ DEF_METHOD(NV097, WAIT_FOR_IDLE)
 
 DEF_METHOD(NV097, SET_FLIP_READ)
 {
-    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D,
-             parameter);
+    pgraph_surface_update(pg, NV_PGRAPH_SURFACE_READ_3D, false, parameter,
+                          false);
 }
 
 DEF_METHOD(NV097, SET_FLIP_WRITE)
 {
-    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D,
-             parameter);
+    pgraph_surface_update(pg, NV_PGRAPH_SURFACE_WRITE_3D, false, parameter,
+                          false);
 }
 
 DEF_METHOD(NV097, SET_FLIP_MODULO)
 {
-    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_MODULO_3D,
-             parameter);
+    pgraph_surface_update(pg, NV_PGRAPH_SURFACE_MODULO_3D, false, parameter,
+                          false);
 }
 
 DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
@@ -941,12 +1034,7 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
     uint32_t old =
         PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D);
 
-    PG_SET_MASK(NV_PGRAPH_SURFACE,
-             NV_PGRAPH_SURFACE_WRITE_3D,
-             (PG_GET_MASK(NV_PGRAPH_SURFACE,
-                      NV_PGRAPH_SURFACE_WRITE_3D)+1)
-                % PG_GET_MASK(NV_PGRAPH_SURFACE,
-                           NV_PGRAPH_SURFACE_MODULO_3D) );
+    pgraph_surface_update(pg, NV_PGRAPH_SURFACE_WRITE_3D, true, 0, false);
 
     uint32_t new =
         PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D);

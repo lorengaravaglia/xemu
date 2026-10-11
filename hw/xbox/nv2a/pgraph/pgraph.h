@@ -291,6 +291,7 @@ void pgraph_check_within_begin_end_block(PGRAPHState *pg);
 
 void *pfifo_thread(void *arg);
 void pfifo_kick(NV2AState *d);
+void pfifo_kick_lockless(NV2AState *d);
 
 void pgraph_renderer_register(const PGRAPHRenderer *renderer);
 

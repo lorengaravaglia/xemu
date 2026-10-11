@@ -592,11 +592,107 @@ void rust_bql_mock_lock(void)
  * The BQL is taken from so many places that it is worth profiling the
  * callers directly, instead of funneling them all through a single function.
  */
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * debug.xemu.bql_prof=1: per call site, how long each thread holds the BQL and
+ * how long acquiring it waited (FINDINGS BL).  The table is only touched while
+ * the BQL is held, so it needs no lock of its own.  Measurement only.
+ */
+#include <sys/system_properties.h>
+#include <sys/prctl.h>
+
+typedef struct BqlSite {
+    const char *file;
+    int line;
+    char thread[16];
+    uint64_t n, hold_ns, wait_ns, max_hold_ns, long_holds;
+} BqlSite;
+
+static BqlSite bql_sites[96];
+static int bql_prof_on = -1;
+static int64_t bql_prof_last_ns;
+static __thread int64_t bql_t_acq;
+static __thread BqlSite *bql_t_site;
+static __thread char bql_t_name[16];
+
+static int64_t bql_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static BqlSite *bql_site(const char *file, int line)
+{
+    if (!bql_t_name[0]) {
+        prctl(PR_GET_NAME, bql_t_name);
+    }
+    for (int i = 0; i < ARRAY_SIZE(bql_sites); i++) {
+        BqlSite *b = &bql_sites[i];
+        if (b->file == file && b->line == line &&
+            !strncmp(b->thread, bql_t_name, 16)) {
+            return b;
+        }
+        if (!b->file) {
+            b->file = file;
+            b->line = line;
+            memcpy(b->thread, bql_t_name, 16);
+            return b;
+        }
+    }
+    return NULL;
+}
+
+static int bql_site_cmp(const void *a, const void *b)
+{
+    const BqlSite *x = a, *y = b;
+    return (y->hold_ns > x->hold_ns) - (y->hold_ns < x->hold_ns);
+}
+
+static void bql_prof_report(int64_t now)
+{
+    double secs = (now - bql_prof_last_ns) / 1e9;
+    int n = 0;
+
+    while (n < ARRAY_SIZE(bql_sites) && bql_sites[n].file) {
+        n++;
+    }
+    qsort(bql_sites, n, sizeof(BqlSite), bql_site_cmp);
+    fprintf(stderr, "bql-prof: %.1f s window, %d sites (hold = held, wait = "
+            "time to acquire)\n", secs, n);
+    for (int i = 0; i < n && i < 12; i++) {
+        BqlSite *b = &bql_sites[i];
+        const char *f = strrchr(b->file, '/');
+        fprintf(stderr, "bql-prof: %-15s %s:%d n=%" PRIu64 " hold %.1f ms "
+                "(max %.2f, >1ms %" PRIu64 ") wait %.1f ms\n",
+                b->thread, f ? f + 1 : b->file, b->line, b->n,
+                b->hold_ns / 1e6, b->max_hold_ns / 1e6, b->long_holds,
+                b->wait_ns / 1e6);
+    }
+    memset(bql_sites, 0, sizeof(bql_sites));
+    bql_prof_last_ns = now;
+}
+#endif
+
 void bql_lock_impl(const char *file, int line)
 {
     QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
 
     g_assert(!bql_locked());
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (bql_prof_on > 0) {
+        int64_t t0 = bql_now_ns();
+        bql_lock_fn(&bql, file, line);
+        bql_t_acq = bql_now_ns();
+        bql_t_site = bql_site(file, line);
+        if (bql_t_site) {
+            bql_t_site->n++;
+            bql_t_site->wait_ns += bql_t_acq - t0;
+        }
+        return;
+    }
+    bql_t_site = NULL;
+#endif
     bql_lock_fn(&bql, file, line);
 }
 
@@ -604,11 +700,59 @@ void bql_unlock(void)
 {
     g_assert(bql_locked());
     g_assert(!bql_unlock_blocked);
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        int64_t now = 0;
+        if (bql_t_site) {
+            int64_t held;
+            now = bql_now_ns();
+            held = now - bql_t_acq;
+            bql_t_site->hold_ns += held;
+            bql_t_site->long_holds += held > 1000000;
+            if (held > bql_t_site->max_hold_ns) {
+                bql_t_site->max_hold_ns = held;
+            }
+            bql_t_site = NULL;
+        }
+        /*
+         * Every ~10 s (still holding the BQL): report and re-read the prop.
+         * While off, only every 16k unlocks pays for reading the clock.
+         */
+        static unsigned bql_unlocks;
+        if (!now && (++bql_unlocks & 0x3fff) == 0) {
+            now = bql_now_ns();
+        }
+        if (now && now - bql_prof_last_ns > 10000000000LL) {
+            char v[PROP_VALUE_MAX] = { 0 };
+            int on = __system_property_get("debug.xemu.bql_prof", v) > 0 &&
+                     v[0] == '1';
+            if (on && bql_prof_on > 0) {
+                bql_prof_report(now);
+            } else {
+                memset(bql_sites, 0, sizeof(bql_sites));
+                bql_prof_last_ns = now;
+            }
+            bql_prof_on = on;
+        }
+    }
+#endif
     qemu_mutex_unlock(&bql);
 }
 
 void qemu_cond_wait_bql(QemuCond *cond)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    /* The wait releases the BQL: close the hold, reopen it after. */
+    BqlSite *site = bql_t_site;
+    if (site) {
+        site->hold_ns += bql_now_ns() - bql_t_acq;
+    }
+    qemu_cond_wait(cond, &bql);
+    if (site) {
+        bql_t_acq = bql_now_ns();
+    }
+    return;
+#endif
     qemu_cond_wait(cond, &bql);
 }
 

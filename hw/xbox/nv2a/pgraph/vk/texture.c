@@ -533,17 +533,22 @@ static bool check_texture_possibly_dirty(NV2AState *d,
 }
 
 /*
- * debug.xemu.tex_reset=1 clears a cached texture's dirty state once it has
- * been hashed (FINDINGS BK).  Off by default: it cuts the pfifo thread's CPU
- * by a third, but on slot 1 it raised frames over 50 ms ~4x through longer
- * vCPU waits on the NV2A locks, which are not yet understood.
+ * Clear a cached texture's dirty state once it has been hashed (FINDINGS BK);
+ * debug.xemu.tex_reset=0 restores the old behaviour, for A/B.  On its own it
+ * cut the pfifo thread's CPU by a third but raised frames over 50 ms ~4x,
+ * through longer vCPU waits on the NV2A locks; with the lock-free register
+ * paths (g_nv2a_lockfree, FINDINGS BL) that cost is gone.
  */
-static bool tex_reset;
+static bool tex_reset = true;
+
+extern uint64_t g_nv2a_user_reads;
 
 static void tex_stats_maybe_log(void)
 {
     static int64_t last_us;
+    static uint64_t last_user_polls;
     int64_t now = g_get_monotonic_time();
+    uint64_t user_polls = qatomic_read(&g_nv2a_user_reads);
 
     if (last_us == 0) {
         last_us = now;
@@ -558,20 +563,49 @@ static void tex_stats_maybe_log(void)
             " pages %" PRIu64 " MB %" PRIu64
             " | unchanged %" PRIu64 " uploads %" PRIu64
             " | dirty-check pages %" PRIu64 " found %" PRIu64
-            " | reset %d\n",
+            " | reset %d | lockfree %d | user polls %" PRIu64 "\n",
             (now - last_us) / 1e6, tex_stats.binds, tex_stats.hits,
             tex_stats.misses, tex_stats.hashed, tex_stats.hashed_full,
             tex_stats.hashed_stale, tex_stats.pages, tex_stats.bytes >> 20,
             tex_stats.unchanged, tex_stats.uploads,
             tex_stats.dirty_pages_tested, tex_stats.dirty_pages_found,
-            tex_reset);
+            tex_reset, g_nv2a_lockfree, user_polls - last_user_polls);
+    last_user_polls = user_polls;
+    {
+        static const char *names[NV2A_LK__COUNT] = {
+            "user_rd", "user_wr", "pfifo_rd", "pfifo_wr",
+            "pgraph_rd", "pgraph_wr(fifo)", "pgraph_wr(pg)" };
+        for (int i = 0; i < NV2A_LK__COUNT; i++) {
+            Nv2aLockStat *st = &g_nv2a_lock_stats[i];
+            if (st->n) {
+                fprintf(stderr, "nv2a-lock: %-16s n=%" PRIu64 " contended %"
+                        PRIu64 " wait %.1f ms (max %.2f ms)\n", names[i],
+                        st->n, st->contended, st->wait_ns / 1e6,
+                        st->max_ns / 1e6);
+            }
+        }
+        for (int i = 0; i < 32 && g_nv2a_addr_stats[i].n; i++) {
+            Nv2aAddrStat *a = &g_nv2a_addr_stats[i];
+            if (a->wait_ns > 1000000) {
+                fprintf(stderr, "nv2a-lock:   contended read block %u reg "
+                        "0x%04x n=%" PRIu64 " wait %.1f ms\n", a->block,
+                        a->addr, a->n, a->wait_ns / 1e6);
+            }
+        }
+        memset(g_nv2a_addr_stats, 0, sizeof(g_nv2a_addr_stats));
+        memset(g_nv2a_lock_stats, 0, sizeof(g_nv2a_lock_stats));
+    }
     memset(&tex_stats, 0, sizeof(tex_stats));
     last_us = now;
 #if defined(__ANDROID__) || defined(ANDROID)
     {
         char v[PROP_VALUE_MAX] = { 0 };
-        tex_reset = __system_property_get("debug.xemu.tex_reset", v) > 0 &&
-                    v[0] == '1';
+        /* Both on unless the property is explicitly "0". */
+        tex_reset = !(__system_property_get("debug.xemu.tex_reset", v) > 0 &&
+                      v[0] == '0');
+        qatomic_set(&g_nv2a_lockfree,
+                    !(__system_property_get("debug.xemu.nv2a_lockfree", v) > 0 &&
+                      v[0] == '0'));
     }
 #endif
 }

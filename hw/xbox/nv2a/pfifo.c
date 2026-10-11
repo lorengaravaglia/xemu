@@ -45,7 +45,41 @@ uint64_t pfifo_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    /*
+     * Side-effect-free status reads, without pfifo.lock (FINDINGS BL): the
+     * guest polls these, and each poll queued behind the pusher.
+     */
+    if (qatomic_read(&g_nv2a_lockfree)) {
+        uint64_t r;
+        bool fast = true;
+
+        switch (addr) {
+        case NV_PFIFO_INTR_0:
+            r = qatomic_read(&d->pfifo.pending_interrupts);
+            break;
+        case NV_PFIFO_INTR_EN_0:
+            r = qatomic_read(&d->pfifo.enabled_interrupts);
+            break;
+        case NV_PFIFO_RUNOUT_STATUS:
+            r = NV_PFIFO_RUNOUT_STATUS_LOW_MARK;
+            break;
+        case 0x0080:            /* polled by the guest; plain register */
+            r = qatomic_read(&d->pfifo.regs[addr]);
+            break;
+        default:
+            fast = false;
+            r = 0;
+            break;
+        }
+        if (fast) {
+            g_nv2a_lock_stats[NV2A_LK_PFIFO_RD].n++;
+            nv2a_reg_log_read(NV_PFIFO, addr, size, r);
+            return r;
+        }
+    }
+
+    nv2a_timed_lock(&d->pfifo.lock, NV2A_LK_PFIFO_RD);
+    nv2a_note_addr(NV_PFIFO, addr);
 
     uint64_t r = 0;
     switch (addr) {
@@ -75,7 +109,7 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
     nv2a_reg_log_write(NV_PFIFO, addr, size, val);
 
-    qemu_mutex_lock(&d->pfifo.lock);
+    nv2a_timed_lock(&d->pfifo.lock, NV2A_LK_PFIFO_WR);
 
     switch (addr) {
     case NV_PFIFO_INTR_0:
@@ -96,9 +130,29 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     qemu_mutex_unlock(&d->pfifo.lock);
 }
 
+/*
+ * Kick without holding pfifo.lock (FINDINGS BL).  Lost-wakeup safe by the
+ * two-flag handshake with pfifo_thread(): it sets `sleeping` then re-reads
+ * `fifo_kick` with a full barrier between; this sets `fifo_kick` then reads
+ * `sleeping` with one between, so at least one side sees the other.  If the
+ * thread is asleep, taking the lock (held until cond_wait releases it) means
+ * the broadcast cannot land early.  Any state the thread must see has to be
+ * stored before calling this.
+ */
+void pfifo_kick_lockless(NV2AState *d)
+{
+    qatomic_set(&d->pfifo.fifo_kick, true);
+    smp_mb();
+    if (qatomic_read(&d->pfifo.sleeping)) {
+        qemu_mutex_lock(&d->pfifo.lock);
+        qemu_cond_broadcast(&d->pfifo.fifo_cond);
+        qemu_mutex_unlock(&d->pfifo.lock);
+    }
+}
+
 void pfifo_kick(NV2AState *d)
 {
-    d->pfifo.fifo_kick = true;
+    qatomic_set(&d->pfifo.fifo_kick, true);
     qemu_cond_broadcast(&d->pfifo.fifo_cond);
 }
 
@@ -338,7 +392,7 @@ static void pfifo_run_pusher(NV2AState *d)
 
     while (!pfifo_pusher_should_stall(d)) {
         uint32_t dma_get_v = *dma_get;
-        uint32_t dma_put_v = *dma_put;
+        uint32_t dma_put_v = qatomic_load_acquire(dma_put);
         if (dma_get_v == dma_put_v) {
             static unsigned s_empty_count = 0;
             s_empty_count++;
@@ -506,7 +560,8 @@ static void pfifo_run_pusher(NV2AState *d)
             }
         }
 
-        *dma_get = dma_get_v;
+        /* Release: user_read() polls this without pfifo.lock. */
+        qatomic_store_release(dma_get, dma_get_v);
 
         if (GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR)) {
             break;
@@ -544,7 +599,13 @@ void *pfifo_thread(void *arg)
 
     qemu_mutex_lock(&d->pfifo.lock);
     while (true) {
-        d->pfifo.fifo_kick = false;
+        qatomic_set(&d->pfifo.fifo_kick, false);
+        /*
+         * A lockless kick (user_write) may have set it just before this; the
+         * pusher must then read the new DMA_PUT, so no load below may be
+         * satisfied ahead of this store.
+         */
+        smp_mb();
 
         pgraph_process_pending(d);
 
@@ -554,11 +615,17 @@ void *pfifo_thread(void *arg)
 
         pgraph_process_pending_reports(d);
 
-        if (!d->pfifo.fifo_kick) {
+        if (!qatomic_read(&d->pfifo.fifo_kick)) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
 
-            // Both the pusher and puller are waiting for some action
-            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
+            /* Handshake with the lockless kick in user_write(). */
+            qatomic_set(&d->pfifo.sleeping, true);
+            smp_mb();
+            if (!qatomic_read(&d->pfifo.fifo_kick)) {
+                // Both the pusher and puller are waiting for some action
+                qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
+            }
+            qatomic_set(&d->pfifo.sleeping, false);
         }
 
         if (d->exiting) {

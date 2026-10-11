@@ -3918,3 +3918,78 @@ both arms (sampled at 5 Hz).
   mutex re-acquired by a busy thread) is the first hypothesis to test.
 - C6/C7 are deprioritized: the hot C code is already optimized, and the
   contention dwarfs anything flags could buy.
+
+---
+
+## BL. THE vCPU WAITED ON NV2A LOCKS INSIDE ITS MMIO; LOCK-FREE STATUS PATHS (2026-10-11)
+
+**Hypotheses tested and rejected first:**
+- **DVFS/migration of pfifo.** Sampled at 5 Hz, it stays on cpu3-6 at
+  2803 MHz in both arms.
+- **The `user_read` DMA_GET poll.** Only ~550 polls/s, and a lock-free
+  read changed nothing: with the texture reset on, 27/36 lock-free vs
+  37/23 locked.
+
+**Instrumentation that found it.**
+- `debug.xemu.bql_prof=1`, in `system/cpus.c`, gives per-site BQL hold and
+  wait times. **The BQL holder was the vCPU itself, inside its own MMIO**
+  (`cputlb.c` loads 2098 and stores 2641, which run under the BQL): store
+  holds rose 148 → 521 ms per 10 s with the texture reset, with single
+  holds up to 5.9 ms.
+- Per-handler timed locks (`nv2a-lock:` lines) showed what those holds
+  were waiting for. Per 10 s, slot 1:
+  - `pgraph_rd` (pg->lock): ~450-510 ms in **both** arms, max 5.9 ms.
+    Mostly **`PGRAPH_INCREMENT` (0x71c)**, ~25×/s; also `INTR` (0x100).
+  - `user_wr`, the DMA_PUT kick (pfifo.lock): 0.3 → 99-444 ms with the
+    reset.
+  - `pfifo_rd` (pfifo.lock): 1-36 → 98-158 ms with the reset. Mostly
+    `PFIFO 0x0080`, a plain register.
+- After making the reads lock-free, the wait moved to `pgraph_wr` of
+  **INCREMENT**: ~380 ms per 10 s, one write per frame at ~1.5 ms each.
+  That is the guest's vblank handler doing a read-modify-write of the flip
+  counter.
+
+**Mechanism.**
+- The pfifo thread holds pfifo.lock for nearly all its pushbuffer parsing,
+  and pg->lock for whole draws (up to ~6 ms).
+- The guest's status polls, the DMA_PUT kick and the per-frame flip
+  increment queue behind those locks while holding the BQL.
+- Less pfifo work (the texture reset) means pfifo.lock is held a larger
+  share of the time. That is why BK's fix made the tail worse.
+
+**Fix (`g_nv2a_lockfree`, on; `debug.xemu.nv2a_lockfree=0` restores):**
+- **Reads without the lock:** PGRAPH `INTR`, `INTR_EN`, `INCREMENT`;
+  PFIFO `INTR_0`, `INTR_EN_0`, `RUNOUT_STATUS`, `0x0080`; and USER
+  `DMA_PUT/GET/REF` (acquire loads). The pusher publishes `DMA_GET` with a
+  release store.
+- **DMA_PUT kick:** a release store, then `pfifo_kick_lockless()`. That is
+  a two-flag handshake (`fifo_kick` / `sleeping`, a full barrier on each
+  side), and it takes the lock only to wake a sleeping thread. The thread
+  clears `fifo_kick` with a barrier before reading PUT again.
+- **INCREMENT write:** READ_3D advances by CAS, then a lockless kick. Every
+  writer of `NV_PGRAPH_SURFACE` (the flip methods) now uses the same
+  atomic update.
+- Engagement: `pgraph_rd`, `pfifo_rd` and `user_wr` waits drop to 0. The
+  INCREMENT write wait is gone.
+
+**Result, slot 1, one process, ABBA ×2, 600 frames:**
+
+| | before | lockfree + texture reset (BK) |
+|---|---|---|
+| frames > 50 ms | 22, 21, 25, 26 (23.5) | **2, 3, 6, 5 (4.0), -83%** |
+| fps | 29.31 | **29.81** |
+| pfifo CPU | 48-50% | **35%** |
+| vCPU busy | 93% | 99% |
+| vCPU Mcyc/frame | 91.7 | 94.6 (+3%) |
+| MMIO reads/frame | ~238 | ~232 |
+
+Lock-free without the texture reset is ~neutral (10, 15 vs 5, 16). The two
+belong together: lock-free removes the waits the reset exposed.
+
+The vCPU's extra 3% is guest code, not register spinning (the MMIO counts
+are unchanged). That time used to be spent asleep in futex; now the guest
+runs ahead and idles in its own loop. It is net power on the X3 against
+-14 points of a core on pfifo, which is why a soak follows.
+
+**Both are now default on.** `debug.xemu.tex_reset=0` and
+`debug.xemu.nv2a_lockfree=0` restore the old behaviour.

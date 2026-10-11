@@ -102,6 +102,7 @@ typedef struct NV2AState {
         QemuCond fifo_cond;
         QemuCond fifo_idle_cond;
         bool fifo_kick;
+        bool sleeping;      /* pfifo thread is (about to be) in cond_wait */
         bool halt;
     } pfifo;
 
@@ -161,6 +162,74 @@ typedef struct NV2ABlockInfo {
 extern const NV2ABlockInfo blocktable[NV_NUM_BLOCKS];
 
 void nv2a_update_irq(NV2AState *d);
+
+/*
+ * MMIO lock-wait accounting (FINDINGS BL): how long the vCPU's NV2A register
+ * accesses -- which run holding the BQL -- wait for the device locks.
+ */
+enum {
+    NV2A_LK_USER_RD, NV2A_LK_USER_WR, NV2A_LK_PFIFO_RD, NV2A_LK_PFIFO_WR,
+    NV2A_LK_PGRAPH_RD, NV2A_LK_PGRAPH_WR_FIFO, NV2A_LK_PGRAPH_WR_PG,
+    NV2A_LK__COUNT
+};
+typedef struct Nv2aLockStat {
+    uint64_t n, contended, wait_ns, max_ns;
+} Nv2aLockStat;
+extern Nv2aLockStat g_nv2a_lock_stats[NV2A_LK__COUNT];
+
+/*
+ * On by default (FINDINGS BL): the vCPU's hot NV2A register polls, the
+ * DMA_PUT kick and the flip INCREMENT no longer take the device locks.
+ * debug.xemu.nv2a_lockfree=0 restores them, for A/B; re-read every 10 s on
+ * the pfifo thread.
+ */
+extern int g_nv2a_lockfree;
+
+/* Which registers the contended reads were for (pgraph_rd, pfifo_rd). */
+typedef struct Nv2aAddrStat {
+    uint32_t block, addr;
+    uint64_t n, wait_ns;
+} Nv2aAddrStat;
+extern Nv2aAddrStat g_nv2a_addr_stats[32];
+extern __thread int64_t g_nv2a_last_wait_ns;
+
+static inline void nv2a_note_addr(uint32_t block, uint32_t addr)
+{
+    if (!g_nv2a_last_wait_ns) {
+        return;
+    }
+    for (int i = 0; i < 32; i++) {
+        Nv2aAddrStat *a = &g_nv2a_addr_stats[i];
+        if (!a->n || (a->block == block && a->addr == addr)) {
+            a->block = block;
+            a->addr = addr;
+            a->n++;
+            a->wait_ns += g_nv2a_last_wait_ns;
+            break;
+        }
+    }
+    g_nv2a_last_wait_ns = 0;
+}
+
+static inline void nv2a_timed_lock(QemuMutex *m, int idx)
+{
+    Nv2aLockStat *st = &g_nv2a_lock_stats[idx];
+
+    st->n++;
+    g_nv2a_last_wait_ns = 0;
+    if (qemu_mutex_trylock(m) == 0) {
+        return;
+    }
+    int64_t t0 = get_clock();
+    qemu_mutex_lock(m);
+    int64_t w = get_clock() - t0;
+    st->contended++;
+    st->wait_ns += w;
+    g_nv2a_last_wait_ns = w;
+    if (w > st->max_ns) {
+        st->max_ns = w;
+    }
+}
 
 static inline
 void nv2a_reg_log_read(int block, hwaddr addr, unsigned int size, uint64_t val)
