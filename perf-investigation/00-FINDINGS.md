@@ -3803,3 +3803,41 @@ Section Q's Halo range does not apply to slot 1, which has 2-3% headroom.
 **Battery-gauge note:** level fell 36 → 24% in the Smart run, but only
 79 → 76% in the Sport run, under identical load. That reading is not
 trustworthy as an energy measure.
+
+**100% FAN: THE TAIL STAYS AT ITS COLD LEVEL.** Customize mode
+(`fan_mode=6`, `fan_speed=100`), with PWM duty logged per run (50000/50000
+throughout). On battery, from 35.5 °C, same 20-minute soak:
+
+| runs | >50 ms | GHz | die °C |
+|---|---|---|---|
+| 1-10 | 8.4 | 2.943 | 80 |
+| 21-30 | 7.4 | 2.937 | 88 |
+| 41-50 | 8.9 | 2.918 | 90 |
+| 71-78 | 9.2 | 2.911 | 90 |
+
+| steady state, runs 41-78 | Smart (≤58%) | Sport (50%) | **100%** |
+|---|---|---|---|
+| frames > 50 ms | 21.7 | 19.2 | **8.8 (-59%)** |
+| frames > 66 ms | 0.61 | 0.47 | **0.05** |
+| eff. GHz | 2.799 | 2.832 | **2.914 (+4.1%)** |
+| die °C | 91.6 | 91.7 | 90.0 |
+
+- This is cross-session, but the effect is ~5x the Smart/Sport difference.
+  It holds in every bucket after minute 5, and it matches the clock →
+  tail curve from the Smart run (2.91 GHz ≈ 9 frames there too).
+- **The limiter is not the die sensor.** The die ran only 1.6 °C cooler,
+  yet the clock was 4% higher. The throttle follows a slower board/skin
+  sensor, and that is what the fan cools. This corrects "the die is
+  regulated, the fan cannot lift it" above.
+- **Sustained heavy play on a Thor wants a 100% fan.** That holds slot 1 at
+  cold-device performance indefinitely, against ~2.5x the slow frames on
+  Smart after 10 minutes.
+
+**Can the app do this itself?** It is not attempted yet.
+- The duty node `/sys/class/gpio5_pwm2/duty` is world-writable, but AYN's
+  `FanBase` rewrites it every ~1-2 s in Smart mode, and SELinux may deny
+  an app.
+- `fan_mode` / `fan_speed` are non-public `Settings.System` keys, which
+  apps targeting API 23+ cannot write.
+- The practical route is to tell the player: suggest Fan → Customize →
+  max for heavy games.
