@@ -3747,3 +3747,42 @@ Sport fan, **plugged in**, charging from 25% at up to 3 A (25 → 45% in
 - Fan comparisons must be run on battery. Advise players that a
   fast-charging Thor will run heavy scenes noticeably worse.
 - Sport mode is a fixed speed, so `FanBase` logs nothing in it.
+
+**Sport fan, on battery: a small gain.** Same 20-minute soak, from 36 °C
+(Smart's run started at 31 °C):
+
+| runs | Smart: >50 / GHz / die | Sport: >50 / GHz / die |
+|---|---|---|
+| 1-10 | 7.5 / 2.940 / 78 | 9.7 / 2.940 / 84 |
+| 11-20 | 6.9 / 2.932 / 87 | 13.1 / 2.895 / 90 |
+| 21-30 | 11.0 / 2.881 / 90 | 16.4 / 2.854 / 91 |
+| 31-40 | 17.0 / 2.839 / 91 | 18.1 / 2.840 / 92 |
+| 41-50 | 20.6 / 2.818 / 91 | 18.3 / 2.836 / 92 |
+| 51-60 | 19.3 / 2.798 / 92 | 20.2 / 2.832 / 92 |
+| 61-70 | 22.9 / 2.792 / 92 | 18.0 / 2.830 / 92 |
+| 71-78 | 24.4 / 2.784 / 92 | 20.8 / 2.829 / 91 |
+| **runs 41-78** | **21.7 / 2.799** | **19.2 / 2.832** |
+
+- **Steady state:** +1.2% clock, ~12% fewer frames over 50 ms.
+- **Early on, Sport was worse**, because it started 5 °C warmer.
+- These are separate sessions, so treat the difference as indicative only.
+
+**Why so small: the die is regulated, not cooled.** Under either fan the die
+sits at 91-92 °C, and the clock is whatever holds it there. A stronger fan
+shifts that equilibrium slightly; it cannot lift it. **The device-side
+levers are now used up:**
+- Performance mode is at its top setting.
+- Sport fan gives +1%.
+- Turnip R3 is already in use.
+- Render scale is already 1×.
+- A8 is moot (section BA), and the lower panel buys nothing (section AX).
+
+**What is left is our own power.** At a regulated die temperature, every
+watt the emulator does not burn becomes clock. That means the vCPU's
+instruction count (C6/C7), the NV2A thread (~38% of process cycles, on the
+2.8 GHz cluster), and idle spin in light scenes (section Q's 10-15 °C).
+Section Q's Halo range does not apply to slot 1, which has 2-3% headroom.
+
+**Battery-gauge note:** level fell 36 → 24% in the Smart run, but only
+79 → 76% in the Sport run, under identical load. That reading is not
+trustworthy as an energy measure.
