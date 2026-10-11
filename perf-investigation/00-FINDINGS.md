@@ -3685,3 +3685,49 @@ frames over 50 ms. Interleaved in one process:
 last cycle could only be removed per load, with a correctness argument, for a
 gain of ≤ ~0.1 ms.
 
+
+---
+
+## BJ. C8 SOAK: A 5% CLOCK LOSS TRIPLES THE TAIL (2026-10-11)
+
+78 back-to-back `BENCHMARK --ei slot 1 --ei frames 300` runs in one process,
+20 minutes from a cold device (31 °C idle). Smart fan, High Performance,
+Turnip R3, on battery (36 -> 24%). Script: `scratchpad/soak.sh`.
+
+| runs | min | frames > 50 ms | vCPU ms | eff. GHz | die °C | fan |
+|---|---|---|---|---|---|---|
+| 1-10 | 0 | **7.5** | 31.52 | **2.940** | 78 | 42% |
+| 11-20 | 3 | 6.9 | 31.57 | 2.932 | 87 | 52% |
+| 21-30 | 5 | 11.0 | 31.92 | 2.881 | 90 | 56% |
+| 31-40 | 8 | 17.0 | 32.31 | 2.839 | 91 | 58% |
+| 41-50 | 11 | 20.6 | 32.42 | 2.818 | 91 | 58% |
+| 51-60 | 13 | 19.3 | 32.51 | 2.798 | 92 | 58% |
+| 61-70 | 16 | 22.9 | 32.71 | 2.792 | 92 | 58% |
+| 71-78 | 18 | **24.4** | 32.86 | **2.784** | 92 | 58% |
+
+Grouped by clock instead, the relation is monotonic:
+- 2.94 GHz: ~7 frames;
+- 2.84 GHz: ~17 frames;
+- 2.78 GHz: ~24 frames.
+
+**The tail is extremely clock-sensitive.** -5.3% clock gives +3.3x
+frames over 50 ms, because slot 1's heavy frames sit just past the
+budget. vCPU time moved only +4%.
+- BH's 25-29 (taken on a hot device) was mostly heat.
+- A cold device gives ~7 on the same state.
+
+**Every tail A/B must be read against this.** A 1% clock drift is worth
+~3 frames here.
+
+**The throttle is slow and is not the die sensor.**
+- The die plateaus at 91-92 °C from minute 8, but the clock keeps sliding
+  for another 10 minutes.
+- cpufreq has reported max throughout in earlier sections (AO, T), so the
+  limit is hidden from the OS view.
+- The likely limiters are a slower board or skin sensor (FanBase's input
+  reached 75-76 °C) or the SoC's hardware limits management.
+
+**The Smart fan curve stops at 58%,** and holds there while the clock
+keeps falling. AYN's other modes are Sport and Customize
+(`settings system fan_mode`: 4 = Smart). Performance mode is already High
+Performance (`performance_mode=2`), the top setting.
