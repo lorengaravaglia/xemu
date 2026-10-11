@@ -3993,3 +3993,30 @@ runs ahead and idles in its own loop. It is net power on the X3 against
 
 **Both are now default on.** `debug.xemu.tex_reset=0` and
 `debug.xemu.nv2a_lockfree=0` restore the old behaviour.
+
+**Soak (C8 conditions: Smart fan, battery 32%, 20 min, from 39 °C; 66
+runs) — the gain holds hot:**
+
+| runs | >50 ms | GHz | die °C | fan |
+|---|---|---|---|---|
+| 1-10 | 0.9 | 2.934 | 90 | 48% |
+| 21-30 | 2.1 | 2.853 | 94 | 54% |
+| 41-50 | 3.4 | 2.840 | 95 | 55% |
+| 61-66 | 3.7 | 2.830 | 94 | 55% |
+
+| steady state (runs 41+) | BJ Smart soak | lock-free + reset |
+|---|---|---|
+| frames > 50 ms | 21.7 | **3.5 (-84%)** |
+| frames > 66 ms | 0.61 | **0** |
+| eff. GHz | 2.799 | **2.834** |
+| die °C | 91.6 | 94.5 |
+| FanBase sensor °C / fan | ~75 / 58% | ~73 / 55% |
+
+- The die runs ~3 °C hotter (the vCPU is no longer asleep in futex), but
+  the board sensor runs ~2 °C cooler and the sustained clock is
+  *higher*. That is consistent with BJ's finding that the throttle
+  follows the board/skin sensor, not the die.
+- The tail at steady state is better than the cold-device baseline was
+  (~7).
+- These are separate sessions, but the effect is ~6x the
+  Smart-vs-Sport-fan difference.
