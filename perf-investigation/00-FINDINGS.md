@@ -3748,7 +3748,22 @@ Sport fan, **plugged in**, charging from 25% at up to 3 A (25 → 45% in
   fast-charging Thor will run heavy scenes noticeably worse.
 - Sport mode is a fixed speed, so `FanBase` logs nothing in it.
 
-**Sport fan, on battery: a small gain.** Same 20-minute soak, from 36 °C
+**CORRECTION (same day): Sport is not a stronger fan.** Reading the PWM
+node shows Sport is a **fixed 50%**: `/sys/class/gpio5_pwm2/duty` =
+25000 with `period` = 50000. Smart ramps to 58% (smartSpeed 29000) under
+this load. So:
+- Sport ran *more* air than Smart only in the first ~5 minutes, and
+  *less* at steady state.
+- The +1.2% below therefore cannot be the fan. It is session-to-session
+  variation (start temperature, ambient, battery), and is this harness's
+  cross-session noise floor.
+- **The fan has not yet been tested at full speed.** Customize allows a
+  curve up to 100% (duty 50000).
+
+The node is world-writable (`-rw-rw-rw-`) and readable, which makes fan
+duty loggable per run.
+
+**Sport fan, on battery (kept for the record; see the correction above).** Same 20-minute soak, from 36 °C
 (Smart's run started at 31 °C):
 
 | runs | Smart: >50 / GHz / die | Sport: >50 / GHz / die |
@@ -3767,6 +3782,8 @@ Sport fan, **plugged in**, charging from 25% at up to 3 A (25 → 45% in
 - **Early on, Sport was worse**, because it started 5 °C warmer.
 - These are separate sessions, so treat the difference as indicative only.
 
+**Superseded in part by the correction above.** The die *is* regulated at
+~92 °C, but whether a 100% fan lifts the equilibrium is untested.
 **Why so small: the die is regulated, not cooled.** Under either fan the die
 sits at 91-92 °C, and the clock is whatever holds it there. A stronger fan
 shifts that equilibrium slightly; it cannot lift it. **The device-side
