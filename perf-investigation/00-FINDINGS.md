@@ -3577,3 +3577,42 @@ frames in 4 runs on the old build. Not seen in 8 runs since; unexplained.
 **Trade-off:** a newly seen object or effect can be missing for a frame or
 two, once. Compile throughput is unchanged (~2.1 s of CPU cold for Halo's
 boot), just off the render thread.
+
+## BH. PLAY TEST: COMPILES ABSORBED; THE REMAINING DROPS ARE x86 CPU LOAD (2026-10-10)
+
+**Live play, Halo, background compilation on.**
+- New-area shaders compiled at 19:00:02-19:00:22: 4 SPIR-V and ~10 pipelines,
+  with 40 draws skipped. **There were zero slow frames in that minute.**
+- The drop the user reported was sustained, not a hitch:
+  - 19:05:19-49 and 19:06:44-07:01, with 50-67 ms frames back to back
+    (~17-20 fps);
+  - 137 slow frames in one minute, against 1-11 otherwise;
+  - for those frames: shaders +0, TLB flushes +0, low notdirty, vblank
+    still locked.
+
+**A heavy-scene save state at last.** The user saved that spot to **slot 1**.
+Benchmark, 300 frames, no input, three runs back to back:
+
+| run | frames > 50 ms | worst | vCPU ms/frame (budget 33.33) |
+|---|---|---|---|
+| 1 | 25 | 66 ms | 32.27 |
+| 2 | 28 | 67 ms | 32.47 |
+| 3 | 29 | 68 ms | 32.53 |
+
+- **vCPU-bound:** util 92%, headroom 2-3%.
+- **Slow frames are heavier frames:** 1.60× cycles and 1.48× host work at
+  similar IPC (3.16 vs 2.92). MMIO rises ×3.35 in them.
+- **Stalls:** frontend 19.6%, backend 20.9%; L1I misses 4.0 M/frame.
+- **Heat:** CPU at 92.3 °C. The effective vCPU clock was **2.74 GHz**,
+  against 2.93 GHz in the section U calibration on a cooler device, so heat
+  costs ~6-7%. It does not explain the drops alone: heavy frames need ~134
+  Mcyc, against a 33 ms budget of ~98 Mcyc even at 2.93 GHz.
+- Android's thermal status was 0 and policy max clocks were uncapped right
+  after the run.
+- Live play was heavier than the no-input benchmark: ~17-20 fps against
+  28.3 fps mean.
+
+**This is the first state that is CPU-bound for real.** Slot 7's dip was
+display pacing (section AZ). Slot 1 is the right benchmark for the C items
+(C3 LDAPR follow-ups, C6/C7 compiler, C8 heat). Its spread is ±2 frames over
+50 ms across three back-to-back runs, which is warming the device.
