@@ -3731,3 +3731,19 @@ budget. vCPU time moved only +4%.
 keeps falling. AYN's other modes are Sport and Customize
 (`settings system fan_mode`: 4 = Smart). Performance mode is already High
 Performance (`performance_mode=2`), the top setting.
+
+**Side result: fast charging costs more than the Sport fan gains.**
+Sport fan, **plugged in**, charging from 25% at up to 3 A (25 → 45% in
+~20 min). Stopped at run 21 because it is confounded:
+
+| run | 1 | 5 | 10 | 15 | 21 |
+|---|---|---|---|---|---|
+| eff. GHz | 2.93 | 2.89 | 2.80 | 2.75 | **2.71** |
+| frames > 50 ms | 25 | 22 | 32 | 33 | **38** |
+
+- At 5 minutes it was already below anything the Smart fan reached on
+  battery in 20 (2.78 GHz, 24 frames).
+- Fast charging is a heat source large enough to swamp the fan setting.
+- Fan comparisons must be run on battery. Advise players that a
+  fast-charging Thor will run heavy scenes noticeably worse.
+- Sport mode is a fixed speed, so `FanBase` logs nothing in it.
