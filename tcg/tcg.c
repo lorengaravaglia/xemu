@@ -161,6 +161,19 @@ int g_ldst_stub;
  */
 int g_ldapr;
 /*
+ * debug.xemu.ldapr_lat=N: N extra dependent `ADD Xbase, Xbase, #0` on the
+ * TLB addend -> ordered load chain.  Measurement only: each adds exactly one
+ * cycle of latency (on-device probe; the core does not eliminate them), so the
+ * slope prices the composing ADD that LDAPR forces on every guest load
+ * (OPEN-WORK C3).
+ */
+int g_ldapr_lat;
+/*
+ * debug.xemu.ldapr_uxtw=1: compose the ordered load's address with the old
+ * extended-register ADD instead of MOV + plain ADD.  For A/B only.
+ */
+int g_ldapr_uxtw;
+/*
  * Honour the guest's x87 rounding mode (OPEN-WORK C4, FINDINGS BB).  When
  * set, the AArch64 backend converts float->int with FRINTI+FCVTZS (rounds by
  * FPCR) instead of FCVTNS (always nearest), and update_fp_status() copies the

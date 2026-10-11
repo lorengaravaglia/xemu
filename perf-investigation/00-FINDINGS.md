@@ -387,6 +387,7 @@ From the heavy-frames agent, not yet measured:
 | Return-address-stack prediction | our mispredict rate is 0.10%; X3 already solves it |
 | Hardware-assisted guest MMU (Captive) | requires EL2, unavailable to an Android app |
 | Xbox HLE "constant offset" shortcut | reduces to fastmem, already neutral |
+| Exempting stack loads from LDAPR (C3) | LDAPR costs the same as LDR on this core (section BI); only ~1 cycle of ADD left to win, not worth a correctness argument |
 | APU `voice_lock` contention at game startup | **MEASURED 2026-09-26:** the vCPU spends 19% of Halo's startup blocked on `d->lock` in `voice_lock`, but removing *all* voice-lock locking (unsafe ceiling build) moved tap-to-logo only 7.4 -> 7.3 s (3 launches each, interleaved). Off the critical path. A lock-free-unlock variant also failed to reach the logo once in 3 launches. Reverted. |
 | ADPF performance hint session | **MEASURED 2026-09-23, section AO:** wins 1 of 4 interleaved pairs; the vCPU core and NV2A cluster are already at max clock without it. Kept off, `debug.xemu.adpf`. |
 | Out-of-lining memory access as built | -23% code, -19.5% L1I, but +15% instructions cancels it — section AC |
@@ -3616,3 +3617,71 @@ Benchmark, 300 frames, no input, three runs back to back:
 display pacing (section AZ). Slot 1 is the right benchmark for the C items
 (C3 LDAPR follow-ups, C6/C7 compiler, C8 heat). Its spread is ±2 frames over
 50 ms across three back-to-back runs, which is warming the device.
+
+---
+
+## BI. C3: LDAPR IS FREE; THE ADDRESS ADD WAS 2 CYCLES, NOW 1 (2026-10-10)
+
+**Priced natively first** (`scratchpad/ldprobe`, cpu7, PMU cycles, reproduced
+twice to within 0.01 cyc):
+
+| per load, cycles | chain, L1 | independent, L1 | chain, DRAM |
+|---|---|---|---|
+| `LDR [b, w, uxtw]` | 4.1 | 1.06 | ~395 |
+| `ADD uxtw` + `LDR [x]` | 6.1 | 1.07 | ~396 |
+| `ADD uxtw` + `LDAPR` | 6.1 | 1.06 | ~399 |
+| `DMB ISHLD` + `LDR` | 7.3 | **7.7** | ~395 |
+
+- **LDAPR costs exactly what LDR costs**, in every case, MLP included.
+  The ordering is free on this core, so a stack-load exemption has
+  nothing to recover except the ADD. Added to the dead ends.
+- The whole remaining cost is the composing ADD. It costs **2 cycles,
+  because the extended-register (`uxtw`) form is a 2-cycle op**, and it
+  sits on the addend → load chain. A plain ADD is 1 cycle, and an extra
+  `ADD #0` on the chain adds exactly 1 (it is not eliminated).
+- Throughput-wise, DMB ISHLD costs ~6.6 cycles per load even with nothing
+  outstanding. That is the mechanism behind section AL's tail win.
+
+**What a cycle on that chain is worth in the emulator.** The new knob
+`debug.xemu.ldapr_lat=N` puts N `ADD Xb, Xb, #0` on the addend. Slot 1 was
+measured with `BENCHMARK --ei slot 1` immediately after load. **A settle first
+misses the heavy stretch:** with 12 s of settle, the same slot gave 0-5
+frames over 50 ms. Interleaved in one process:
+
+| | +8 cycles (0 8 8 0) | +2 cycles (0 2 2 0 0 2 2 0) |
+|---|---|---|
+| Δ vCPU ms/frame | +2.23 | +0.50 |
+| frames > 50 ms | 35 → 51 | 33.8 → 41.3 |
+
+**~0.26 ms per cycle per ordered load**, consistent between the two. That is
+~22% of the 3.3 M loads' latency landing on the critical path. The old ADD's
+2 cycles were therefore worth ~0.5 ms/frame.
+
+**Shipped:** `MOV Wtmp0, Waddr` + plain `ADD TMP2, TMP1, TMP0`.
+- The MOV depends only on the guest address, so it runs in the TLB load's
+  shadow. Probe: 6 → 5 cycles.
+- Demotion is unchanged: the patcher already decodes the LSL form, and
+  rewrites it to `LDR [TMP1, TMP0]`, where TMP0 still holds the
+  zero-extended address.
+- `debug.xemu.ldapr_uxtw=1` restores the old form for A/B.
+- Engagement: code is ~1% larger (+0.23-0.29 MB, 4 B per site), and
+  demotions keep working (0 foreign faults across 20 runs).
+
+| block (slot 1, 300 frames) | old vCPU / >50 | new vCPU / >50 | Δ vCPU |
+|---|---|---|---|
+| 1 0 0 1 (hot run, part 1) | 33.87 / 38 | 32.79 / 17.5 | -1.08 |
+| 1 0 0 1 (part 2) | 33.92 / 33.5 | 33.65 / 31 | -0.27 |
+| 1 0 0 1 (part 3) | 34.22 / 38.5 | 34.12 / 38.5 | -0.10 |
+| 0 1 1 0 x2, after cooldown to 47.5 °C | 33.44 / 29.3 | 33.26 / 29.0 | -0.18 |
+| **all 20 runs** | **33.77 / 33.7** | **33.41 / 29.0** | **-0.36 (-1.1%)** |
+
+- **vCPU:** better in all four blocks, with the size the slope predicted.
+- **Tail:** not established. Only the first block moved it.
+- **Harness note:** runs alternate fast and slow (and large and small code)
+  by position in the process, whatever the config. Keep the orders
+  parity-balanced (ABBA does this).
+
+**C3 is closed.** The ordering costs nothing, and half the ADD is gone. The
+last cycle could only be removed per load, with a correctness argument, for a
+gain of ≤ ~0.1 ms.
+

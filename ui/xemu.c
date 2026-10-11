@@ -2614,8 +2614,12 @@ static void bench_tick(void)
                  * patchpoint is doing its job; a large one means most sites
                  * are unaligned and the cheap form is not worth its slot.
                  */
-                ALOGI("bench: LDAPR mode=%d patched=%llu foreign-sigbus=%llu",
-                      g_ldapr, xemu_ldapr_patched, xemu_ldapr_foreign);
+                extern int g_ldapr_lat;
+                extern int g_ldapr_uxtw;
+                ALOGI("bench: LDAPR mode=%d lat=%d uxtw=%d patched=%llu "
+                      "foreign-sigbus=%llu",
+                      g_ldapr, g_ldapr_lat, g_ldapr_uxtw, xemu_ldapr_patched,
+                      xemu_ldapr_foreign);
             }
         }
 

@@ -356,6 +356,37 @@ void x86_refresh_fpu_mode(void)
         }
 
         {
+            extern int g_ldapr_uxtw;
+            char uv[PROP_VALUE_MAX] = { 0 };
+            int wantu = __system_property_get("debug.xemu.ldapr_uxtw", uv) > 0
+                        && uv[0] == '1';
+
+            if (wantu != g_ldapr_uxtw) {
+                g_ldapr_uxtw = wantu;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
+            extern int g_ldapr_lat;
+            char lv[PROP_VALUE_MAX] = { 0 };
+            int wantl = __system_property_get("debug.xemu.ldapr_lat", lv) > 0 ?
+                        atoi(lv) : 0;
+
+            if (wantl < 0 || wantl > 8) {
+                wantl = 0;
+            }
+            if (wantl != g_ldapr_lat) {
+                g_ldapr_lat = wantl;
+                if (first_cpu) {
+                    queue_tb_flush(first_cpu);
+                }
+            }
+        }
+
+        {
             extern int g_reserve_x15;
             char rv[PROP_VALUE_MAX] = { 0 };
             int wantr = __system_property_get("debug.xemu.reserve_x15", rv) > 0

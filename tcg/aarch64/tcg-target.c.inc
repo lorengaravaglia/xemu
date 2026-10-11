@@ -2167,7 +2167,25 @@ static void tcg_out_qemu_ld_ordered(TCGContext *s, MemOp memop, TCGType ext,
         base = h.base;
     } else {
         base = TCG_REG_TMP2;
-        if (h.index_ext == TCG_TYPE_I32) {
+        /* Pricing knob; precedes the ADD so demotion still finds the pair. */
+        for (int k = 0; k < g_ldapr_lat; k++) {
+            tcg_out_insn(s, 3401, ADDI, TCG_TYPE_I64, h.base, h.base, 0);
+        }
+        if (h.index_ext == TCG_TYPE_I32 && !g_ldapr_uxtw) {
+            /*
+             * Zero-extend the guest address first, then a plain ADD.  The
+             * extended-register ADD costs 2 cycles on these cores against 1
+             * for the plain form, and it sits on the critical path: the
+             * addend arrives from the TLB load last.  The MOV depends only
+             * on the guest address, which is ready long before, so it runs
+             * in the shadow of that load (probe: 6 -> 5 cycles per dependent
+             * load; FINDINGS BI).  TMP0 is free once the comparison is done,
+             * and demotion turns this ADD into LDR [TMP1, TMP0], which still
+             * holds the zero-extended address.
+             */
+            tcg_out_mov(s, TCG_TYPE_I32, TCG_REG_TMP0, h.index);
+            tcg_out_insn(s, 3502, ADD, 1, base, h.base, TCG_REG_TMP0);
+        } else if (h.index_ext == TCG_TYPE_I32) {
             tcg_out_insn(s, 3501, ADD, TCG_TYPE_I64, base,
                          h.base, h.index, MO_32, 0);
         } else {
@@ -2312,6 +2330,8 @@ extern int g_ldst_pad_bytes;
 extern int g_reserve_x15;
 extern int g_ldst_stub;
 extern int g_ldapr;
+extern int g_ldapr_lat;
+extern int g_ldapr_uxtw;
 extern int g_xemu_x87_rc;
 extern int g_mb_mode;
 
