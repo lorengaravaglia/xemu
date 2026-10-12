@@ -155,6 +155,8 @@ void xemu_android_get_rumble(uint16_t *left, uint16_t *right);
  * xemu_android_last_state_error() until the next call. */
 bool xemu_android_save_state(const char *name);
 bool xemu_android_load_state(const char *name);
+bool xemu_android_delete_state(const char *name);
+void xemu_android_prune_states(void);
 const char *xemu_android_last_state_error(void);
 
 /* Return names of all existing snapshots in *out_names.

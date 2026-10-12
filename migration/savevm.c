@@ -3314,6 +3314,388 @@ bool save_snapshot(const char *name, bool overwrite, const char *vmstate,
     return ret == 0;
 }
 
+#ifdef XBOX
+/*
+ * Fast save states (Android).
+ *
+ * save_snapshot() writes the ~70 MB machine state into the qcow2 image while
+ * the VM is stopped: 460 ms when overwriting a state, 740 ms for a new one,
+ * felt as a freeze on every save.  Here the VM stays stopped only while the
+ * state is copied to memory and the disk gets a state-less internal
+ * snapshot (~130 ms); the copy is written to a file after the VM resumes.
+ *
+ * The file is named after the snapshot's creation time, so a state can only
+ * ever be paired with the disk snapshot it was taken with:
+ *
+ *     <dir>/<name>@<date_sec>.<date_nsec>.xstate
+ *
+ * A new state is created next to the old one (qcow2 allows duplicate names;
+ * ids stay unique), and loads take the newest loadable one.  The old
+ * snapshot is deleted later, by xemu_fast_prune() while the game is paused:
+ * deleting one costs ~80 ms on the main loop, a second hitch if done during
+ * play.  A crash at any point leaves the previous state loadable.  States saved by save_snapshot() (state inside the image)
+ * still load through load_snapshot().
+ */
+#define XSTATE_MAGIC   0x31545358u   /* "XST1" */
+
+typedef struct XemuStateHeader {
+    uint32_t magic;
+    uint32_t header_size;
+    uint32_t date_sec, date_nsec;
+    uint64_t vm_clock_nsec;
+    uint64_t state_size;
+} XemuStateHeader;
+
+static struct {
+    uint8_t *data;          /* the captured state, taken from the channel */
+    size_t size;
+    QEMUSnapshotInfo sn;
+    char *dir;
+} xs_pending;
+
+static char *xstate_path(const char *dir, const QEMUSnapshotInfo *sn)
+{
+    return g_strdup_printf("%s/%s@%u.%u.xstate", dir, sn->name,
+                           sn->date_sec, sn->date_nsec);
+}
+
+/* Snapshots named name, in image order (creation order). */
+static int xstate_find_all(BlockDriverState *bs, const char *name,
+                           QEMUSnapshotInfo **out)
+{
+    QEMUSnapshotInfo *tab = NULL;
+    int n = bdrv_snapshot_list(bs, &tab), k = 0;
+
+    *out = g_new0(QEMUSnapshotInfo, n > 0 ? n : 1);
+    for (int i = 0; i < n; i++) {
+        if (!strcmp(tab[i].name, name)) {
+            (*out)[k++] = tab[i];
+        }
+    }
+    g_free(tab);
+    return k;
+}
+
+static bool xstate_loadable(const char *dir, const QEMUSnapshotInfo *sn)
+{
+    if (sn->vm_state_size > 0) {
+        return true;                    /* old format: state in the image */
+    }
+    g_autofree char *path = xstate_path(dir, sn);
+    return access(path, R_OK) == 0;
+}
+
+/* Main loop, BQL held.  Stops the VM, captures, snapshots the disk, resumes. */
+bool xemu_fast_save_begin(const char *name, const char *dir, Error **errp)
+{
+    RunState saved_state = runstate_get();
+    BlockDriverState *bs;
+    QEMUFile *f;
+    int ret;
+    int64_t t0 = get_clock(), t1, t2;
+    g_autoptr(GDateTime) now = g_date_time_new_now_local();
+
+    GLOBAL_STATE_CODE();
+    assert(!xs_pending.data);
+
+    if (!migrate_can_snapshot(errp) || migration_is_blocked(errp) ||
+        !bdrv_all_can_snapshot(false, NULL, errp)) {
+        return false;
+    }
+    bs = bdrv_all_find_vmstate_bs(NULL, false, NULL, errp);
+    if (!bs) {
+        return false;
+    }
+
+    global_state_store();
+    vm_stop(RUN_STATE_SAVE_VM);
+
+    QIOChannelBuffer *bioc = qio_channel_buffer_new(80 * 1024 * 1024);
+    f = qemu_file_new_output(QIO_CHANNEL(bioc));
+    ret = qemu_savevm_state(f, errp);
+    qemu_fflush(f);
+    /* Take the data before closing: closing a buffer channel frees it. */
+    xs_pending.data = bioc->data;
+    xs_pending.size = bioc->usage;
+    bioc->data = NULL;
+    bioc->capacity = bioc->usage = bioc->offset = 0;
+    qemu_fclose(f);
+    t1 = get_clock();
+    if (ret == 0 && xs_pending.size == 0) {
+        error_setg(errp, "The machine state came out empty");
+        ret = -1;
+    }
+
+    if (ret == 0) {
+        QEMUSnapshotInfo *sn = &xs_pending.sn;
+
+        memset(sn, 0, sizeof(*sn));
+        pstrcpy(sn->name, sizeof(sn->name), name);
+        sn->date_sec = g_date_time_to_unix(now);
+        sn->date_nsec = g_date_time_get_microsecond(now) * 1000;
+        sn->vm_clock_nsec = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        sn->icount = -1ULL;
+        bdrv_drain_all_begin();
+        ret = bdrv_all_create_snapshot(sn, bs, 0, false, NULL, errp);
+        bdrv_drain_all_end();
+    }
+    t2 = get_clock();
+    vm_resume(saved_state);
+
+    if (ret < 0) {
+        g_free(xs_pending.data);
+        xs_pending.data = NULL;
+        return false;
+    }
+    xs_pending.dir = g_strdup(dir);
+    fprintf(stderr, "fast-save: '%s' id %s | state %.1f ms (%zu KB) | "
+            "disk snapshot %.1f ms | VM stopped %.1f ms\n", name,
+            xs_pending.sn.id_str, (t1 - t0) / 1e6,
+            xs_pending.size / 1024, (t2 - t1) / 1e6,
+            (get_clock() - t0) / 1e6);
+    return true;
+}
+
+/* Any thread, no BQL needed: the VM is already running again. */
+bool xemu_fast_save_write(Error **errp)
+{
+    QEMUSnapshotInfo *sn = &xs_pending.sn;
+    g_autofree char *path = xstate_path(xs_pending.dir, sn);
+    g_autofree char *tmp = g_strconcat(path, ".tmp", NULL);
+    XemuStateHeader h = {
+        .magic = XSTATE_MAGIC, .header_size = sizeof(h),
+        .date_sec = sn->date_sec, .date_nsec = sn->date_nsec,
+        .vm_clock_nsec = sn->vm_clock_nsec,
+        .state_size = xs_pending.size,
+    };
+    int64_t t0 = get_clock();
+    bool ok = false;
+
+    g_mkdir_with_parents(xs_pending.dir, 0700);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "Could not create %s", tmp);
+        return false;
+    }
+    if (qemu_write_full(fd, &h, sizeof(h)) == sizeof(h) &&
+        qemu_write_full(fd, xs_pending.data, h.state_size) ==
+            h.state_size &&
+        fsync(fd) == 0) {
+        ok = true;
+    } else {
+        error_setg_errno(errp, errno, "Could not write the save state");
+    }
+    close(fd);
+    if (ok && rename(tmp, path) != 0) {
+        error_setg_errno(errp, errno, "Could not store the save state");
+        ok = false;
+    }
+    if (!ok) {
+        unlink(tmp);
+    }
+    fprintf(stderr, "fast-save: wrote %llu KB in %.1f ms -> %s\n",
+            (unsigned long long)(h.state_size / 1024),
+            (get_clock() - t0) / 1e6, ok ? "ok" : "FAILED");
+    return ok;
+}
+
+static bool xs_prune_needed = true;   /* once per run: leftovers of a crash */
+
+/*
+ * Main loop, BQL held.  If the file could not be written, the new snapshot
+ * goes again now; otherwise the old one is left for xemu_fast_prune().
+ */
+void xemu_fast_save_end(bool written)
+{
+    QEMUSnapshotInfo *sn = &xs_pending.sn;
+
+    if (written) {
+        xs_prune_needed = true;
+    } else {
+        BlockDriverState *bs = bdrv_all_find_vmstate_bs(NULL, false, NULL, NULL);
+        if (bs) {
+            bdrv_drain_all_begin();
+            bdrv_graph_rdlock_main_loop();
+            bdrv_snapshot_delete(bs, sn->id_str, NULL, NULL);
+            bdrv_graph_rdunlock_main_loop();
+            bdrv_drain_all_end();
+        }
+    }
+    g_free(xs_pending.data);
+    xs_pending.data = NULL;
+    g_free(xs_pending.dir);
+    xs_pending.dir = NULL;
+}
+
+/*
+ * Main loop, BQL held; meant for when the game is paused or exiting.  For
+ * every name with more than one snapshot, keep the newest loadable one and
+ * delete the rest with their files.  Returns how many were deleted.
+ */
+int xemu_fast_prune(const char *dir)
+{
+    BlockDriverState *bs;
+    QEMUSnapshotInfo *tab = NULL;
+    int n, deleted = 0;
+    int64_t t0 = get_clock();
+
+    if (!xs_prune_needed) {
+        return 0;
+    }
+    bs = bdrv_all_find_vmstate_bs(NULL, false, NULL, NULL);
+    if (!bs) {
+        return 0;
+    }
+    n = bdrv_snapshot_list(bs, &tab);
+    g_autofree bool *keep = g_new0(bool, n > 0 ? n : 1);
+    g_autofree bool *dup = g_new0(bool, n > 0 ? n : 1);
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (i != j && !strcmp(tab[i].name, tab[j].name)) {
+                dup[i] = true;
+            }
+        }
+    }
+    /* The newest loadable one of each duplicated name survives. */
+    for (int i = n - 1; i >= 0; i--) {
+        if (!dup[i]) {
+            continue;
+        }
+        bool newer_kept = false;
+        for (int j = i + 1; j < n; j++) {
+            newer_kept |= keep[j] && !strcmp(tab[i].name, tab[j].name);
+        }
+        keep[i] = !newer_kept && xstate_loadable(dir, &tab[i]);
+    }
+    bdrv_drain_all_begin();
+    bdrv_graph_rdlock_main_loop();
+    for (int i = 0; i < n; i++) {
+        bool any_kept = false;
+        for (int j = 0; j < n; j++) {
+            any_kept |= keep[j] && !strcmp(tab[i].name, tab[j].name);
+        }
+        /* Never delete the last of a name, even an unloadable one. */
+        if (!dup[i] || keep[i] || !any_kept) {
+            continue;
+        }
+        g_autofree char *path = xstate_path(dir, &tab[i]);
+        unlink(path);
+        if (bdrv_snapshot_delete(bs, tab[i].id_str, NULL, NULL) == 0) {
+            deleted++;
+        }
+    }
+    bdrv_graph_rdunlock_main_loop();
+    bdrv_drain_all_end();
+    g_free(tab);
+    xs_prune_needed = false;
+    fprintf(stderr, "fast-save: pruned %d old snapshot(s) in %.1f ms\n",
+            deleted, (get_clock() - t0) / 1e6);
+    return deleted;
+}
+
+/*
+ * Main loop, BQL held, VM stopped (RUN_STATE_RESTORE_VM).  Loads the newest
+ * loadable state called name.  *handled is false when that is an old-format
+ * state, which the caller loads with load_snapshot() instead.
+ */
+bool xemu_fast_load(const char *name, const char *dir, bool *handled,
+                    Error **errp)
+{
+    MigrationIncomingState *mis = migration_incoming_get_current();
+    BlockDriverState *bs;
+    g_autofree QEMUSnapshotInfo *all = NULL;
+    QEMUSnapshotInfo *sn = NULL;
+    XemuStateHeader h;
+    QEMUFile *f;
+    int n, fd, ret;
+
+    *handled = false;
+    bs = bdrv_all_find_vmstate_bs(NULL, false, NULL, errp);
+    if (!bs) {
+        return false;
+    }
+    n = xstate_find_all(bs, name, &all);
+    for (int i = n - 1; i >= 0; i--) {
+        if (xstate_loadable(dir, &all[i])) {
+            sn = &all[i];
+            break;
+        }
+    }
+    if (!sn || sn->vm_state_size > 0) {
+        return false;                   /* none, or old format */
+    }
+    *handled = true;
+
+    g_autofree char *path = xstate_path(dir, sn);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || read(fd, &h, sizeof(h)) != sizeof(h) ||
+        h.magic != XSTATE_MAGIC || h.header_size != sizeof(h) ||
+        h.date_sec != sn->date_sec || h.date_nsec != sn->date_nsec ||
+        h.state_size == 0 ||
+        lseek(fd, 0, SEEK_END) != (off_t)(sizeof(h) + h.state_size) ||
+        lseek(fd, sizeof(h), SEEK_SET) != (off_t)sizeof(h)) {
+        if (fd >= 0) {
+            close(fd);
+        }
+        error_setg(errp, "The save state file is missing or damaged");
+        return false;
+    }
+
+    replay_flush_events();
+    bdrv_drain_all_begin();
+    ret = bdrv_all_goto_snapshot(sn->id_str, false, NULL, errp);
+    if (ret < 0) {
+        close(fd);
+        bdrv_drain_all_end();
+        return false;
+    }
+
+    QIOChannelFile *fioc = qio_channel_file_new_fd(fd);
+    f = qemu_file_new_input(QIO_CHANNEL(fioc));
+    object_unref(OBJECT(fioc));
+
+    qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
+    mis->from_src_file = f;
+    if (!yank_register_instance(MIGRATION_YANK_INSTANCE, errp)) {
+        bdrv_drain_all_end();
+        return false;
+    }
+    ret = qemu_loadvm_state(f, errp);
+    migration_incoming_state_destroy();
+    bdrv_drain_all_end();
+    return ret >= 0;
+}
+
+/* Main loop, BQL held.  Deletes every snapshot called name, and its file. */
+int xemu_fast_delete(const char *name, const char *dir, Error **errp)
+{
+    BlockDriverState *bs = bdrv_all_find_vmstate_bs(NULL, false, NULL, errp);
+    g_autofree QEMUSnapshotInfo *all = NULL;
+    int n;
+
+    if (!bs) {
+        return -1;
+    }
+    n = xstate_find_all(bs, name, &all);
+    if (n == 0) {
+        error_setg(errp, "Snapshot '%s' does not exist", name);
+        return -1;
+    }
+    /* By id: there can be more than one of a name (see above). */
+    bdrv_drain_all_begin();
+    bdrv_graph_rdlock_main_loop();
+    for (int i = 0; i < n; i++) {
+        g_autofree char *path = xstate_path(dir, &all[i]);
+        unlink(path);
+        bdrv_snapshot_delete(bs, all[i].id_str, NULL, i == 0 ? errp : NULL);
+    }
+    bdrv_graph_rdunlock_main_loop();
+    bdrv_drain_all_end();
+    return 0;
+}
+#endif
+
 void qmp_xen_save_devices_state(const char *filename, bool has_live, bool live,
                                 Error **errp)
 {

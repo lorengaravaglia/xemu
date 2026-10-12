@@ -164,6 +164,15 @@ object NativeInterface {
     external fun listStates(): Array<String>
 
     /**
+     * Delete save states replaced by newer saves.  ~80 ms of emulator time
+     * each, so call it while the game is paused, off the UI thread.
+     */
+    external fun pruneStates()
+
+    /** Delete a snapshot by name; null on success, else the reason.  Blocks. */
+    external fun deleteState(name: String): String?
+
+    /**
      * Returns the current Xbox rumble motor intensities as [left, right],
      * each in range 0–65535. Poll at ~100 ms intervals during emulation.
      */

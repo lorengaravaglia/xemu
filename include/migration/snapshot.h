@@ -68,4 +68,13 @@ bool delete_snapshot(const char *name,
  */
 void load_snapshot_resume(RunState state);
 
+/* Fast save states (Android, migration/savevm.c). */
+bool xemu_fast_save_begin(const char *name, const char *dir, Error **errp);
+bool xemu_fast_save_write(Error **errp);
+void xemu_fast_save_end(bool written);
+int xemu_fast_prune(const char *dir);
+bool xemu_fast_load(const char *name, const char *dir, bool *handled,
+                    Error **errp);
+int xemu_fast_delete(const char *name, const char *dir, Error **errp);
+
 #endif

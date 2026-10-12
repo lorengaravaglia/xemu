@@ -456,12 +456,30 @@ void xemu_android_frameprof_mark(int starting)
  * internally via AIO_WAIT_WHILE_UNLOCKED. */
 #include "migration/snapshot.h"
 
-typedef enum { MAIN_OP_SAVE, MAIN_OP_LOAD, MAIN_OP_FLUSH } MainThreadOp;
+typedef enum {
+    MAIN_OP_SAVE, MAIN_OP_SAVE_END, MAIN_OP_LOAD, MAIN_OP_FLUSH, MAIN_OP_DELETE,
+    MAIN_OP_PRUNE
+} MainThreadOp;
+
+/*
+ * Where fast save states keep their machine state: "states/" beside the HDD
+ * image (the app's files dir).  See xemu_fast_save_begin().
+ */
+static const char *state_dir(void)
+{
+    static char *dir;
+    if (!dir) {
+        g_autofree char *base = g_path_get_dirname(g_config.sys.files.hdd_path);
+        dir = g_build_filename(base, "states", NULL);
+    }
+    return dir;
+}
 
 static struct {
     MainThreadOp op;
     char         name[64];
     bool         ok;
+    bool         written;   /* MAIN_OP_SAVE_END: the state file was written */
     Error       *err;
 } g_main_req;
 
@@ -499,11 +517,17 @@ static void main_thread_bh(void *opaque)
         if (!runstate_is_running()) {
             vm_state_notify(false, RUN_STATE_SAVE_VM);
         }
-        /* save_snapshot()'s result was previously discarded, so a failed save
-         * was indistinguishable from a successful one all the way up to the
-         * UI, which reported "Saved" either way. */
-        g_main_req.ok = save_snapshot(g_main_req.name, true, NULL, false, NULL,
-                                      &g_main_req.err);
+        /* Captures and resumes; the caller writes the file and then asks
+         * for MAIN_OP_SAVE_END (xemu_android_save_state).  The result goes
+         * all the way up to the UI, so a failed save is never "Saved". */
+        g_main_req.ok = xemu_fast_save_begin(g_main_req.name, state_dir(),
+                                             &g_main_req.err);
+        xemu_snapshots_mark_dirty();
+        break;
+
+    case MAIN_OP_SAVE_END:
+        xemu_fast_save_end(g_main_req.written);
+        g_main_req.ok = true;
         xemu_snapshots_mark_dirty();
         break;
 
@@ -514,8 +538,16 @@ static void main_thread_bh(void *opaque)
         if (!was_running) {
             vm_state_notify(false, RUN_STATE_RESTORE_VM);
         }
-        g_main_req.ok = load_snapshot(g_main_req.name, NULL, false, NULL,
-                                      &g_main_req.err);
+        {
+            bool handled;
+            g_main_req.ok = xemu_fast_load(g_main_req.name, state_dir(),
+                                           &handled, &g_main_req.err);
+            if (!handled && !g_main_req.err) {
+                /* Saved before fast saves: the state is in the image. */
+                g_main_req.ok = load_snapshot(g_main_req.name, NULL, false,
+                                              NULL, &g_main_req.err);
+            }
+        }
         ALOGI("loadstate '%s': %lld ms, ok=%d", g_main_req.name,
               (long long)(qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - lt0),
               g_main_req.ok);
@@ -525,12 +557,27 @@ static void main_thread_bh(void *opaque)
         break;
     }
 
+    case MAIN_OP_DELETE:
+        g_main_req.ok = xemu_fast_delete(g_main_req.name, state_dir(),
+                                         &g_main_req.err) == 0;
+        xemu_snapshots_mark_dirty();
+        break;
+
+    case MAIN_OP_PRUNE:
+        g_main_req.ok = true;
+        if (xemu_fast_prune(state_dir()) > 0) {
+            xemu_snapshots_mark_dirty();
+        }
+        break;
+
     case MAIN_OP_FLUSH:
         g_main_req.ok = true;   /* the calls below abort rather than fail */
         /* vm_stop under BQL (already held) */
         if (runstate_is_running()) {
             vm_stop(RUN_STATE_SHUTDOWN);
         }
+        /* Stopped for good: the one time pruning is sure to be unseen. */
+        xemu_fast_prune(state_dir());
         /* bdrv_drain_all_begin() asserts bql_locked() (qemu_in_main_thread ==
          * bql_locked() in this QEMU build) and manages BQL internally via
          * AIO_WAIT_WHILE_UNLOCKED — do NOT unlock BQL before calling it. */
@@ -593,7 +640,8 @@ static bool dispatch_main_op(MainThreadOp op, const char *name)
 
         if (g_main_req.err) {
             const char *opname = (op == MAIN_OP_SAVE) ? "save"
-                               : (op == MAIN_OP_LOAD) ? "load" : "flush";
+                               : (op == MAIN_OP_LOAD) ? "load"
+                               : (op == MAIN_OP_DELETE) ? "delete" : "flush";
 
             /* Keep the reason, not just a log line nobody reads. */
             snprintf(g_main_last_err, sizeof(g_main_last_err), "%s",
@@ -619,14 +667,78 @@ void xemu_android_flush_block_devices(void)
     dispatch_main_op(MAIN_OP_FLUSH, NULL);
 }
 
+/*
+ * The VM is stopped only for the capture (MAIN_OP_SAVE); the ~70 MB file is
+ * written here, with the game already running again, and the old state is
+ * replaced afterwards.  Still blocks the caller until the save is durable,
+ * so "Saved" and the exit-time Quick resume save mean what they say.
+ * g_state_seq keeps a load or another save from slipping in between.
+ */
+static QemuMutex g_state_seq;
+
+static void state_seq_init(void)
+{
+    qemu_mutex_init(&g_state_seq);
+}
+
+static void state_seq_lock(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, state_seq_init);
+    qemu_mutex_lock(&g_state_seq);
+}
+
 bool xemu_android_save_state(const char *name)
 {
-    return dispatch_main_op(MAIN_OP_SAVE, name);
+    state_seq_lock();
+    bool ok = dispatch_main_op(MAIN_OP_SAVE, name);
+    if (ok) {
+        Error *err = NULL;
+        bool written = xemu_fast_save_write(&err);
+        char why[256] = "";
+        if (err) {
+            snprintf(why, sizeof(why), "%s", error_get_pretty(err));
+            ALOGE("save '%s': %s", name, why);
+            error_free(err);
+        }
+        g_main_req.written = written;
+        dispatch_main_op(MAIN_OP_SAVE_END, name);
+        if (!written) {
+            snprintf(g_main_last_err, sizeof(g_main_last_err), "%s",
+                     why[0] ? why : "Could not write the save state");
+            ok = false;
+        }
+    }
+    qemu_mutex_unlock(&g_state_seq);
+    return ok;
 }
 
 bool xemu_android_load_state(const char *name)
 {
-    return dispatch_main_op(MAIN_OP_LOAD, name);
+    state_seq_lock();
+    bool ok = dispatch_main_op(MAIN_OP_LOAD, name);
+    qemu_mutex_unlock(&g_state_seq);
+    return ok;
+}
+
+/*
+ * Delete the save states that newer saves replaced (xemu_fast_prune).  Costs
+ * ~80 ms of main loop per state, so the app calls it while the game is
+ * paused.  Blocks; call off the UI thread.
+ */
+void xemu_android_prune_states(void)
+{
+    state_seq_lock();
+    dispatch_main_op(MAIN_OP_PRUNE, NULL);
+    qemu_mutex_unlock(&g_state_seq);
+}
+
+bool xemu_android_delete_state(const char *name)
+{
+    state_seq_lock();
+    bool ok = dispatch_main_op(MAIN_OP_DELETE, name);
+    qemu_mutex_unlock(&g_state_seq);
+    return ok;
 }
 
 /* Return names of all existing snapshots in *out_names (caller frees each entry

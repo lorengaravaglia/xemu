@@ -4020,3 +4020,36 @@ runs) — the gain holds hot:**
   (~7).
 - These are separate sessions, but the effect is ~6x the
   Smart-vs-Sport-fan difference.
+
+## BM. SAVES FROZE THE GAME FOR 0.46-0.74 s; FAST SAVES STOP IT FOR ~130 ms (2026-10-11)
+
+A play session with frequent quick saves showed 0.45-0.94 s freezes, each
+bracketed by an AAudio pause/start on the QEMU main-loop thread: a save.
+Timed in place (debug `SAVE_TEST` broadcast, `test_` names only):
+
+| Phase of `save_snapshot()` | New state | Overwriting |
+|---|---|---|
+| Delete the old snapshot (main loop, before the stop) | — | 102 ms |
+| `vm_stop` | 4 ms | 10 ms |
+| Write ~70 MB of state into the qcow2 | **643 ms** (new clusters) | 121 ms |
+| `qemu_fclose` | 0.3 ms | 145 ms |
+| Create the internal snapshot | 88 ms | 84 ms |
+| **Total** | **739 ms** | **462 ms** |
+
+A probe that sent the state to a memory buffer and made a state-less disk
+snapshot stopped the VM for 131-136 ms (state to memory 58 ms, disk
+snapshot 66 ms), so the state file can be written after the resume.
+
+Shipped (`xemu_fast_save_*` in `migration/savevm.c`): the state is written
+to `files/states/<name>@<date>.xstate` after the VM resumes (55-190 ms,
+off the main loop), paired with its disk snapshot by creation time. The
+old snapshot is deleted later, while paused (`xemu_fast_prune`), because
+deleting one costs 70-100 ms of main loop: done right after the save, it
+was a second 110-130 ms hitch.
+
+- Per save: one 161-185 ms frame, down from 0.46-0.74 s (0.6-0.9 s in play).
+- Loading a fast save takes 184-188 ms; old in-image states still load
+  through `load_snapshot()`.
+- Pruning 3 replaced snapshots while paused took 302 ms, unseen.
+- The remaining ~130 ms is about half state capture and half the qcow2
+  snapshot (refcount updates over the whole image). Neither was attempted.

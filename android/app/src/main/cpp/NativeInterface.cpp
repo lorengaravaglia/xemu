@@ -234,6 +234,21 @@ Java_com_boxxy_NativeInterface_loadState(JNIEnv *env, jclass clazz, jstring name
     return env->NewStringUTF(xemu_android_last_state_error());
 }
 
+JNIEXPORT void JNICALL
+Java_com_boxxy_NativeInterface_pruneStates(JNIEnv *env, jclass clazz) {
+    xemu_android_prune_states();
+}
+
+/* Returns null on success, or the reason it failed. */
+JNIEXPORT jstring JNICALL
+Java_com_boxxy_NativeInterface_deleteState(JNIEnv *env, jclass clazz, jstring name) {
+    std::string s = jstringToString(env, name);
+    if (xemu_android_delete_state(s.c_str())) {
+        return nullptr;
+    }
+    return env->NewStringUTF(xemu_android_last_state_error());
+}
+
 JNIEXPORT jintArray JNICALL
 Java_com_boxxy_NativeInterface_getRumble(JNIEnv *env, jclass clazz) {
     uint16_t l = 0, r = 0;

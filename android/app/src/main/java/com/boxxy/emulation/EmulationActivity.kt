@@ -71,6 +71,8 @@ private const val PREF_QUICK_ACTIONS = "panel_quick_actions"
 const val PREF_PANEL_IDLE = "dual_screen_idle"
 private const val PANEL_IDLE_MS = 15_000L
 private const val ACTION_PANEL_SLEEP = "com.boxxy.action.PANEL_SLEEP"
+private const val ACTION_SAVE_TEST = "com.boxxy.action.SAVE_TEST"
+private const val ACTION_DELETE_TEST = "com.boxxy.action.DELETE_TEST"
 
 /** Extras MainActivity uses to start a game once the old emulator is gone. */
 const val EXTRA_RELAUNCH_GAME = "relaunch_game"
@@ -227,6 +229,26 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                     panelHandler.removeCallbacks(panelIdleRunnable)
                     setPanelSleep(BottomPanelState.Sleep.values()[
                         intent.getIntExtra("mode", 0).coerceIn(0, 2)])
+                }
+                /* Debug: save or delete a scratch snapshot, for timing
+                 * saves.  Only "test_" names, so a slot can never be hit. */
+                ACTION_SAVE_TEST, ACTION_DELETE_TEST -> {
+                    val name = intent.getStringExtra("name")
+                    /* Deleting may also take a benchmark capture. */
+                    val allowed = name != null && (name.startsWith("test_") ||
+                        (intent.action == ACTION_DELETE_TEST &&
+                         (name.endsWith("_bench") || name.endsWith("_bench_auto"))))
+                    if (emulationStarted && allowed) {
+                        val save = intent.action == ACTION_SAVE_TEST
+                        Thread {
+                            val t0 = android.os.SystemClock.elapsedRealtime()
+                            val err = if (save) NativeInterface.saveState(name!!)
+                                      else NativeInterface.deleteState(name!!)
+                            Log.i("xemu-android", "${if (save) "savestate" else "deletestate"}: " +
+                                  "'$name' -> ${err ?: "ok"} in " +
+                                  "${android.os.SystemClock.elapsedRealtime() - t0} ms")
+                        }.start()
+                    }
                 }
                 InputRecorder.ACTION_LOAD_STATE -> {
                     if (emulationStarted) {
@@ -812,6 +834,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 addAction(InputRecorder.ACTION_BENCHMARK)
                 addAction(InputRecorder.ACTION_LOAD_STATE)
                 addAction(ACTION_PANEL_SLEEP)
+                addAction(ACTION_SAVE_TEST)
+                addAction(ACTION_DELETE_TEST)
             },
             ContextCompat.RECEIVER_EXPORTED
         )
@@ -837,6 +861,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         unregisterReceiver(playbackReceiver)
         vibrator.cancel()
         NativeInterface.pauseEmulation()  // idempotent: safe even if already user-paused
+        if (emulationStarted) Thread { NativeInterface.pruneStates() }.start()
         inputManager.unregisterInputDeviceListener(this)
         displayManager.unregisterDisplayListener(displayListener)
         /* The lower screen goes back to Android while we are not in front.
@@ -1870,6 +1895,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (paused == userPaused) return
         if (paused) NativeInterface.pauseEmulation() else NativeInterface.resumeEmulation()
         userPaused = paused
+        /* Saves leave the state they replaced for later; paused is later. */
+        if (paused) Thread { NativeInterface.pruneStates() }.start()
         if (!paused) quietBenchWatch(BENCH_QUIET_MS)
         panelState.paused.value = paused
         notePanelActivity()
