@@ -21,6 +21,7 @@ fun AdvancedSettingsScreen(
     val fastOrderedLoads by settingsViewModel.fastOrderedLoads.collectAsState()
     val fastBoot by settingsViewModel.fastBoot.collectAsState()
     val hrtf by settingsViewModel.hrtf.collectAsState()
+    val benchAutoCapture by settingsViewModel.benchAutoCapture.collectAsState()
 
     // Compute shader cache stats on composition.  shaders/ is the GL
     // renderer's; the Vulkan renderer keeps SPIR-V in shaders_vk/ and the
@@ -94,6 +95,23 @@ fun AdvancedSettingsScreen(
                                    "next time a game starts.",
                         checked = fastBoot,
                     ) { settingsViewModel.setFastBoot(it) }
+                }
+            }
+
+            SettingsSectionLabel("Diagnostics")
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    SettingsSwitchRow(
+                        label = "Auto-capture benchmark moments",
+                        subtitle = "When a game starts to stutter, saves a " +
+                                   "hidden benchmark state, separate from " +
+                                   "your save slots, so the heavy moment can " +
+                                   "be measured later. Up to three per " +
+                                   "session, each replacing a milder one; " +
+                                   "each causes a short pause. The Benchmark " +
+                                   "Save hotkey and Quick tile save one by hand.",
+                        checked = benchAutoCapture,
+                    ) { settingsViewModel.setBenchAutoCapture(it) }
                 }
             }
 

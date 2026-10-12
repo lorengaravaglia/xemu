@@ -93,6 +93,7 @@ class ControllerMapping(context: Context) {
         OPEN_MENU("Open Menu"),
         CYCLE_OVERLAY("Cycle Touch Overlay"),
         TOGGLE_FPS("Toggle FPS Overlay"),
+        BENCH_SAVE("Benchmark Save"),
     }
 
     private val hotkeyMap = mutableMapOf<HotkeyFunction, Set<Int>>()

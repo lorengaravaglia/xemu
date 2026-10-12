@@ -86,6 +86,26 @@ private const val AUTO_SAVE_MIN_PLAY_MS = 15_000L
 /** How long "Compiling shaders" stays up after the last compile. */
 private const val SHADER_BADGE_HOLD_MS = 1000L
 
+/** Benchmark auto-capture (main_prefs), off by default: a debug aid. */
+const val PREF_BENCH_AUTOCAPTURE = "bench_autocapture"
+
+/*
+ * A stutter worth capturing: this many slow frames (50-399 ms) within the
+ * window.  Slot 1's heavy stretch gives 2-3 per 5 s since FINDINGS BL, so the
+ * bar is low on purpose; a capture must also beat the previous one this
+ * session, so later, worse stutters replace milder ones.
+ */
+private const val BENCH_POLL_MS = 500L
+private const val BENCH_WINDOW_MS = 5_000L
+private const val BENCH_MIN_SLOW = 2
+private const val BENCH_MAX_CAPTURES = 3
+/* No watching right after start, a load, a save or a resume: those hitch
+ * for reasons that are not the game's load. */
+private const val BENCH_QUIET_START_MS = 30_000L
+private const val BENCH_QUIET_MS = 10_000L
+/* Gap between captures, so saving does not become its own stutter. */
+private const val BENCH_CAPTURE_GAP_MS = 60_000L
+
 /** Master switch for the performance overlay (main_prefs). */
 const val PREF_PERF_OVERLAY = "overlay_enabled"
 
@@ -176,7 +196,19 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                         val slot = intent.getIntExtra(InputRecorder.EXTRA_SLOT, 0)
                         val frames =
                             intent.getIntExtra(InputRecorder.EXTRA_FRAMES, 600)
-                        if (slot in 1..8) {
+                        /* Or "state": a hidden snapshot by suffix --
+                         * "bench" or "bench_auto" for "<id>_bench[_auto]". */
+                        val state = intent.getStringExtra("state")
+                        if (state != null) {
+                            Thread {
+                                val err = NativeInterface.loadState("${gameId}_$state")
+                                Log.i("xemu-android", "benchmark: load '${gameId}_$state' -> ${err ?: "ok"}")
+                                if (err == null) {
+                                    Thread.sleep(1500)   /* as for a slot */
+                                    NativeInterface.startBenchmark(frames)
+                                }
+                            }.start()
+                        } else if (slot in 1..8) {
                             Thread {
                                 if (loadStateSlot(slot)) {
                                     Thread.sleep(1500)   /* let the guest settle */
@@ -251,6 +283,75 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (lp.topMargin != top) {
             lp.topMargin = top
             shaderBadge.layoutParams = lp
+        }
+    }
+
+    /*
+     * Benchmark capture.  Two hidden snapshots per game, outside the eight
+     * slots: "<id>_bench" from the hotkey or Quick tab, and "<id>_bench_auto"
+     * written when a stutter is detected.  The auto capture never touches
+     * the manual one.
+     */
+    private var benchQuietUntil = 0L
+    private var benchBestSlow = 0
+    private var benchCaptures = 0
+    private var benchLastLogged = -1
+    private val benchSamples = ArrayDeque<Pair<Long, Int>>()
+
+    private fun benchSnapshotName(auto: Boolean) =
+        "${gameId}_bench" + if (auto) "_auto" else ""
+
+    private fun quietBenchWatch(ms: Long) {
+        benchQuietUntil = maxOf(benchQuietUntil, android.os.SystemClock.elapsedRealtime() + ms)
+        benchSamples.clear()
+    }
+
+    private val benchWatchRunnable = object : Runnable {
+        override fun run() {
+            benchWatchTick()
+            if (benchCaptures < BENCH_MAX_CAPTURES) {
+                fpsHandler.postDelayed(this, BENCH_POLL_MS)
+            }
+        }
+    }
+
+    private fun benchWatchTick() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val count = NativeInterface.getSlowFrameCount()
+        /* A shader compile is a hitch of its own, not the scene's load. */
+        val compiling = NativeInterface.getMsSinceShaderCompile() in 0 until 2000
+        if (!emulationStarted || quickResumeLoading || userPaused ||
+            stateOpInFlight || now < benchQuietUntil || compiling) {
+            benchSamples.clear()
+            return
+        }
+        benchSamples.addLast(now to count)
+        while (benchSamples.first().first < now - BENCH_WINDOW_MS) {
+            benchSamples.removeFirst()
+        }
+        val slow = count - benchSamples.first().second
+        val need = maxOf(BENCH_MIN_SLOW, benchBestSlow + 1)
+        if (slow > 0 && count != benchLastLogged) {
+            benchLastLogged = count
+            Log.i("xemu-android", "bench watch: $slow slow frames in window, need $need")
+        }
+        if (slow < need) return
+
+        benchBestSlow = slow
+        benchCaptures++
+        val name = benchSnapshotName(auto = true)
+        Log.i("xemu-android", "bench capture: $slow slow frames in " +
+              "${BENCH_WINDOW_MS / 1000} s -> '$name' (#$benchCaptures)")
+        runStateOp("Stutter detected \u2014 saving benchmark moment\u2026",
+                   "Benchmark moment saved") {
+            NativeInterface.saveState(name)
+        }
+        quietBenchWatch(BENCH_CAPTURE_GAP_MS)
+    }
+
+    private fun executeBenchSave() {
+        runStateOp("Saving benchmark moment\u2026", "Benchmark moment saved") {
+            NativeInterface.saveState(benchSnapshotName(auto = false))
         }
     }
 
@@ -694,6 +795,11 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         fpsHandler.post(fpsRunnable)
         fpsHandler.post(shaderBadgeRunnable)
         rumbleHandler.post(rumbleRunnable)
+        /* Coming back from the background hitches; so does starting. */
+        quietBenchWatch(if (emulationStarted) BENCH_QUIET_MS else BENCH_QUIET_START_MS)
+        if (mainPrefs.getBoolean(PREF_BENCH_AUTOCAPTURE, false)) {
+            fpsHandler.post(benchWatchRunnable)
+        }
         // Exported (not RECEIVER_NOT_EXPORTED) so `adb shell am broadcast` (uid=shell)
         // can reach it — shell is NOT exempt from the exported-receiver check on this
         // Android version, confirmed via BroadcastQueue "Exported Denial" in logcat.
@@ -726,6 +832,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         super.onPause()
         fpsHandler.removeCallbacks(fpsRunnable)
         fpsHandler.removeCallbacks(shaderBadgeRunnable)
+        fpsHandler.removeCallbacks(benchWatchRunnable)
         rumbleHandler.removeCallbacks(rumbleRunnable)
         unregisterReceiver(playbackReceiver)
         vibrator.cancel()
@@ -1679,6 +1786,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 }
             ControllerMapping.HotkeyFunction.CYCLE_OVERLAY -> cycleOverlayMode()
             ControllerMapping.HotkeyFunction.TOGGLE_FPS    -> toggleFpsOverlay()
+            ControllerMapping.HotkeyFunction.BENCH_SAVE    -> executeBenchSave()
         }
     }
 
@@ -1723,6 +1831,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
             val err = op()
             runOnUiThread {
                 stateOpInFlight = false
+                quietBenchWatch(BENCH_QUIET_MS)
                 showMessage(err ?: okMsg, isError = err != null)
             }
         }.start()
@@ -1761,6 +1870,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         if (paused == userPaused) return
         if (paused) NativeInterface.pauseEmulation() else NativeInterface.resumeEmulation()
         userPaused = paused
+        if (!paused) quietBenchWatch(BENCH_QUIET_MS)
         panelState.paused.value = paused
         notePanelActivity()
     }
@@ -1980,6 +2090,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                     refreshPanelMenuLabels()
                 }
                 QuickAction.PLAY_RECORDING -> showPlayRecordingDialog()
+                QuickAction.BENCH_SAVE     -> executeBenchSave()
             }
         }
 

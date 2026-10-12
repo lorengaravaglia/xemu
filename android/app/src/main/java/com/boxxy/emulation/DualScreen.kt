@@ -195,7 +195,7 @@ class BottomPanelState {
  */
 enum class QuickAction {
     PAUSE, QUICK_SAVE, QUICK_LOAD, QUICK_SLOT, SAVE, LOAD, SCREENSHOT,
-    OVERLAY, PERF_OVERLAY, MAP_CONTROLS, RECORD, PLAY_RECORDING;
+    OVERLAY, PERF_OVERLAY, MAP_CONTROLS, RECORD, PLAY_RECORDING, BENCH_SAVE;
 
     companion object {
         val DEFAULTS = listOf(PAUSE, QUICK_SAVE, QUICK_LOAD, QUICK_SLOT, SAVE, LOAD, SCREENSHOT)
@@ -451,6 +451,7 @@ private fun quickLabel(state: BottomPanelState, a: QuickAction): String {
         QuickAction.MAP_CONTROLS -> "Map controls"
         QuickAction.RECORD -> state.recordingLabel.value
         QuickAction.PLAY_RECORDING -> "Play recording"
+        QuickAction.BENCH_SAVE -> "Benchmark\nsave"
     }
 }
 

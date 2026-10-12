@@ -195,6 +195,18 @@ static int s_run_worst_ms, s_run_over50, s_run_over66;
 static volatile int g_present_interval_ms;
 static int64_t s_last_swap_ms = 0;  /* render-thread-only; no sharing */
 
+/*
+ * Slow guest frames this session (50-399 ms), for the app's benchmark
+ * auto-capture.  Longer gaps are pauses, loads and stalls, not heavy
+ * emulation, so they are left out.  Render-thread writer, JNI reader.
+ */
+static volatile int g_slow_frame_count;
+
+int xemu_android_get_slow_frame_count(void)
+{
+    return g_slow_frame_count;
+}
+
 int xemu_android_get_worst_frame_time_ms(void)
 {
     int val = g_worst_frame_time_ms;
@@ -3283,6 +3295,9 @@ static void gl_render_frame(struct xemu_console *scon)
                     }
                     if (ft >= 66) {
                         s_run_over66++;
+                    }
+                    if (ft >= 50 && ft < 400) {
+                        g_slow_frame_count++;
                     }
 
                     if (ft > g_worst_frame_time_ms) {

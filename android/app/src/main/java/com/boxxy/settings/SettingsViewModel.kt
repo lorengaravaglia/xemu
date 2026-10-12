@@ -236,6 +236,15 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putBoolean("async_shaders", value).apply()
     }
 
+    /** Save a hidden benchmark snapshot when a stutter is detected in game. */
+    private val _benchAutoCapture = MutableStateFlow(prefs.getBoolean("bench_autocapture", false))
+    val benchAutoCapture: StateFlow<Boolean> = _benchAutoCapture
+
+    fun setBenchAutoCapture(value: Boolean) {
+        _benchAutoCapture.value = value
+        prefs.edit().putBoolean("bench_autocapture", value).apply()
+    }
+
     private val _fastBoot = MutableStateFlow(prefs.getBoolean("fast_boot", true))
     val fastBoot: StateFlow<Boolean> = _fastBoot
 

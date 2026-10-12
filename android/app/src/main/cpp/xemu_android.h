@@ -89,6 +89,7 @@ int xemu_android_get_rendered_frame_count(void);
  * accumulator.  Measures time between successive eglSwapBuffers calls on the
  * render thread — call once per second from the Kotlin overlay runnable. */
 int xemu_android_get_worst_frame_time_ms(void);
+int xemu_android_get_slow_frame_count(void);
 
 /* Copies up to [capacity] frame time samples (ms) into [buf] in chronological
  * order (oldest first) and sets *out_count to the number written.

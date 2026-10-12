@@ -104,6 +104,11 @@ Java_com_boxxy_NativeInterface_getWorstFrameTimeMs(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT jint JNICALL
+Java_com_boxxy_NativeInterface_getSlowFrameCount(JNIEnv *env, jclass clazz) {
+    return xemu_android_get_slow_frame_count();
+}
+
+JNIEXPORT jint JNICALL
 Java_com_boxxy_NativeInterface_getCompiledShaderCount(JNIEnv *env, jclass clazz) {
     return xemu_android_get_compiled_shader_count();
 }

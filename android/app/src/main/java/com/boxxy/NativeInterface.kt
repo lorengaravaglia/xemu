@@ -75,6 +75,12 @@ object NativeInterface {
      */
     external fun getWorstFrameTimeMs(): Int
 
+    /**
+     * Slow guest frames (50-399 ms) since the emulator started.  Only ever
+     * grows; sample it twice to count the slow frames in between.
+     */
+    external fun getSlowFrameCount(): Int
+
     /** Real shader compiles this session (either renderer; cache hits excluded). */
     external fun getCompiledShaderCount(): Int
 
