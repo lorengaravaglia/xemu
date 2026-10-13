@@ -1891,6 +1891,39 @@ void pgraph_vk_end_nondraw_commands(PGRAPHState *pg, VkCommandBuffer cmd)
 // buffer. For other reasons though (like descriptor set amount, surface
 // changes, etc) we do flush often.
 
+/*
+ * Vertex-RAM ranges the draw being prepared reads, kept until begin_pre_draw()
+ * marks them in uploaded_bitmap.
+ *
+ * pgraph_vk_update_vertex_ram_buffer() submits the pending command buffer
+ * before overwriting a page that buffer still reads -- but a page counted as
+ * "read" only if it had been uploaded since the last submit.  A draw that
+ * read a page uploaded in an earlier command buffer left no mark, and neither
+ * did one whose page was uploaded and then cleared by a submit inside
+ * begin_pre_draw() (descriptor sets or uniform space running out).  The next
+ * write to that page was then copied straight over the data the queued draw
+ * still needed.  Halo writes successive HUD elements into one scratch vertex
+ * area, so its ammo meter was drawn with a later element's vertices -- the
+ * bars blinked out whenever a submit landed between them.  OpenGL is
+ * unaffected: glBufferSubData() is ordered against earlier draws.
+ */
+static MemorySyncRequirement vertex_ram_in_use[16];
+static int num_vertex_ram_in_use;
+
+static void mark_vertex_ram_in_use(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    for (int i = 0; i < num_vertex_ram_in_use; i++) {
+        size_t start_bit = vertex_ram_in_use[i].addr / TARGET_PAGE_SIZE;
+        size_t end_bit = TARGET_PAGE_ALIGN(vertex_ram_in_use[i].addr +
+                                           vertex_ram_in_use[i].size) /
+                         TARGET_PAGE_SIZE;
+        bitmap_set(r->uploaded_bitmap, start_bit, end_bit - start_bit);
+    }
+    num_vertex_ram_in_use = 0;
+}
+
 /* Returns false if the draw is to be skipped (create_pipeline). */
 static bool begin_pre_draw(PGRAPHState *pg)
 {
@@ -1926,6 +1959,8 @@ static bool begin_pre_draw(PGRAPHState *pg)
     }
 
     pgraph_vk_ensure_command_buffer(pg);
+    /* After any submit above, so the marks belong to this command buffer. */
+    mark_vertex_ram_in_use(pg);
     return true;
 }
 
@@ -2181,6 +2216,10 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
                                                size);
         }
     }
+
+    /* The draw reads these ranges whether or not they were uploaded now. */
+    memcpy(vertex_ram_in_use, merged, num_syncs * sizeof(merged[0]));
+    num_vertex_ram_in_use = num_syncs;
 
     r->num_vertex_ram_buffer_syncs = 0;
 

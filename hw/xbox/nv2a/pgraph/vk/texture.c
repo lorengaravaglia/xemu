@@ -631,21 +631,22 @@ static uint64_t texture_content_hash(TextureBinding *binding, hwaddr base,
     }
 
     if (!rehash_all) {
-        hwaddr page_base = base & TARGET_PAGE_MASK;
+        /*
+         * Chunk i is [base + i*PAGE, base + (i+1)*PAGE): counted from the
+         * texture's start, not from a page boundary.  Mapping the dirty
+         * range against the page boundary instead missed writes whenever
+         * the texture was not page-aligned -- for a small texture straddling
+         * two pages, any write to the second page was dropped entirely and
+         * the stale image kept being drawn.
+         */
+        hwaddr end = base + length - 1;
 
-        if (binding->dirty_start > binding->dirty_end) {
-            return binding->hash;   /* nothing dirty; contents unchanged */
+        if (binding->dirty_start > binding->dirty_end ||
+            binding->dirty_end < base || binding->dirty_start > end) {
+            return binding->hash;   /* nothing dirty in range; unchanged */
         }
-        if (binding->dirty_start > page_base) {
-            first = (binding->dirty_start - page_base) / TARGET_PAGE_SIZE;
-        }
-        if (binding->dirty_end < page_base + (hwaddr)n_pages * TARGET_PAGE_SIZE) {
-            last = (binding->dirty_end - page_base) / TARGET_PAGE_SIZE;
-        }
-        if (first >= n_pages) {
-            return binding->hash;
-        }
-        last = MIN(last, n_pages - 1);
+        first = (MAX(binding->dirty_start, base) - base) / TARGET_PAGE_SIZE;
+        last = (MIN(binding->dirty_end, end) - base) / TARGET_PAGE_SIZE;
     }
 
     for (unsigned int i = first; i <= last; i++) {

@@ -4053,3 +4053,33 @@ was a second 110-130 ms hitch.
 - Pruning 3 replaced snapshots while paused took 302 ms, unseen.
 - The remaining ~130 ms is about half state capture and half the qcow2
   snapshot (refcount updates over the whole image). Neither was attempted.
+
+## BN. HALO AMMO-BAR FLICKER ON VULKAN: TWO RENDERER BUGS, THEN TURNIP (2026-10-12)
+
+Symptom: with active camo, Halo's top-left ammo bars blinked out on Vulkan
+(OpenGL fine). Repro: user's quick slot 1, 20 sampled frames per run.
+
+| Build / driver | Bars shown |
+|---|---|
+| Vulkan + Turnip v26.3.0-R3, before | 2-5 / 20 |
+| Vulkan + Turnip, vertex fix | 12-17 / 20 |
+| Vulkan + Qualcomm stock driver, vertex fix | 60 / 60 |
+
+Fixed (`vk/draw.c`): a draw only protected vertex-RAM pages *uploaded in the
+current command buffer*, so a page uploaded earlier (or cleared by a submit
+inside `begin_pre_draw`) could be overwritten under a queued draw. The draw's
+ranges are now marked in `uploaded_bitmap` after `ensure_command_buffer`.
+Also fixed (`vk/texture.c`): `texture_content_hash` mapped the dirty range
+from the page boundary instead of the texture base, dropping writes to
+non-page-aligned textures (no visible effect found here).
+
+Residual on Turnip only. The bars' draw (inline buffer, 4 verts, tex0
+0x3098000, blend 0x4ca) renders nothing unless it is the first draw in a
+submit. **Ruled out by experiment:** texture cache, surface overlap with
+vertex pages, UBO / inline / staging data changing before submit (all
+identical at submit; staging memory is coherent), 16-byte inline alignment,
+render-pass restart, descriptor rewrite, full ALL_COMMANDS memory barrier,
+fresh framebuffer, aux submits in between. A submit right *before* the draw
+fixes it 100%; right after does not. Not resolved; the stock driver is
+correct. Turnip saves ~3% CPU with no fps change (AI), so the stock driver
+costs little.
