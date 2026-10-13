@@ -260,6 +260,9 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                         /* Optional "name": load any snapshot by name, e.g. the
                          * hidden quick-resume point (diagnostics). */
                         val named = intent.getStringExtra("name")
+                        /* As runStateOp does: the load's own hitch must not
+                         * be taken for a stutter and captured. */
+                        quietBenchWatch(BENCH_QUIET_MS)
                         Thread {
                             if (named != null) {
                                 val err = NativeInterface.loadState(named)
@@ -267,6 +270,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                             } else {
                                 loadStateSlot(slot)
                             }
+                            runOnUiThread { quietBenchWatch(BENCH_QUIET_MS) }
                         }.start()
                     }
                 }
