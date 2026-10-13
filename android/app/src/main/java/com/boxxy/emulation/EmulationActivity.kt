@@ -201,6 +201,10 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                         /* Or "state": a hidden snapshot by suffix --
                          * "bench" or "bench_auto" for "<id>_bench[_auto]". */
                         val state = intent.getStringExtra("state")
+                        /* A replayed stutter must not trigger a capture of
+                         * its own -- it would overwrite the one measured.
+                         * Generous: 10 fps worst case, plus the load. */
+                        quietBenchWatch(5_000L + frames * 100L)
                         if (state != null) {
                             Thread {
                                 val err = NativeInterface.loadState("${gameId}_$state")

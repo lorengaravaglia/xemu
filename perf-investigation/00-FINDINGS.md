@@ -4083,3 +4083,20 @@ fresh framebuffer, aux submits in between. A submit right *before* the draw
 fixes it 100%; right after does not. Not resolved; the stock driver is
 correct. Turnip saves ~3% CPU with no fps change (AI), so the stock driver
 costs little.
+
+## BO. A PLAYTEST STUTTER REPLAYED: 0.75 s OF 20 fps IS PLAIN vCPU OVERLOAD (2026-10-12)
+
+Auto-capture (`_bench_auto`, 22:54) replayed twice with `BENCHMARK --es state
+bench_auto --ei frames 600`. Both runs: mean 33.9/34.0 ms, and the same burst
+~14.5 s in -- one frame with ~10k notdirty traps on 0x59a9000, then 15-18
+consecutive ~50 ms frames with notdirty in the tens, shaders +0, TLB +0.
+
+framelog.bin: burst frames take 129-137 M vCPU cycles against a 90 M median
+(x86 at ~98% in the panel), so the game's own CPU work per frame rose ~1.5x
+and each frame slipped from two vblanks to three. Not a stall, a lock, or
+the notdirty page (P, Q): the scene is simply over the TCG budget for ~0.75 s.
+The 187/218 ms single hitches seen while playing did not reproduce in replay
+(only the post-load ones, 235-351 ms, which are the load itself).
+
+Harness fix: a BENCHMARK broadcast now quiets the auto-capture watcher for
+its duration, so a replayed stutter cannot overwrite the capture it replays.
