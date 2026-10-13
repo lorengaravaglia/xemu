@@ -3366,37 +3366,94 @@ static void gl_render_frame(struct xemu_console *scon)
                      */
                     /* 50 ms is 20 fps -- the floor that makes the game
                      * hard to play.  Tunable with debug.xemu.slow_ms. */
-                    if (ft >= s_slow_ms) {
+                    /*
+                     * Per-frame deltas: the baselines advance EVERY guest
+                     * frame.  They used to advance only on slow frames, so
+                     * the first slow frame after a quiet stretch reported
+                     * hundreds of frames' worth of notdirty traps as if they
+                     * were its own (FINDINGS BP).
+                     */
+                    {
                         unsigned long long f, pa, e;
                         extern int xemu_android_get_compiled_shader_count(void);
-                        static unsigned long long p_nd, p_spin, p_sleep;
+                        extern unsigned long long xemu_tb_exec_count;
+                        extern unsigned long long xemu_loop_irq,
+                            xemu_loop_exitreq, xemu_loop_kick, xemu_loop_xpage,
+                            xemu_loop_gen, xemu_loop_longjmp,
+                            xemu_cpu_exec_calls, xemu_idle_ticks;
+                        static unsigned long long p_nd, p_spin, p_sleep, p_smc;
                         static unsigned long long p_full, p_part;
-                        static int p_sh;
+                        static unsigned long long p_pass, p_irq, p_exr, p_kick,
+                            p_xpg, p_gen, p_lj, p_ce, p_idle;
+                        uint64_t idle_freq;
+                        extern clockid_t g_xemu_pfifo_clock, g_xemu_vcpu_clock;
+                        extern int g_xemu_pfifo_clock_ok, g_xemu_vcpu_clock_ok;
+                        static int64_t p_gpu_ns, p_cpu_ns;
+                        int64_t gpu_ns = 0, cpu_ns = 0;
+                        struct timespec tts;
+                        if (g_xemu_pfifo_clock_ok &&
+                            !clock_gettime(g_xemu_pfifo_clock, &tts)) {
+                            gpu_ns = tts.tv_sec * 1000000000LL + tts.tv_nsec;
+                        }
+                        if (g_xemu_vcpu_clock_ok &&
+                            !clock_gettime(g_xemu_vcpu_clock, &tts)) {
+                            cpu_ns = tts.tv_sec * 1000000000LL + tts.tv_nsec;
+                        }
+                        asm volatile("mrs %0, cntfrq_el0" : "=r"(idle_freq));
+                        static int p_sh, ref_n;
                         int sh = xemu_android_get_compiled_shader_count();
 
-                        xemu_tlb_flush_counts(&f, &pa, &e);
-                        {
-                            uint64_t tpg = 0;
-                            unsigned long long thits = 0;
-                            static unsigned long long p_smc;
+                        uint64_t tpg = 0;
+                        unsigned long long thits = 0;
 
-                            xemu_notdirty_top(&tpg, &thits);
-                            ALOGI("bench: SLOW FRAME %d ms | shaders +%d | "
+                        xemu_notdirty_top(&tpg, &thits);   /* resets it */
+                        xemu_tlb_flush_counts(&f, &pa, &e);
+
+                        bool slow = ft >= s_slow_ms;
+                        bool ref = !slow && ++ref_n >= 300;
+                        if (slow || ref) {
+                            if (ref) {
+                                ref_n = 0;
+                            }
+                            ALOGI("bench: %s %d ms | shaders +%d | "
                                   "tlb full +%llu part +%llu | notdirty +%llu "
                                   "(smc +%llu) top page 0x%llx x%llu | "
-                                  "spin iters +%llu sleeps +%llu",
+                                  "spin iters +%llu sleeps +%llu | "
+                                  "dispatch %llu irq %llu "
+                                  "exitreq %llu kick %llu xpage %llu gen %llu "
+                                  "longjmp %llu cpu_exec %llu | IDLE %.1f ms | "
+                                  "vCPU on-cpu %.1f ms | NV2A thread %.1f ms",
+                                  slow ? "SLOW FRAME" : "ref frame",
                                   ft, sh - p_sh, f - p_full, pa - p_part,
                                   xemu_notdirty_writes - p_nd,
                                   xemu_notdirty_smc - p_smc,
                                   (unsigned long long)(tpg << 12), thits,
                                   xemu_spin_hits - p_spin,
-                                  xemu_spin_sleeps - p_sleep);
-                            p_smc = xemu_notdirty_smc;
+                                  xemu_spin_sleeps - p_sleep,
+                                  xemu_tb_exec_count - p_pass,
+                                  xemu_loop_irq - p_irq,
+                                  xemu_loop_exitreq - p_exr,
+                                  xemu_loop_kick - p_kick,
+                                  xemu_loop_xpage - p_xpg,
+                                  xemu_loop_gen - p_gen,
+                                  xemu_loop_longjmp - p_lj,
+                                  xemu_cpu_exec_calls - p_ce,
+                                  (xemu_idle_ticks - p_idle) * 1000.0 /
+                                      idle_freq,
+                                  (cpu_ns - p_cpu_ns) / 1e6,
+                                  (gpu_ns - p_gpu_ns) / 1e6);
                         }
                         p_sh = sh; p_full = f; p_part = pa;
                         p_nd = xemu_notdirty_writes;
+                        p_smc = xemu_notdirty_smc;
                         p_spin = xemu_spin_hits;
                         p_sleep = xemu_spin_sleeps;
+                        p_pass = xemu_tb_exec_count; p_irq = xemu_loop_irq;
+                        p_exr = xemu_loop_exitreq; p_kick = xemu_loop_kick;
+                        p_xpg = xemu_loop_xpage; p_gen = xemu_loop_gen;
+                        p_lj = xemu_loop_longjmp; p_ce = xemu_cpu_exec_calls;
+                        p_idle = xemu_idle_ticks;
+                        p_gpu_ns = gpu_ns; p_cpu_ns = cpu_ns;
                     }
 
                     if (ft > s_run_worst_ms) {

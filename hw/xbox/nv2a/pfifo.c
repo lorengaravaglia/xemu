@@ -583,11 +583,19 @@ static void pfifo_run_pusher(NV2AState *d)
     }
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/* This thread's CPU-time clock, for per-frame busy time (FINDINGS BP). */
+clockid_t g_xemu_pfifo_clock;
+int g_xemu_pfifo_clock_ok;
+#endif
+
 void *pfifo_thread(void *arg)
 {
     NV2AState *d = (NV2AState *)arg;
 
 #if defined(__ANDROID__) || defined(ANDROID)
+    g_xemu_pfifo_clock_ok =
+        pthread_getcpuclockid(pthread_self(), &g_xemu_pfifo_clock) == 0;
     /* Pin to the highest-frequency CPU cores, same as the xemu_core thread. */
     extern void pin_to_big_cores(void);
     pin_to_big_cores();

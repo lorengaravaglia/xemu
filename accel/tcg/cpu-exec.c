@@ -170,6 +170,40 @@ struct tb_desc {
  * comparable.  vCPU-thread only, so no atomics.
  */
 unsigned long long xemu_tb_exec_count;
+/*
+ * Why the vCPU comes back to the dispatcher (slow-frame log, FINDINGS BP):
+ * pending interrupts, exit requests, kicked blocks, blocks spanning two
+ * pages (never chained into), new translations and longjmp exits.
+ */
+unsigned long long xemu_loop_irq, xemu_loop_exitreq, xemu_loop_kick;
+unsigned long long xemu_loop_xpage, xemu_loop_gen, xemu_loop_longjmp;
+unsigned long long xemu_cpu_exec_calls;
+/*
+ * Time spent in the Xbox kernel's idle loop (KiIdleLoop: sti; nop; nop; cli;
+ * check the DPC queue and the next thread; repeat), i.e. the guest CPU with
+ * every thread blocked.  It does not hlt, so it spins through the dispatcher.
+ * Measured from consecutive dispatcher passes inside the loop, on the ARM
+ * virtual counter.  Diagnostic: the address is this kernel's.
+ */
+#define XEMU_IDLE_LO 0x8001b02eu
+#define XEMU_IDLE_HI 0x8001b047u
+unsigned long long xemu_idle_ticks;
+clockid_t g_xemu_vcpu_clock;
+int g_xemu_vcpu_clock_ok;
+static uint64_t xemu_idle_prev;
+static inline void xemu_idle_note(vaddr pc)
+{
+    if (pc >= XEMU_IDLE_LO && pc <= XEMU_IDLE_HI) {
+        uint64_t t;
+        asm volatile("mrs %0, cntvct_el0" : "=r"(t));
+        if (xemu_idle_prev) {
+            xemu_idle_ticks += t - xemu_idle_prev;
+        }
+        xemu_idle_prev = t;
+    } else {
+        xemu_idle_prev = 0;
+    }
+}
 /* Guest instructions executed (sum of tb->icount over executed TBs).  Slightly
  * optimistic when a TB exits early, but stable enough to compare runs. */
 unsigned long long xemu_guest_insn_count;
@@ -1193,6 +1227,9 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
     assert(!cpu_test_interrupt(cpu, ~0));
 #else
     if (unlikely(cpu_test_interrupt(cpu, ~0))) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        xemu_loop_irq++;
+#endif
         bql_lock();
         if (cpu_test_interrupt(cpu, CPU_INTERRUPT_DEBUG)) {
             cpu_reset_interrupt(cpu, CPU_INTERRUPT_DEBUG);
@@ -1267,6 +1304,9 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
      * The corresponding store-release is in cpu_exit.
      */
     if (unlikely(qatomic_load_acquire(&cpu->exit_request)) || icount_exit_request(cpu)) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        xemu_loop_exitreq++;
+#endif
         if (cpu->exception_index == -1) {
             cpu->exception_index = EXCP_INTERRUPT;
         }
@@ -1286,6 +1326,9 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
         *last_tb = tb;
         return;
     }
+#if defined(__ANDROID__) || defined(ANDROID)
+    xemu_loop_kick++;
+#endif
 
     *last_tb = NULL;
     if (cpu_loop_exit_requested(cpu)) {
@@ -1388,6 +1431,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 mmap_lock();
                 tb = tb_gen_code(cpu, s);
                 mmap_unlock();
+#if defined(__ANDROID__) || defined(ANDROID)
+                xemu_loop_gen++;
+#endif
 
                 /*
                  * We add the TB in the virtual pc hash table
@@ -1408,6 +1454,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
              */
             if (tb_page_addr1(tb) != -1) {
                 last_tb = NULL;
+#if defined(__ANDROID__) || defined(ANDROID)
+                xemu_loop_xpage++;
+#endif
             }
 #endif
             /* See if we can patch the calling TB. */
@@ -1418,6 +1467,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #if defined(__ANDROID__) || defined(ANDROID)
             xemu_tb_exec_count++;
             xemu_guest_insn_count += tb->icount;
+            xemu_idle_note(s.pc);
 #endif
             cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
 
@@ -1433,6 +1483,9 @@ static int cpu_exec_setjmp(CPUState *cpu, SyncClocks *sc)
 {
     /* Prepare setjmp context for exception handling. */
     if (unlikely(sigsetjmp(cpu->jmp_env, 0) != 0)) {
+#if defined(__ANDROID__) || defined(ANDROID)
+        xemu_loop_longjmp++;
+#endif
         cpu_exec_longjmp_cleanup(cpu);
     }
 
@@ -1445,7 +1498,12 @@ int cpu_exec(CPUState *cpu)
     SyncClocks sc = { 0 };
 
 #if defined(__ANDROID__) || defined(ANDROID)
+    xemu_cpu_exec_calls++;
     if (unlikely(!xemu_vcpu_tid)) {
+        extern clockid_t g_xemu_vcpu_clock;
+        extern int g_xemu_vcpu_clock_ok;
+        g_xemu_vcpu_clock_ok =
+            pthread_getcpuclockid(pthread_self(), &g_xemu_vcpu_clock) == 0;
         extern void vcpu_affinity_refresh(void);
 
         xemu_vcpu_tid = (int)syscall(__NR_gettid);

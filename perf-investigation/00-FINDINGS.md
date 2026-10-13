@@ -4088,15 +4088,79 @@ costs little.
 
 Auto-capture (`_bench_auto`, 22:54) replayed twice with `BENCHMARK --es state
 bench_auto --ei frames 600`. Both runs: mean 33.9/34.0 ms, and the same burst
-~14.5 s in -- one frame with ~10k notdirty traps on 0x59a9000, then 15-18
-consecutive ~50 ms frames with notdirty in the tens, shaders +0, TLB +0.
+~14.5 s in: 15-18 consecutive ~50 ms frames, shaders +0, TLB +0.
+
+**Correction (BP):** the "~10k notdirty traps" on the first slow frame of each
+burst was a counting artifact. The slow-frame line only advanced its
+baselines on slow frames, so the first one after a quiet stretch reported
+every trap since the previous slow frame. Per-frame, burst frames show 30-90
+against a steady 9-13. The same applies to the 35k figure quoted from play.
 
 framelog.bin: burst frames take 129-137 M vCPU cycles against a 90 M median
 (x86 at ~98% in the panel), so the game's own CPU work per frame rose ~1.5x
 and each frame slipped from two vblanks to three. Not a stall, a lock, or
-the notdirty page (P, Q): the scene is simply over the TCG budget for ~0.75 s.
+the notdirty page (P, Q). (BP refines "over budget": the extra time is
+mostly dispatcher passes, not the game's own code.)
 The 187/218 ms single hitches seen while playing did not reproduce in replay
 (only the post-load ones, 235-351 ms, which are the load itself).
 
 Harness fix: a BENCHMARK broadcast now quiets the auto-capture watcher for
 its duration, so a replayed stutter cannot overwrite the capture it replays.
+
+## BP. THE 20 fps STRETCHES ARE HALO'S OWN WORK; THE "DISPATCH" COST IS THE KERNEL IDLE LOOP (2026-10-13)
+
+Workload: the user's slot 5, saved mid-stall during a slot-4 replay; it
+replays as 50 ms frames for most of its first seconds. Slot 4 also reaches
+the same kind of stall ~43-57 s in, but not deterministically.
+
+**Measurement bug fixed first.** The slow-frame line advanced its baselines
+only on slow frames, and `xemu_notdirty_top()` reset only when read, so the
+first slow frame after a quiet stretch reported everything since the last
+one -- the "10k-35k notdirty floods" of BO were sums over hundreds of
+frames. Baselines now advance every guest frame. A `ref frame` line is
+logged every 300 frames for comparison.
+
+**simpleperf + guest_map (slot 4, 70 s):** in stall frames `cpu_exec_loop`
+self time rose from 2.5 to 11.3 samples/frame, ~70% of it on the
+instruction after the `dmb ish` of `qatomic_set_mb(icount_decr.high)` in
+`cpu_handle_interrupt`, i.e. per-dispatcher-pass cost, ×4.6 passes.
+
+**What the passes are.** New per-frame counters (dispatch passes, irq,
+exit_request, kicks, two-page TBs, translations, longjmps): passes were
+200k-1M/frame and ~98% at two blocks, 0x8001b02f / 0x8001b030. Guest bytes
+(`dump_pc`): `sti; nop; nop; cli; cmp ebp,[ebp]; je; ... cmp [ebx+0x2c],0;
+je` -- the Xbox kernel's **idle loop** (KiIdleLoop: no DPC, no next thread).
+It never `hlt`s, and `sti` ends a TB, so it spins through the dispatcher.
+irq/exitreq/kick/xpage/gen are all in the tens to low thousands.
+
+**Per-frame time split (slot 5, 900 frames):**
+
+| | wall | kernel idle | Halo busy (wall - idle) | NV2A thread on-CPU | vCPU on-CPU |
+|---|---|---|---|---|---|
+| ref frames | 33-35 ms | 4.7-9.4 ms | ~24-29 ms | 18.6-21.8 ms | = wall |
+| stall frames | 50-52 ms | 0-23 ms, mostly 10-20 | ~28-47, median ~38 | 20.6-24.1 ms | = wall |
+
+- The vCPU is never descheduled (on-CPU = wall).
+- The NV2A thread is not the limit: ~22 ms either way.
+- The stall is **Halo's own work exceeding 33.3 ms**; the frame then waits in
+  the idle loop for the next vblank (50 ms). The cpu_exec_loop growth in the
+  profile was that wait, not overhead.
+- The extra game work is spread thinly across many game pages (each ~1%);
+  no hotspot. Only general TCG speed helps these stretches.
+- Hitches of 187/218 ms during play (BO) were the user's own quick saves
+  (slot_4 file times 22:51:38.47 / 22:52:47.57 vs slow frames .682 / .751).
+
+**Lead (not built): halt the kernel idle loop.** It burns a big core at
+100% for 5-9 ms of every normal frame (15-28%) and up to ~24 ms of a stall
+frame, each pass through a full barrier. Halting the vCPU there until the
+next interrupt (what `hlt` would do; only an interrupt can queue a DPC or
+ready a thread on the single-CPU Xbox) is a power/heat saving, which
+section Q showed feeds back into sustained clocks. It cannot speed up a
+frame directly: the idle time is after the work.
+
+Instrumentation left in: `xemu_idle_ticks` (cntvct between consecutive
+dispatcher passes inside 0x8001b02e-0x8001b047; this kernel's address), the
+loop counters, and per-thread CPU clocks for vCPU and NV2A
+(`g_xemu_vcpu_clock`, `g_xemu_pfifo_clock`) in the slow/ref frame lines.
+Also: a debug LOAD_STATE broadcast overwrote the _bench_auto capture via
+auto-capture (fixed, 6df13fbe25).
