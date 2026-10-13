@@ -2234,6 +2234,34 @@ static unsigned long long s_bench_start_full, s_bench_start_part,
 
 static double   s_bench_start_cpu_ms;
 
+/* Whole-run idle/thread summary for the benchmark (FINDINGS BQ). */
+typedef struct {
+    int64_t vcpu_ns, gpu_ns;
+    unsigned long long spin, halt_t, halts;
+} BenchIdleSnap;
+static BenchIdleSnap s_bench_idle0;
+
+static void bench_idle_snap(BenchIdleSnap *b)
+{
+    extern clockid_t g_xemu_pfifo_clock, g_xemu_vcpu_clock;
+    extern int g_xemu_pfifo_clock_ok, g_xemu_vcpu_clock_ok;
+    extern unsigned long long xemu_idle_ticks, xemu_idle_halt_ticks,
+        xemu_idle_halts;
+    struct timespec t;
+
+    memset(b, 0, sizeof(*b));
+    if (g_xemu_vcpu_clock_ok && !clock_gettime(g_xemu_vcpu_clock, &t)) {
+        b->vcpu_ns = t.tv_sec * 1000000000LL + t.tv_nsec;
+    }
+    if (g_xemu_pfifo_clock_ok && !clock_gettime(g_xemu_pfifo_clock, &t)) {
+        b->gpu_ns = t.tv_sec * 1000000000LL + t.tv_nsec;
+    }
+    b->spin = xemu_idle_ticks;
+    b->halt_t = xemu_idle_halt_ticks;
+    b->halts = xemu_idle_halts;
+}
+
+
 void xemu_android_benchmark_start(int frames)
 {
     /* Pick up any A/B switches that were flipped since the last run, so
@@ -2349,6 +2377,7 @@ void xemu_android_benchmark_start(int frames)
     s_cheap_cycles = s_cheap_insn = s_exp_cycles = s_exp_insn = 0;
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    bench_idle_snap(&s_bench_idle0);
     ALOGI("bench: started, %d guest frames (~%d s) — hands off the controls; "
           "the screen will look frozen, that is expected",
           frames, (frames + 29) / 30);
@@ -2954,6 +2983,24 @@ static void bench_tick(void)
                 }
             }
             ALOGI("bench: HIST n=%d mean %.1f ms |%s", n, sum / n, line);
+            {
+                extern int g_xemu_idle_halt;
+                BenchIdleSnap e;
+                uint64_t fq;
+
+                asm volatile("mrs %0, cntfrq_el0" : "=r"(fq));
+                bench_idle_snap(&e);
+                ALOGI("bench: IDLE per frame | idle_halt=%d | vCPU on-CPU "
+                      "%.2f ms | spin %.2f ms | halted %.2f ms (%.1f halts) | "
+                      "NV2A thread %.2f ms | cpu %.1f C",
+                      g_xemu_idle_halt,
+                      (e.vcpu_ns - s_bench_idle0.vcpu_ns) / 1e6 / n,
+                      (e.spin - s_bench_idle0.spin) * 1000.0 / fq / n,
+                      (e.halt_t - s_bench_idle0.halt_t) * 1000.0 / fq / n,
+                      (double)(e.halts - s_bench_idle0.halts) / n,
+                      (e.gpu_ns - s_bench_idle0.gpu_ns) / 1e6 / n,
+                      bench_cpu_temp_c());
+            }
 
             /*
              * Where the slow frames fall.  A bimodal distribution can come
@@ -3380,7 +3427,20 @@ static void gl_render_frame(struct xemu_console *scon)
                         extern unsigned long long xemu_loop_irq,
                             xemu_loop_exitreq, xemu_loop_kick, xemu_loop_xpage,
                             xemu_loop_gen, xemu_loop_longjmp,
-                            xemu_cpu_exec_calls, xemu_idle_ticks;
+                            xemu_cpu_exec_calls, xemu_idle_ticks,
+                            xemu_idle_halt_ticks, xemu_idle_halts;
+                        extern int g_xemu_idle_halt;
+                        static unsigned long long p_halt_t, p_halts;
+                        static int prop_n;
+                        if (++prop_n >= 30) {      /* ~1 s: A/B in-process */
+                            char v[PROP_VALUE_MAX] = { 0 };
+                            prop_n = 0;
+                            if (__system_property_get("debug.xemu.idle_halt",
+                                                      v) > 0 &&
+                                v[0] >= '0' && v[0] <= '4' && !v[1]) {
+                                g_xemu_idle_halt = v[0] - '0';
+                            }
+                        }
                         static unsigned long long p_nd, p_spin, p_sleep, p_smc;
                         static unsigned long long p_full, p_part;
                         static unsigned long long p_pass, p_irq, p_exr, p_kick,
@@ -3421,7 +3481,8 @@ static void gl_render_frame(struct xemu_console *scon)
                                   "spin iters +%llu sleeps +%llu | "
                                   "dispatch %llu irq %llu "
                                   "exitreq %llu kick %llu xpage %llu gen %llu "
-                                  "longjmp %llu cpu_exec %llu | IDLE %.1f ms | "
+                                  "longjmp %llu cpu_exec %llu | IDLE spin %.1f ms "
+                                  "halted %.1f ms (%llu halts) | "
                                   "vCPU on-cpu %.1f ms | NV2A thread %.1f ms",
                                   slow ? "SLOW FRAME" : "ref frame",
                                   ft, sh - p_sh, f - p_full, pa - p_part,
@@ -3440,6 +3501,9 @@ static void gl_render_frame(struct xemu_console *scon)
                                   xemu_cpu_exec_calls - p_ce,
                                   (xemu_idle_ticks - p_idle) * 1000.0 /
                                       idle_freq,
+                                  (xemu_idle_halt_ticks - p_halt_t) * 1000.0 /
+                                      idle_freq,
+                                  xemu_idle_halts - p_halts,
                                   (cpu_ns - p_cpu_ns) / 1e6,
                                   (gpu_ns - p_gpu_ns) / 1e6);
                         }
@@ -3454,6 +3518,8 @@ static void gl_render_frame(struct xemu_console *scon)
                         p_lj = xemu_loop_longjmp; p_ce = xemu_cpu_exec_calls;
                         p_idle = xemu_idle_ticks;
                         p_gpu_ns = gpu_ns; p_cpu_ns = cpu_ns;
+                        p_halt_t = xemu_idle_halt_ticks;
+                        p_halts = xemu_idle_halts;
                     }
 
                     if (ft > s_run_worst_ms) {

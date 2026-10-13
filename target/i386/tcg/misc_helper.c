@@ -25,6 +25,7 @@
 #include "helper-tcg.h"
 #include "qemu/timer.h"
 #include "qemu/atomic.h"
+#include "accel/tcg/cpu-ldst.h"
 
 /*
  * NOTE: the translator must set DisasContext.cc_op to CC_OP_EFLAGS
@@ -204,4 +205,68 @@ void helper_xemu_stall(CPUX86State *env)
     }
     qatomic_add(&xemu_stall_iters_elided, chunk);
     env->regs[R_EAX] = n - chunk;
+}
+
+/*
+ * Kernel idle loop -> hlt (FINDINGS BQ).
+ *
+ * The Xbox kernel idles in KiIdleLoop:
+ *
+ *     sti; nop; nop; cli
+ *     cmp ebp, [ebp]          ; DPC queue (ebp = &Prcb->DpcListHead) empty?
+ *     je  ...                 ; else retire DPCs
+ *     cmp dword [ebx+2Ch], 0  ; Prcb->NextThread?
+ *     je  <sti>               ; nothing to run: spin again
+ *
+ * It never executes hlt, so the vCPU spins a host core at 100% -- through the
+ * dispatcher, since sti ends a TB -- for as long as the guest is idle: 5-9 ms
+ * of a normal 33 ms Halo frame, up to ~24 ms of a slow one (BP).
+ *
+ * The translator calls this at the first nop, inside the sti's interrupt
+ * shadow, which is exactly where `sti; hlt` waits on real hardware.  If the
+ * loop's own two tests say there is nothing to do, halt as hlt does.  On the
+ * single-CPU Xbox only an interrupt can queue a DPC or ready a thread, and an
+ * interrupt is what ends the halt: it is delivered with the return address
+ * at this nop, its handler runs, and the loop re-tests.  An interrupt already
+ * pending is taken at once (cpu_handle_halt checks cpu_has_work).
+ *
+ * debug.xemu.idle_halt: 0 off (default), 1 halt; diagnostics 2 = sleep
+ * 100 us instead of halting, 4 = do the reads only.  Re-read about once a
+ * second so A/B can toggle it inside one process.
+ *
+ * OFF BY DEFAULT: with it on, Jade Empire's boot bugchecks (0x0A, corrupt
+ * Prcb->NextThread) in ~60% of launches at the same loading step -- and so
+ * does a plain 100 us delay here, so the cause is a timing race elsewhere
+ * that a slower idle loop exposes, not the halt itself (FINDINGS BQ).
+ */
+int g_xemu_idle_halt;             /* OFF: crashes Jade Empire's boot (BQ) */
+unsigned long long xemu_idle_halts;
+uint64_t xemu_idle_halt_t0;       /* cntvct at the halt, 0 when running */
+
+void helper_xemu_idle(CPUX86State *env)
+{
+    uint32_t ebp = env->regs[R_EBP], ebx = env->regs[R_EBX];
+    CPUState *cs;
+
+    if (!g_xemu_idle_halt || !(env->eflags & IF_MASK)) {
+        return;
+    }
+    if (cpu_ldl_data_ra(env, ebp, GETPC()) != ebp ||
+        cpu_ldl_data_ra(env, ebx + 0x2c, GETPC()) != 0) {
+        return;                    /* a DPC or a thread is waiting: run it */
+    }
+    if (g_xemu_idle_halt == 4) {      /* diagnostic: the reads only */
+        return;
+    }
+    if (g_xemu_idle_halt == 2) {      /* diagnostic: delay, no halt */
+        g_usleep(100);
+        return;
+    }
+    xemu_idle_halts++;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(xemu_idle_halt_t0));
+    cs = env_cpu(env);
+    do_end_instruction(env);
+    cs->halted = 1;
+    cs->exception_index = EXCP_HLT;
+    cpu_loop_exit(cs);
 }

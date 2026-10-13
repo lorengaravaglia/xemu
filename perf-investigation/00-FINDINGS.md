@@ -4164,3 +4164,65 @@ loop counters, and per-thread CPU clocks for vCPU and NV2A
 (`g_xemu_vcpu_clock`, `g_xemu_pfifo_clock`) in the slow/ref frame lines.
 Also: a debug LOAD_STATE broadcast overwrote the _bench_auto capture via
 auto-capture (fixed, 6df13fbe25).
+
+## BQ. HALTING THE KERNEL IDLE LOOP: −23% vCPU TIME, −12 °C -- BUT IT EXPOSES A BOOT RACE (2026-10-13)
+
+BP found the Xbox kernel's idle loop (KiIdleLoop, 0x8001b02e: `sti; nop;
+nop; cli; cmp ebp,[ebp]; je; ...; cmp [ebx+2Ch],0; je`) spinning a big core
+whenever every guest thread is blocked. It never executes `hlt`.
+
+**Implementation** (`debug.xemu.idle_halt`, translate.c + misc_helper.c
+`helper_xemu_idle`): at the first `nop` after the `sti` (pattern
+`90 90 fa 3b 6d 00 74 0c`, CPL 0) -- inside the interrupt shadow, where
+`sti; hlt` waits on real hardware -- if IF=1, the DPC list is empty and
+`Prcb->NextThread` is 0, halt exactly as `helper_hlt` does. The next
+interrupt wakes it and returns to the nop; the loop re-tests.
+
+**Measured, slot 5, 600-frame runs interleaved in one process, round 1
+discarded:**
+
+| per frame | off | on |
+|---|---|---|
+| vCPU on-CPU | 33.0-33.3 ms | **25.3-26.0 ms** (−23%) |
+| idle spinning | 6.6-7.7 ms | 0 (halted 7.5-8.0 ms) |
+| mean frame time | 33.7-34.0 | 33.7-33.9 |
+| frames > 45 ms | 9, 11, 19 | 8, 11, 14 |
+| hottest CPU sensor at end | **94.7-95.5 °C** | **81.2-83.6 °C** |
+| battery power | 7.28-7.65 W | 7.16-7.27 W (noisy) |
+
+**But it breaks boots.** Jade Empire cold boots bugcheck in ~60% of
+launches: `0x0A IRQL_NOT_LESS_OR_EQUAL`, two signatures -- a page fault
+reading 0x19 at IRQL 0x1c (clock), or a context switch from the idle loop
+to `NextThread = 0x00000001`. Scheduler state is corrupt. Both happen at the
+same loading step (the last disc reads are identical across crashes:
+LBA 0x2afc6..0x2b11e), ~700-2000 ATAPI commands in. Halo's gameplay ran
+8 interleaved benchmarks without a crash; Halo cold boot was not tested.
+
+| Jade boots, idle_halt | crashed |
+|---|---|
+| 0 off | 0/4 (+1/1 on the final default build) |
+| 1 halt | 3/4, 3/6, 6/9 across runs |
+| 1 halt, main loop only (not the 0x8001b078 DPC loop) | 3/6 |
+| 1 halt, Fast boot (stall_hle) off | 5/6 |
+| 1 halt, APU DSP off | 4/6 |
+| 2 sleep 100 us, no halt | 5/6 |
+| 4 reads only, no delay | 0/6 |
+
+**So it is not the halt.** A plain 100 us delay in the idle loop crashes
+as often; the reads alone do not. Making the idle loop slower exposes a
+timing race elsewhere -- not Fast boot, not the DSP, and not disc DMA into
+kernel data (an IDE PRD logger saw DMA into low pages 0x2000-0xe000 in
+crashing and clean boots alike, none into 0x30000-0x40000 where the PRCB,
+idle stack and the driver's PRD table live). Not found yet. A real P3's
+idle loop is ~ns per pass and real interrupt latency is µs; ours with the
+halt is the host wake latency.
+
+**Disposition:** shipped OFF (`g_xemu_idle_halt = 0`); modes 1/2/4 left
+behind the property for the next attempt. Next step would be a write
+watchpoint on `Prcb->NextThread` / `CurrentThread` (KPRCB at 0x80035bdc,
++0x2c / +0x28) logging any store of a non-kernel pointer with its EIP --
+that names the corrupting code, guest or device. The prize is large:
+−23% vCPU time and −12 °C at equal frame rate.
+
+Also added: `bench: IDLE per frame` summary line (vCPU and NV2A on-CPU,
+spin, halted, temperature) at the end of every benchmark.

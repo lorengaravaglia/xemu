@@ -191,8 +191,16 @@ unsigned long long xemu_idle_ticks;
 clockid_t g_xemu_vcpu_clock;
 int g_xemu_vcpu_clock_ok;
 static uint64_t xemu_idle_prev;
+unsigned long long xemu_idle_halt_ticks;   /* time halted by idle_halt */
+extern uint64_t xemu_idle_halt_t0;
 static inline void xemu_idle_note(vaddr pc)
 {
+    if (xemu_idle_halt_t0) {
+        uint64_t t;
+        asm volatile("mrs %0, cntvct_el0" : "=r"(t));
+        xemu_idle_halt_ticks += t - xemu_idle_halt_t0;
+        xemu_idle_halt_t0 = 0;
+    }
     if (pc >= XEMU_IDLE_LO && pc <= XEMU_IDLE_HI) {
         uint64_t t;
         asm volatile("mrs %0, cntvct_el0" : "=r"(t));

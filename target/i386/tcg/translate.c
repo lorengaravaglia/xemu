@@ -5272,6 +5272,43 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
             }
         }
     }
+
+    /* Kernel idle loop, at the nop after its sti: see helper_xemu_idle(). */
+    {
+        /* ...je +0Ch: the main loop only.  A second loop at 0x8001b078
+         * (je -9, DPCs only) shares the first seven bytes. */
+        static const uint8_t idle[8] = { 0x90, 0x90, 0xfa, 0x3b, 0x6d, 0x00,
+                                         0x74, 0x0c };
+        static bool logged_idle;
+        target_ulong pc = dc->base.pc_next;
+
+        if (CODE32(dc) && !CODE64(dc) && dc->cpl == 0 &&
+            (pc & ~TARGET_PAGE_MASK) <= TARGET_PAGE_SIZE - sizeof(idle)) {
+            int i;
+            for (i = 0; i < sizeof(idle); i++) {
+                if (translator_ldub(cpu_env(cpu), &dc->base, pc + i) !=
+                    idle[i]) {
+                    break;
+                }
+            }
+            if (i == sizeof(idle)) {
+                if (!logged_idle) {
+                    extern int g_xemu_idle_halt;
+                    char v[PROP_VALUE_MAX] = { 0 };
+                    logged_idle = true;
+                    if (__system_property_get("debug.xemu.idle_halt", v) > 0 &&
+                        v[0] >= '0' && v[0] <= '4' && !v[1]) {
+                        g_xemu_idle_halt = v[0] - '0';
+                    }
+                    fprintf(stderr, "idle_halt: kernel idle loop at 0x%lx, "
+                            "mode %d\n", (unsigned long)pc, g_xemu_idle_halt);
+                }
+                gen_update_cc_op(dc);
+                gen_update_eip_cur(dc);
+                gen_helper_xemu_idle(tcg_env);
+            }
+        }
+    }
 #endif
 
     switch (sigsetjmp(dc->jmpbuf, 0)) {
