@@ -242,17 +242,17 @@ void helper_xemu_stall(CPUX86State *env)
  * at this nop, its handler runs, and the loop re-tests.  An interrupt already
  * pending is taken at once (cpu_handle_halt checks cpu_has_work).
  *
- * debug.xemu.idle_halt: 0 off, 1 halt (default); diagnostics 2 = sleep
+ * debug.xemu.idle_halt: 0 off (default), 1 halt; diagnostics 2 = sleep
  * 100 us instead of halting, 4 = do the reads only.  Re-read about once a
  * second so A/B can toggle it inside one process.
  *
- * ON by default.  It first looked as if it exposed a boot race (Jade Empire
- * bugchecked in ~60% of cold boots with a corrupt Prcb->NextThread), but the
- * corruption was an early-port hack in nv2a.c that wrote 1 to NextThread
- * whenever the vCPU sat at this address for ~2 s -- which a halted idle
- * loop does.  The hack is gone; the watchpoints below found it (BQ).
+ * OFF by default.  Jade Empire's boot crash first blamed on it was an
+ * nv2a.c hack writing 1 to NextThread (removed, FINDINGS BR), but MGS2's
+ * cold boot stalls on the Kojima logo with it on -- and with mode 2, so a
+ * slower idle loop alone does it; mode 0 and mode 4 do not.  Not yet
+ * understood (FINDINGS BS).
  */
-int g_xemu_idle_halt = 1;
+int g_xemu_idle_halt;
 unsigned long long xemu_idle_halts;
 uint64_t xemu_idle_halt_t0;       /* cntvct at the halt, 0 when running */
 

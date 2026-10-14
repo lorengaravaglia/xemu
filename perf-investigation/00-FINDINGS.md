@@ -4260,7 +4260,8 @@ halt off a long idle could still trip it, so removing it is a fix on its
 own.
 
 **Fix:** hack removed; `g_xemu_idle_halt = 1` (on by default,
-`debug.xemu.idle_halt=0` turns it off).
+`debug.xemu.idle_halt=0` turns it off). **Default reverted to off by BS**
+(MGS2 stalls with it on).
 
 | boots after the fix | result |
 |---|---|
@@ -4276,4 +4277,45 @@ BQ's measurements stand: −23% vCPU time, ~−12 °C at equal frame rate.
 write. A host hardware watchpoint on the guest RAM page answers "who wrote
 this?" for every thread in one run; the guest-side watchpoint alone could
 only say "not the guest".
+
+## BS. IDLE HALT STALLS MGS2's COLD BOOT; DEFAULT BACK TO OFF (2026-10-13)
+
+Cold boots of the rest of the library with the halt on (BR's default
+build), 60 s each, screenshot of the game screen:
+
+| game | halt on |
+|---|---|
+| Halo 2 | "Press Start", 30.5 fps |
+| Jet Set Radio Future | title screen, 59.9 fps |
+| Tony Hawk's Pro Skater 2x | intro video, 30.5 fps |
+| **Metal Gear Solid 2: Substance** | **stuck on the "Hideo Kojima" logo** |
+
+MGS2, 90-120 s runs:
+
+| idle_halt | result |
+|---|---|
+| 0 off | 3/3 reach the intro animation (~212 ATAPI commands, vCPU ~92%) |
+| 1 halt | 3/3 stuck on the logo (~177 commands, then none; vCPU ~15%) |
+| 2 sleep 100 us, no halt | stuck |
+| 4 reads only | intro |
+
+So, as with BQ's rows, *any* slower idle loop does it; it is not the halt's
+wake path. The disc reads are paced pairs every 1-2 s (a stream) and stop.
+Ruled out:
+
+- **Lost interrupts:** per-vector delivery counts (temporary counter) match
+  off vs on for USB 0x31, GPU 0x33, IDE 0x3e and SMBus 0x3b, apart from IDE
+  stopping when the stream stops. Clock 0x30 is ~6% lower with the halt
+  (ticks coalesced during the wake latency).
+- **The second loop at 0x8001b078:** the helper is emitted only at the main
+  idle loop.
+- **The removed hack:** it does not fire.
+
+The vCPU health log shows `irq_req=0x2` (HARD) pending at nearly every
+sample in *every* mode, including off -- a line that stays asserted.
+Unexplained, and a lead. Not found yet: what MGS2's streaming thread waits
+on.
+
+**Disposition:** `g_xemu_idle_halt = 0` again. MGS2 with the default
+build: intro, 212 commands. BR's hack removal stands on its own.
 
