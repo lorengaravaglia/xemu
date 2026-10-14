@@ -30,13 +30,43 @@ import com.boxxy.ui.theme.XemuTheme
  *
  * Controller input arrives at whichever display was touched last; the
  * activity forwards it here ([forwardKey]), so the D-pad always drives the
- * list.
+ * list.  Either way it lands in [dispatchKeyEvent], which never lets a
+ * navigation key fall through to the top screen: with no card focused yet
+ * (a fresh launch shows the selected card highlighted but unfocused), the
+ * first press focuses that card and then acts, so A launches the game the
+ * border is on instead of reaching the top screen's view-mode button.
  */
 class LibraryPresentation(
     private val activity: ComponentActivity,
     display: Display,
     private val content: MutableState<(@Composable () -> Unit)?>,
 ) : Presentation(activity, display) {
+
+    /** Whether a card in the list has controller focus. */
+    var hasCardFocus: () -> Boolean = { true }
+    /** Gives controller focus to the selected (highlighted) card. */
+    var focusSelected: () -> Unit = {}
+    private var composeView: ComposeView? = null
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode !in NAV_KEYS) return super.dispatchKeyEvent(event)
+        if (event.action == KeyEvent.ACTION_DOWN && !hasCardFocus()) {
+            /* This window is still in touch mode, where a focus request is
+             * refused: leave it first. */
+            composeView?.requestFocusFromTouch()
+            focusSelected()
+        }
+        /* Compose clicks on DPAD_CENTER, not BUTTON_A.  Unhandled, the
+         * system would re-send A as DPAD_CENTER to the focused window --
+         * possibly the top screen -- so translate it here. */
+        val e = if (event.keyCode == KeyEvent.KEYCODE_BUTTON_A)
+            KeyEvent(event.downTime, event.eventTime, event.action,
+                     KeyEvent.KEYCODE_DPAD_CENTER, event.repeatCount, event.metaState,
+                     event.deviceId, event.scanCode, event.flags, event.source)
+        else event
+        super.dispatchKeyEvent(e)
+        return true
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -46,7 +76,7 @@ class LibraryPresentation(
             decor.setViewTreeViewModelStoreOwner(activity)
             decor.setViewTreeSavedStateRegistryOwner(activity)
         }
-        setContentView(ComposeView(context).apply {
+        setContentView(ComposeView(context).also { composeView = it }.apply {
             setContent {
                 XemuTheme {
                     Surface(color = MaterialTheme.colorScheme.background,
@@ -72,19 +102,19 @@ class LibraryPresentation(
                 .firstOrNull { it.displayId != Display.DEFAULT_DISPLAY }
         }
 
+        private val NAV_KEYS = setOf(
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_X,
+            KeyEvent.KEYCODE_BUTTON_Y)
+
         /** Controller navigation keys go to the list on the lower screen.
          *  Back stays with the activity (it navigates the library's screens). */
         fun forwardKey(event: KeyEvent): Boolean {
             val p = showing ?: return false
-            if (!p.isShowing) return false
-            return when (event.keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
-                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
-                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
-                KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_X,
-                KeyEvent.KEYCODE_BUTTON_Y -> p.dispatchKeyEvent(event)
-                else -> false
-            }
+            if (!p.isShowing || event.keyCode !in NAV_KEYS) return false
+            return p.dispatchKeyEvent(event)
         }
     }
 }

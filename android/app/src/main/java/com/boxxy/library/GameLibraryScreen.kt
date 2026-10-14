@@ -42,6 +42,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.lifecycle.Lifecycle
@@ -126,6 +128,9 @@ fun GameLibraryScreen(
     val favorite by libraryViewModel.favorite.collectAsState()
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var focusedKey by remember { mutableStateOf<String?>(null) }
+    /* On the selected card, so the controller can start where the
+     * highlight is (LibraryPresentation.dispatchKeyEvent). */
+    val selectedFocus = remember { FocusRequester() }
     val centreKey by remember {
         derivedStateOf {
             val info = gridState.layoutInfo
@@ -175,10 +180,13 @@ fun GameLibraryScreen(
                     QuickResume.savedAt(
                         context, QuickResume.gameIdFor(game.uri.toString()))
                 }
-                Box(Modifier.onFocusChanged {
-                    if (it.hasFocus) focusedKey = game.uri.toString()
-                    else if (focusedKey == game.uri.toString()) focusedKey = null
-                }) {
+                Box(Modifier
+                    .then(if (game.uri == selectedGame?.uri)
+                              Modifier.focusRequester(selectedFocus) else Modifier)
+                    .onFocusChanged {
+                        if (it.hasFocus) focusedKey = game.uri.toString()
+                        else if (focusedKey == game.uri.toString()) focusedKey = null
+                    }) {
                     GameCard(
                         game = game,
                         /* With background art, the card being shown; otherwise
@@ -214,6 +222,11 @@ fun GameLibraryScreen(
         var p: LibraryPresentation? = null
         if (useDual && started) {
             p = LibraryPresentation(activity!!, dualDisplay!!, bottomContent)
+            p.hasCardFocus = { focusedKey != null }
+            p.focusSelected = {
+                /* Not composed if scrolled out of view: nothing to focus. */
+                try { selectedFocus.requestFocus() } catch (_: IllegalStateException) {}
+            }
             try {
                 p.show()
                 LibraryPresentation.showing = p
@@ -221,7 +234,18 @@ fun GameLibraryScreen(
                 p = null
             }
         }
+        /* The controller drives the lower list, so nothing on the top screen
+         * may take focus: otherwise the first D-pad press only takes it out
+         * of touch mode, focusing the top bar's first button, and is eaten. */
+        val decor = activity?.window?.decorView as? android.view.ViewGroup
+        val blockFocus = p != null && decor != null
+        val prevFocusability = decor?.descendantFocusability
+        if (blockFocus) {
+            decor!!.findFocus()?.clearFocus()
+            decor.descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
         onDispose {
+            if (blockFocus) decor!!.descendantFocusability = prevFocusability!!
             p?.dismiss()
             if (LibraryPresentation.showing === p) LibraryPresentation.showing = null
         }
