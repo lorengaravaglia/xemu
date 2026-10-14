@@ -242,17 +242,15 @@ void helper_xemu_stall(CPUX86State *env)
  * at this nop, its handler runs, and the loop re-tests.  An interrupt already
  * pending is taken at once (cpu_handle_halt checks cpu_has_work).
  *
- * debug.xemu.idle_halt: 0 off (default), 1 halt; diagnostics 2 = sleep
+ * debug.xemu.idle_halt: 0 off, 1 halt (default); diagnostics 2 = sleep
  * 100 us instead of halting, 4 = do the reads only.  Re-read about once a
  * second so A/B can toggle it inside one process.
  *
- * OFF by default.  Jade Empire's boot crash first blamed on it was an
- * nv2a.c hack writing 1 to NextThread (removed, FINDINGS BR), but MGS2's
- * cold boot stalls on the Kojima logo with it on -- and with mode 2, so a
- * slower idle loop alone does it; mode 0 and mode 4 do not.  Not yet
- * understood (FINDINGS BS).
+ * ON by default.  Two bugs it exposed are fixed: Jade Empire's boot crash
+ * was an nv2a.c hack writing 1 to NextThread (BR), and MGS2's movie stall
+ * was lost PIT ticks, which a halted vCPU loses more of (i8259.c, BT).
  */
-int g_xemu_idle_halt;
+int g_xemu_idle_halt = 1;
 unsigned long long xemu_idle_halts;
 uint64_t xemu_idle_halt_t0;       /* cntvct at the halt, 0 when running */
 
@@ -280,9 +278,257 @@ static struct xemu_kw {
 static unsigned xemu_kw_head;
 static unsigned xemu_hw_count(void);
 
+/*
+ * debug.xemu.watch_va=<hex>: one more log-only write watch, 4 bytes, on any
+ * guest address -- e.g. a semaphore's SignalState, to see who releases it.
+ * Its own ring, with the writer's PC, current thread and 24 stack words,
+ * printed by the thread dump.
+ */
+#define XEMU_VA_N 16
+static struct xemu_va {
+    uint64_t t;
+    uint32_t pc, cur, old, regs[8], stk[64];
+} xemu_va_ring[XEMU_VA_N];
+static unsigned xemu_va_head;
+static uint32_t xemu_watch_va;
+
+/*
+ * Per guest thread: where it last switched out.  At the store to
+ * CurrentThread, ESP still belongs to the outgoing thread, so a thread that
+ * is blocked now has its whole wait call chain at that ESP.  Dumped on
+ * demand (setprop debug.xemu.thread_dump <new value>) with each thread's
+ * KTHREAD, first wait block and the object it waits on.
+ */
+#define XEMU_THR_N 64
+static struct xemu_thr {
+    uint32_t thr, esp, pc, n;
+    uint64_t t;
+} xemu_thr_tab[XEMU_THR_N];
+
+static void xemu_thr_note(uint32_t thr, uint32_t esp, uint32_t pc,
+                          uint64_t t)
+{
+    int i, free_i = -1;
+
+    for (i = 0; i < XEMU_THR_N; i++) {
+        if (xemu_thr_tab[i].thr == thr) {
+            break;
+        }
+        if (!xemu_thr_tab[i].thr && free_i < 0) {
+            free_i = i;
+        }
+    }
+    if (i == XEMU_THR_N) {
+        if (free_i < 0) {
+            return;
+        }
+        i = free_i;
+        xemu_thr_tab[i].thr = thr;
+    }
+    xemu_thr_tab[i].esp = esp;
+    xemu_thr_tab[i].pc = pc;
+    xemu_thr_tab[i].t = t;
+    xemu_thr_tab[i].n++;
+}
+
+static void xemu_dump_words(CPUState *cs, const char *tag, uint32_t va,
+                            int words)
+{
+    uint32_t w[8];
+    int i;
+
+    for (i = 0; i < words; i += 8) {
+        memset(w, 0xee, sizeof(w));
+        cpu_memory_rw_debug(cs, va + i * 4, (uint8_t *)w, sizeof(w), 0);
+        fprintf(stderr, "thread-dump:   %s %08x: %08x %08x %08x %08x %08x "
+                "%08x %08x %08x\n", tag, va + i * 4, w[0], w[1], w[2], w[3],
+                w[4], w[5], w[6], w[7]);
+        g_usleep(1000);                /* logcat drops lines in a burst */
+    }
+}
+
+static void xemu_thread_dump(CPUState *cs)
+{
+    uint64_t now, freq;
+    uint32_t cur = 0;
+    int i;
+
+    asm volatile("mrs %0, cntvct_el0" : "=r"(now));
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    cpu_memory_rw_debug(cs, 0x80035c04, (uint8_t *)&cur, 4, 0);
+    fprintf(stderr, "thread-dump: current %08x\n", cur);
+    for (i = 0; i < XEMU_THR_N; i++) {
+        struct xemu_thr *t = &xemu_thr_tab[i];
+        uint32_t wb = 0, obj = 0;
+
+        if (!t->thr) {
+            continue;
+        }
+        fprintf(stderr, "thread-dump: thread %08x switched out %u times, "
+                "last %.3f s ago at pc %08x esp %08x\n", t->thr, t->n,
+                (double)(now - t->t) / freq, t->pc, t->esp);
+        xemu_dump_words(cs, "kthread", t->thr, 40);
+        cpu_memory_rw_debug(cs, t->thr + 0x58, (uint8_t *)&wb, 4, 0);
+        if (wb >= 0x80000000u) {
+            xemu_dump_words(cs, "waitblk", wb, 8);
+            cpu_memory_rw_debug(cs, wb + 0xc, (uint8_t *)&obj, 4, 0);
+            if (obj >= 0x80000000u) {
+                xemu_dump_words(cs, "object ", obj, 8);
+            }
+        }
+        xemu_dump_words(cs, "stack  ", t->esp, 64);
+    }
+    {
+        char v[PROP_VALUE_MAX] = { 0 };
+        uint32_t va, len;
+
+        char *p = v;
+        int used;
+
+        /* "va,len[;va,len...]"; a va of *addr dumps from the pointer there */
+        __system_property_get("debug.xemu.dump_mem", v);
+        while (*p) {
+            bool deref = *p == '*';
+            if (sscanf(p + deref, "%x,%x%n", &va, &len, &used) != 2 ||
+                len > 0x4000) {
+                break;
+            }
+            if (deref) {
+                uint32_t q = 0;
+                cpu_memory_rw_debug(cs, va, (uint8_t *)&q, 4, 0);
+                va = q;
+            }
+            fprintf(stderr, "thread-dump: mem %08x len %x\n", va, len);
+            xemu_dump_words(cs, "mem", va, (len + 31) / 32 * 8);
+            p += deref + used;
+            if (*p != ';') {
+                break;
+            }
+            p++;
+        }
+    }
+    {
+        /* debug.xemu.dump_ring=<ctl>: walk a game stream ring (MGS2's at
+         * 0x64d5f8: +8 base, +0xc size, +0x14 read, +0x20 write) */
+        char v[PROP_VALUE_MAX] = { 0 };
+        uint32_t ctl, c[10], pos, hdr[2];
+        int k;
+
+        if (__system_property_get("debug.xemu.dump_ring", v) > 0 &&
+            (ctl = strtoul(v, NULL, 16)) != 0 &&
+            cpu_memory_rw_debug(cs, ctl, (uint8_t *)c, sizeof(c), 0) == 0) {
+            fprintf(stderr, "thread-dump: ring %08x base %08x size %x end "
+                    "%08x read %08x write %08x +24 %08x\n", ctl, c[2], c[3],
+                    c[4], c[5], c[8], c[9]);
+            pos = c[5];
+            for (k = 0; k < 64 && pos != c[8]; k++) {
+                cpu_memory_rw_debug(cs, pos, (uint8_t *)hdr, 8, 0);
+                fprintf(stderr, "thread-dump: ring pkt %08x type %08x size "
+                        "%x\n", pos, hdr[0], hdr[1]);
+                g_usleep(1000);
+                if (hdr[0] == 0xff) {
+                    pos = c[2];
+                } else if (hdr[1] == 0 || hdr[1] > c[3]) {
+                    break;
+                } else {
+                    pos += hdr[1];
+                    if (pos >= c[2] + c[3]) {
+                        pos = c[2];
+                    }
+                }
+            }
+        }
+    }
+    if (xemu_watch_va) {
+        unsigned n = MIN(xemu_va_head, XEMU_VA_N), k;
+
+        fprintf(stderr, "thread-dump: watch_va %08x: %u stores, last %u\n",
+                xemu_watch_va, xemu_va_head, n);
+        for (k = n; k > 0; k--) {
+            struct xemu_va *e = &xemu_va_ring[(xemu_va_head - k) % XEMU_VA_N];
+            int j;
+
+            fprintf(stderr, "thread-dump: va -%02u %.3f s ago pc=%08x thread "
+                    "%08x old=%08x | eax=%08x ecx=%08x edx=%08x ebx=%08x "
+                    "esp=%08x ebp=%08x esi=%08x edi=%08x\n", k - 1,
+                    (double)(now - e->t) / freq, e->pc, e->cur, e->old,
+                    e->regs[0], e->regs[1], e->regs[2], e->regs[3],
+                    e->regs[4], e->regs[5], e->regs[6], e->regs[7]);
+            for (j = 0; j < 64; j += 8) {
+                fprintf(stderr, "thread-dump:   va-stk %08x %08x %08x %08x "
+                        "%08x %08x %08x %08x\n", e->stk[j], e->stk[j + 1],
+                        e->stk[j + 2], e->stk[j + 3], e->stk[j + 4],
+                        e->stk[j + 5], e->stk[j + 6], e->stk[j + 7]);
+            }
+        }
+    }
+}
+
+static void xemu_thread_dump_poll(CPUState *cs)
+{
+    static unsigned calls;
+    static uint64_t last;
+    static char armed[PROP_VALUE_MAX];
+    static bool init;
+    char v[PROP_VALUE_MAX] = { 0 };
+    uint64_t now;
+
+    if (++calls & 255) {
+        return;
+    }
+    asm volatile("mrs %0, cntvct_el0" : "=r"(now));
+    if (now - last < 19200000ull / 2) {          /* ~0.5 s */
+        return;
+    }
+    last = now;
+    __system_property_get("debug.xemu.thread_dump", v);
+    if (!init) {                     /* a value set before boot: ignore */
+        init = true;
+        strcpy(armed, v);
+        return;
+    }
+    if (strcmp(v, armed)) {
+        strcpy(armed, v);
+        if (v[0] && strcmp(v, "0")) {
+            xemu_thread_dump(cs);
+        }
+    }
+}
+
+
+static void xemu_va_log(CPUState *cs, uint32_t pc, uint64_t t)
+{
+    CPUX86State *env = cpu_env(cs);
+    struct xemu_va *e = &xemu_va_ring[xemu_va_head++ % XEMU_VA_N];
+    int i;
+
+    e->t = t;
+    e->pc = pc;
+    cpu_memory_rw_debug(cs, 0x80035c04, (uint8_t *)&e->cur, 4, 0);
+    cpu_memory_rw_debug(cs, xemu_watch_va, (uint8_t *)&e->old, 4, 0);
+    for (i = 0; i < 8; i++) {
+        e->regs[i] = env->regs[i];
+    }
+    memset(e->stk, 0xee, sizeof(e->stk));
+    cpu_memory_rw_debug(cs, env->regs[R_ESP], (uint8_t *)e->stk,
+                        sizeof(e->stk), 0);
+}
+
 static void xemu_kprcb_wp_log(CPUState *cs, vaddr addr, vaddr len,
                               uintptr_t ra)
 {
+    if (xemu_watch_va && addr >= xemu_watch_va &&
+        addr < xemu_watch_va + 4) {
+        CPUX86State *env = cpu_env(cs);
+        uint64_t data[INSN_START_WORDS] = { 0 }, t;
+        uint32_t d0 = cpu_unwind_state_data(cs, ra, data) ?
+                      (uint32_t)data[0] : ~0u;
+
+        asm volatile("mrs %0, cntvct_el0" : "=r"(t));
+        xemu_va_log(cs, d0 < 0x1000 ? ((env->eip & ~0xfffu) | d0) : d0, t);
+        return;
+    }
+
     CPUX86State *env = cpu_env(cs);
     struct xemu_kw *e = &xemu_kw_ring[xemu_kw_head++ % XEMU_KW_N];
     uint64_t data[INSN_START_WORDS] = { 0 };
@@ -308,6 +554,10 @@ static void xemu_kprcb_wp_log(CPUState *cs, vaddr addr, vaddr len,
     e->next = f[1];
     e->irql = irql;
     e->ints = xemu_int_head;
+    if (addr == 0x80035c04 && f[0]) {      /* switching away from f[0] */
+        xemu_thr_note(f[0], env->regs[R_ESP], e->d0 < 0x1000 ?
+                      ((e->eip & ~0xfffu) | e->d0) : e->d0, e->t);
+    }
     if ((xemu_kw_head & 0x3fff) == 1) {      /* proof of life */
         fprintf(stderr, "kprcb-watch: %u stores, last pc d0=%08x eip=%08x "
                 "st %08x cur=%08x next=%08x | host wp: %u sample bytes\n",
@@ -527,7 +777,7 @@ static void xemu_kprcb_watch_arm(CPUState *cs)
     }
     done = true;
     if (__system_property_get("debug.xemu.kprcb_watch", v) <= 0 ||
-        v[0] != '1') {
+        (v[0] != '1' && v[0] != '2')) {
         return;
     }
     xemu_wp_log_hook = xemu_kprcb_wp_log;
@@ -536,7 +786,18 @@ static void xemu_kprcb_watch_arm(CPUState *cs)
     cpu_watchpoint_insert(cs, 0xf0035c04, 8, BP_MEM_WRITE | XEMU_BP_LOG,
                           NULL);
     fprintf(stderr, "kprcb-watch: armed on CurrentThread/NextThread\n");
-    xemu_hw_arm();
+    if (v[0] == '1') {
+        xemu_hw_arm();
+    }
+    if (__system_property_get("debug.xemu.watch_va", v) > 0) {
+        xemu_watch_va = strtoul(v, NULL, 16);
+        if (xemu_watch_va) {
+            cpu_watchpoint_insert(cs, xemu_watch_va, 4,
+                                  BP_MEM_WRITE | XEMU_BP_LOG, NULL);
+            fprintf(stderr, "kprcb-watch: also watching %08x\n",
+                    xemu_watch_va);
+        }
+    }
 }
 
 void xemu_kprcb_watch_dump(void);
@@ -567,6 +828,9 @@ void xemu_kprcb_watch_dump(void)
 void helper_xemu_idle(CPUX86State *env)
 {
     xemu_kprcb_watch_arm(env_cpu(env));
+    if (xemu_wp_log_hook) {
+        xemu_thread_dump_poll(env_cpu(env));
+    }
     uint32_t ebp = env->regs[R_EBP], ebx = env->regs[R_EBX];
     CPUState *cs;
 

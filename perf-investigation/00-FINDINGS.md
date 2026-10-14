@@ -4318,4 +4318,68 @@ on.
 
 **Disposition:** `g_xemu_idle_halt = 0` again. MGS2 with the default
 build: intro, 212 commands. BR's hack removal stands on its own.
+**Superseded by BT:** the cause was lost PIT ticks; fixed, halt back on.
+
+## BT. MGS2's STALL WAS LOST CLOCK TICKS -- 3.6% EVEN WITHOUT THE HALT; REINJECTED, HALT ON (2026-10-13)
+
+Followed MGS2's stalled stream down to the cause with on-demand guest
+introspection (`debug.xemu.kprcb_watch=2` plus `thread_dump`, `watch_va`,
+`dump_mem`, `dump_ring`, misc_helper.c):
+
+1. **Per-thread switch table** (ESP at each switch-out = the blocked
+   thread's wait chain). The disc-stream thread had last run exactly when
+   the reads stopped, blocked with no timeout on a semaphore (limit 1).
+2. **Write watch on that semaphore** with the halt off: released every 1-3 s
+   by a game thread that wakes every ~16 ms. With the halt on, the same
+   thread still woke every 16 ms but stopped releasing.
+3. **Disassembled the game's stream code** (dumped from guest RAM,
+   assembled as `.byte` and read with llvm-objdump). It is a 512 KB packet
+   ring: a read is requested only when a third of the ring is free, and the
+   read cursor advances only over consumed packets.
+4. **Ring walk:** stalled, every audio packet (type 0x01) was consumed and
+   the ring was full of unconsumed video (0x0c); flowing, both were mixed.
+   Video had fallen behind audio, and the player deadlocked.
+5. **APU unchanged** (1,500 frames/s, 6 voices in both modes), so audio runs
+   on real time. The guest's clock did not:
+
+| PIC IRQ0 (PIT, 1 kHz), MGS2 boot | edges | cancelled before taken |
+|---|---|---|
+| idle_halt 0 (shipped) | 42,383 | 1,507 (**3.6%**) |
+| idle_halt 1 | 42,437 | 4,116 (**9.7%**) |
+| idle_halt 2 (sleep) | 42,436 | 4,069 |
+
+xemu's i8259 (`#ifdef XBOX`) clears a pending edge IRQ on its falling
+edge, as a real 8259 does; the PIT's square wave is high for ~0.5 ms, so a
+tick the vCPU had not taken by then was dropped. A real CPU takes it in
+microseconds; ours sometimes takes over a millisecond (halted host thread
+waking, long TCG stretches). Latching IRQ0 alone only turned the drops into
+merges (10% / 3.5%) at the next edge.
+
+**Fix (hw/intc/i8259.c):** IRQ0 stays pending until acknowledged, and a
+tick that arrives while one is still pending is owed and re-raised at the
+acknowledge (KVM-PIT-style reinjection, capped at 200, cleared on reset).
+`bench: clock ticks (total) N, reinjected M` logs it every 300 frames.
+
+| after the fix, 60 s cold boots, halt on | result |
+|---|---|
+| MGS2 | intro movie (332-338 commands; was stuck at 177). Halt off: 330 (was 214 -- the 3.6% loss slowed it too) |
+| Halo, Jade, Halo 2, JSRF, THPS2x | menu / title / intro as before; Jade loads fully |
+| reinjected ticks | Halo 140, THPS 193, JSRF 258, Halo 2 308, Jade ~1,000-3,700, MGS2 ~5,700 per ~62,000 |
+
+Halo slot 5, 600 frames, 4 interleaved rounds:
+
+| | halt off | halt on |
+|---|---|---|
+| mean frame | 33.7-34.3 ms | 33.6-34.0 ms |
+| frames > 45 ms | 7, 11, 17, 29 | 6, 10, 6, 18 |
+| vCPU on-CPU | 32.9-33.6 ms | **25.3-26.3 ms** |
+| hottest CPU sensor | ~95 °C | **80-85 °C** |
+
+**Disposition:** idle halt ON by default again (`debug.xemu.idle_halt=0`
+turns it off). The tick fix applies with or without it: every game's guest
+clock now keeps real time, where it ran 3-4% slow before.
+
+**Lesson:** when a timing change breaks a game, check the guest's clock
+against the real-time devices (APU, vblank) before blaming the change: here
+the change only amplified an existing drift.
 

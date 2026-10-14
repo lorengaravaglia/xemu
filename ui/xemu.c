@@ -3506,6 +3506,13 @@ static void gl_render_frame(struct xemu_console *scon)
                                   xemu_idle_halts - p_halts,
                                   (cpu_ns - p_cpu_ns) / 1e6,
                                   (gpu_ns - p_gpu_ns) / 1e6);
+                            {
+                                extern unsigned xemu_pic_irq0_edges,
+                                    xemu_pic_irq0_reinjected;
+                                ALOGI("bench: clock ticks (total) %u, "
+                                      "reinjected %u", xemu_pic_irq0_edges,
+                                      xemu_pic_irq0_reinjected);
+                            }
                         }
                         p_sh = sh; p_full = f; p_part = pa;
                         p_nd = xemu_notdirty_writes;

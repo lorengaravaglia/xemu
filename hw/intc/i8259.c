@@ -114,6 +114,22 @@ static void pic_update_irq(PICCommonState *s)
     }
 }
 
+/*
+ * xemu: no lost timer ticks on IRQ0.  The Xbox kernel counts time in PIT
+ * interrupts (1 kHz, a square wave).  A real CPU acknowledges each within
+ * microseconds; an emulated one can take over a millisecond -- a halted vCPU
+ * waiting for its host thread to wake, or a long TCG stretch -- and the tick
+ * was then either cancelled by the falling edge (the XBOX irr clear below)
+ * or merged with the next rising edge.  That lost 3.6% of ticks with the
+ * idle loop spinning and ~10% with it halted, so guest time ran slow against
+ * the real-time APU, and MGS2's movie player deadlocked (video waiting on a
+ * clock that audio had outrun; FINDINGS BT).  Now IRQ0 stays pending until
+ * acknowledged, and a tick that arrives while one is still pending is owed
+ * and re-raised at the acknowledge, as KVM's PIT reinjects (capped).
+ */
+unsigned xemu_pic_irq0_edges, xemu_pic_irq0_reinjected;
+static unsigned xemu_irq0_owed;
+
 /* set irq level. If an edge is detected, then the IRR is set to 1 */
 static void pic_set_irq(void *opaque, int irq, int level)
 {
@@ -143,12 +159,20 @@ static void pic_set_irq(void *opaque, int irq, int level)
         /* edge triggered */
         if (level) {
             if ((s->last_irr & mask) == 0) {
+                if (irq_index == 0) {
+                    xemu_pic_irq0_edges++;
+                    if ((s->irr & mask) && xemu_irq0_owed < 200) {
+                        xemu_irq0_owed++;       /* previous tick not taken */
+                    }
+                }
                 s->irr |= mask;
             }
             s->last_irr |= mask;
         } else {
 #ifdef XBOX
-            s->irr &= ~mask;
+            if (irq_index != 0) {          /* IRQ0 waits for its acknowledge */
+                s->irr &= ~mask;
+            }
 #endif
             s->last_irr &= ~mask;
         }
@@ -169,6 +193,11 @@ static void pic_intack(PICCommonState *s, int irq)
     /* We don't clear a level sensitive interrupt here */
     if (!s->ltim && !(s->elcr & (1 << irq))) {
         s->irr &= ~(1 << irq);
+        if (s->master && irq == 0 && xemu_irq0_owed) {
+            xemu_irq0_owed--;            /* deliver the owed tick after EOI */
+            xemu_pic_irq0_reinjected++;
+            s->irr |= 1;
+        }
     }
     pic_update_irq(s);
 }
@@ -215,6 +244,9 @@ int pic_read_irq(PICCommonState *s)
 
 static void pic_init_reset(PICCommonState *s)
 {
+    if (s->master) {
+        xemu_irq0_owed = 0;
+    }
     pic_reset_common(s);
     pic_update_irq(s);
 }
