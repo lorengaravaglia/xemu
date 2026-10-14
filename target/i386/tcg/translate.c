@@ -178,6 +178,13 @@ void xemu_x86_dump_stuck(void)
             (uint32_t)env->regs[R_ESI], (uint32_t)env->regs[R_EDI],
             (uint32_t)env->regs[R_EBP], (uint32_t)env->regs[R_ESP],
             (uint32_t)env->eip);
+    {
+        void xemu_kprcb_watch_dump(void);
+        void xemu_x86_dump_int_ring(void);
+
+        xemu_x86_dump_int_ring();
+        xemu_kprcb_watch_dump();
+    }
     if (cpu_memory_rw_debug(first_cpu, env->regs[R_ESP], (uint8_t *)stk,
                             sizeof(stk), 0) == 0) {
         for (i = 0; i < 48; i += 8) {

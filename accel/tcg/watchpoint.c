@@ -64,6 +64,14 @@ int cpu_watchpoint_address_matches(CPUState *cpu, vaddr addr, vaddr len)
     return ret;
 }
 
+/*
+ * xemu diagnostic: a watchpoint carrying XEMU_BP_LOG never traps; each
+ * matching access calls xemu_wp_log_hook (set by the target) and execution
+ * carries on.  Used to find the writer of corrupt kernel scheduler state.
+ */
+#define XEMU_BP_LOG 0x1000
+void (*xemu_wp_log_hook)(CPUState *cpu, vaddr addr, vaddr len, uintptr_t ra);
+
 /* Generate a debug exception if a watchpoint has been hit.  */
 void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
                           MemTxAttrs attrs, int flags, uintptr_t ra)
@@ -93,6 +101,12 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
         int hit_flags = wp->flags & flags;
 
         if (hit_flags && watchpoint_address_matches(wp, addr, len)) {
+            if (wp->flags & XEMU_BP_LOG) {
+                if (xemu_wp_log_hook) {
+                    xemu_wp_log_hook(cpu, addr, len, ra);
+                }
+                continue;
+            }
             if (replay_running_debug()) {
                 /*
                  * replay_breakpoint reads icount.

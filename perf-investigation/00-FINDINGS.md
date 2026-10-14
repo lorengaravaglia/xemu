@@ -4217,8 +4217,9 @@ idle stack and the driver's PRD table live). Not found yet. A real P3's
 idle loop is ~ns per pass and real interrupt latency is µs; ours with the
 halt is the host wake latency.
 
-**Disposition:** shipped OFF (`g_xemu_idle_halt = 0`); modes 1/2/4 left
-behind the property for the next attempt. Next step would be a write
+**Disposition (superseded by BR):** first shipped OFF; modes 1/2/4 left
+behind the property for the next attempt. BR found the corruption was an
+old nv2a.c hack, not a race, and the halt is now ON by default. Next step would be a write
 watchpoint on `Prcb->NextThread` / `CurrentThread` (KPRCB at 0x80035bdc,
 +0x2c / +0x28) logging any store of a non-kernel pointer with its EIP --
 that names the corrupting code, guest or device. The prize is large:
@@ -4226,3 +4227,53 @@ that names the corrupting code, guest or device. The prize is large:
 
 Also added: `bench: IDLE per frame` summary line (vCPU and NV2A on-CPU,
 spin, halted, temperature) at the end of every benchmark.
+
+## BR. THE "BOOT RACE" WAS AN EARLY-PORT HACK WRITING 1 TO NextThread; IDLE HALT NOW ON (2026-10-13)
+
+BQ's corruption, found with two watchpoints (`debug.xemu.kprcb_watch=1`,
+misc_helper.c):
+
+1. **TCG write watchpoint** on `Prcb->CurrentThread/NextThread`
+   (0x80035c04, 8 bytes; log-only flag `XEMU_BP_LOG` in
+   accel/tcg/watchpoint.c), logging PC, GPRs, stack, IRQL and the old
+   values per store. 5 crashes out of 6 boots, all identical: the last guest
+   store left `NextThread = 0` as the scheduler switched to the idle thread;
+   ~0.9-1.0 s of halted idle followed (only clock interrupts); then the idle
+   loop found `NextThread = 1` with **no guest store in between**.
+2. **Host ARM hardware watchpoint** (perf_event `PERF_TYPE_BREAKPOINT` on the
+   host RAM backing guest 0x35c08, every thread but the vCPU, samples with
+   user call chain read from the perf ring at the crash; signals cannot be
+   used because QEMU threads block them and a blocked forced SIGTRAP kills
+   the process). It caught the writer at once: the **vblank-timer thread**,
+   `vblank_timer_thread -> graphic_hw_update -> nv2a_vga_gfx_update ->
+   cpu_memory_rw_debug`, storing 1.
+
+**Cause.** `nv2a_vga_gfx_update` (Android only, from the April GLES port)
+sampled the vCPU's EIP every 6 vblanks; if it was 0x8001b02f for ~2 s with
+`[ebx+0x2c] == 0`, it wrote 1 there "to unblock the wait". 0x8001b02f is
+the idle loop's nop, exactly where a halted (or mode-2 sleeping) idle loop
+sits, so any ~1 s idle in a load tripped it; the kernel then switched to
+"thread" 0x00000001 and bugchecked. Its `LOOP FORCE-SIGNAL` log line is in
+all 6 crashed boots and in neither clean one. It explains every BQ row:
+modes 1 and 2 park EIP at 0x8001b02f, mode 4 and mode 0 do not. With the
+halt off a long idle could still trip it, so removing it is a fix on its
+own.
+
+**Fix:** hack removed; `g_xemu_idle_halt = 1` (on by default,
+`debug.xemu.idle_halt=0` turns it off).
+
+| boots after the fix | result |
+|---|---|
+| Jade, halt on, watchpoints on | 6/6 clean, ~4490 ATAPI commands (full load); host watchpoint: no writer but the vCPU |
+| Jade, halt on, watchpoints off | 4/4 clean |
+| Jade, halt off | 2/2 clean |
+| Jade, default build (property unset) | 2/2 clean, mode 1 |
+| Halo cold boot, halt on (never tested before) | 3/3 to the main menu, 29.6 fps |
+
+BQ's measurements stand: −23% vCPU time, ~−12 °C at equal frame rate.
+
+**Lesson:** a corruption that looks like a timing race can be a host-side
+write. A host hardware watchpoint on the guest RAM page answers "who wrote
+this?" for every thread in one run; the guest-side watchpoint alone could
+only say "not the guest".
+

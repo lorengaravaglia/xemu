@@ -26,6 +26,18 @@
 #include "qemu/timer.h"
 #include "qemu/atomic.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "exec/watchpoint.h"
+#include "tcg/insn-start-words.h"
+#include <sys/system_properties.h>
+#include "system/address-spaces.h"
+#include "system/memory.h"
+#include <dirent.h>
+#include <dlfcn.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <linux/hw_breakpoint.h>
+#include <linux/perf_event.h>
 
 /*
  * NOTE: the translator must set DisasContext.cc_op to CC_OP_EFLAGS
@@ -230,21 +242,331 @@ void helper_xemu_stall(CPUX86State *env)
  * at this nop, its handler runs, and the loop re-tests.  An interrupt already
  * pending is taken at once (cpu_handle_halt checks cpu_has_work).
  *
- * debug.xemu.idle_halt: 0 off (default), 1 halt; diagnostics 2 = sleep
+ * debug.xemu.idle_halt: 0 off, 1 halt (default); diagnostics 2 = sleep
  * 100 us instead of halting, 4 = do the reads only.  Re-read about once a
  * second so A/B can toggle it inside one process.
  *
- * OFF BY DEFAULT: with it on, Jade Empire's boot bugchecks (0x0A, corrupt
- * Prcb->NextThread) in ~60% of launches at the same loading step -- and so
- * does a plain 100 us delay here, so the cause is a timing race elsewhere
- * that a slower idle loop exposes, not the halt itself (FINDINGS BQ).
+ * ON by default.  It first looked as if it exposed a boot race (Jade Empire
+ * bugchecked in ~60% of cold boots with a corrupt Prcb->NextThread), but the
+ * corruption was an early-port hack in nv2a.c that wrote 1 to NextThread
+ * whenever the vCPU sat at this address for ~2 s -- which a halted idle
+ * loop does.  The hack is gone; the watchpoints below found it (BQ).
  */
-int g_xemu_idle_halt;             /* OFF: crashes Jade Empire's boot (BQ) */
+int g_xemu_idle_halt = 1;
 unsigned long long xemu_idle_halts;
 uint64_t xemu_idle_halt_t0;       /* cntvct at the halt, 0 when running */
 
+/*
+ * DIAGNOSTIC (debug.xemu.kprcb_watch=1): log every guest store to
+ * Prcb->CurrentThread / NextThread (KPRCB 0x80035bdc +0x28/+0x2c) and to the
+ * same physical bytes through the 0xF0000000 alias, without trapping.  Each
+ * store records the writing instruction, all GPRs (the stored value is
+ * normally one of them), the top of the stack (the caller), IRQL and the
+ * fields' values just before the store.  xemu_x86_dump_stuck prints the ring
+ * when the guest has halted with IF clear -- the end of a KeBugCheckEx.
+ * Device DMA does not pass through here: a field whose value at one store
+ * differs from what the previous store wrote was changed by something else.
+ */
+#define XEMU_BP_LOG 0x1000
+#define XEMU_KW_N   256
+extern void (*xemu_wp_log_hook)(CPUState *cpu, vaddr addr, vaddr len,
+                                uintptr_t ra);
+extern unsigned xemu_int_head;
+static struct xemu_kw {
+    uint64_t t;
+    uint32_t addr, len, eip, d0, eflags, cur, next, irql, ints;
+    uint32_t regs[8], stk[6];
+} xemu_kw_ring[XEMU_KW_N];
+static unsigned xemu_kw_head;
+static unsigned xemu_hw_count(void);
+
+static void xemu_kprcb_wp_log(CPUState *cs, vaddr addr, vaddr len,
+                              uintptr_t ra)
+{
+    CPUX86State *env = cpu_env(cs);
+    struct xemu_kw *e = &xemu_kw_ring[xemu_kw_head++ % XEMU_KW_N];
+    uint64_t data[INSN_START_WORDS] = { 0 };
+    uint32_t f[2] = { 0, 0 };
+    uint8_t irql = 0xff;
+    int i;
+
+    asm volatile("mrs %0, cntvct_el0" : "=r"(e->t));
+    e->addr = addr;
+    e->len = len;
+    e->eip = env->eip;
+    e->d0 = cpu_unwind_state_data(cs, ra, data) ? (uint32_t)data[0] : ~0u;
+    e->eflags = env->eflags;
+    for (i = 0; i < 8; i++) {
+        e->regs[i] = env->regs[i];
+    }
+    cpu_memory_rw_debug(cs, 0x80035c04, (uint8_t *)f, sizeof(f), 0);
+    cpu_memory_rw_debug(cs, 0x80035bd8, &irql, 1, 0);
+    memset(e->stk, 0xee, sizeof(e->stk));
+    cpu_memory_rw_debug(cs, env->regs[R_ESP], (uint8_t *)e->stk,
+                        sizeof(e->stk), 0);
+    e->cur = f[0];
+    e->next = f[1];
+    e->irql = irql;
+    e->ints = xemu_int_head;
+    if ((xemu_kw_head & 0x3fff) == 1) {      /* proof of life */
+        fprintf(stderr, "kprcb-watch: %u stores, last pc d0=%08x eip=%08x "
+                "st %08x cur=%08x next=%08x | host wp: %u sample bytes\n",
+                xemu_kw_head, e->d0, e->eip, e->addr, e->cur, e->next,
+                xemu_hw_count());
+    }
+}
+
+/*
+ * The same field watched by the host CPU: an ARM hardware watchpoint
+ * (perf_event breakpoint) on the host RAM backing Prcb->NextThread, in every
+ * other thread of the process, inherited by threads they create later.  It
+ * sees stores the TCG watchpoint cannot -- device DMA and host threads.
+ * Each hit is a perf sample (tid, PC, user call chain, registers) in a
+ * per-thread ring buffer, read when the crash is reported; no signals, since
+ * QEMU threads block them all.  The vCPU thread is left out: its stores are
+ * what the TCG watchpoint logs.
+ */
+#define XEMU_HW_MAX   128
+#define XEMU_HW_PAGES 8
+static struct { int fd, tid; void *map; } xemu_hw_ev[XEMU_HW_MAX];
+static int xemu_hw_nev;
+static volatile uint32_t *xemu_hw_addr;
+
+static int xemu_hw_attach(int tid, int inherit)
+{
+    struct perf_event_attr pa;
+
+    memset(&pa, 0, sizeof(pa));
+    pa.type = PERF_TYPE_BREAKPOINT;
+    pa.size = sizeof(pa);
+    pa.bp_type = HW_BREAKPOINT_W;
+    pa.bp_addr = (uintptr_t)xemu_hw_addr;
+    pa.bp_len = HW_BREAKPOINT_LEN_4;
+    pa.sample_period = 1;
+    pa.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_TIME |
+                     PERF_SAMPLE_CALLCHAIN | PERF_SAMPLE_REGS_USER;
+    pa.sample_regs_user = (1ull << 33) - 1;        /* x0-x30, sp, pc */
+    pa.exclude_kernel = 1;
+    pa.exclude_hv = 1;
+    pa.exclude_callchain_kernel = 1;
+    pa.inherit = inherit;
+    pa.use_clockid = 1;
+    pa.clockid = CLOCK_MONOTONIC;
+    return syscall(__NR_perf_event_open, &pa, tid, -1, -1, 0);
+}
+
+static void xemu_hw_arm(void)
+{
+    MemoryRegion *mr;
+    hwaddr xlat, l = 4;
+    DIR *d;
+    struct dirent *de;
+    int vcpu = gettid(), bad = 0, err = 0, inh = 0;
+    size_t sz = (XEMU_HW_PAGES + 1) * 4096;
+
+    mr = address_space_translate(&address_space_memory, 0x35c08, &xlat, &l,
+                                 true, MEMTXATTRS_UNSPECIFIED);
+    if (!memory_region_is_ram(mr)) {
+        fprintf(stderr, "kprcb-hwwp: 0x35c08 is not RAM\n");
+        return;
+    }
+    xemu_hw_addr = (uint32_t *)((uint8_t *)memory_region_get_ram_ptr(mr) +
+                                xlat);
+    d = opendir("/proc/self/task");
+    while (d && (de = readdir(d)) && xemu_hw_nev < XEMU_HW_MAX) {
+        int tid = atoi(de->d_name), fd;
+        void *m = MAP_FAILED;
+
+        if (tid <= 0 || tid == vcpu) {
+            continue;
+        }
+        fd = xemu_hw_attach(tid, 1);
+        if (fd >= 0) {
+            m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (m == MAP_FAILED) {
+                close(fd);
+                fd = -1;
+            } else {
+                inh++;
+            }
+        }
+        if (fd < 0) {                  /* inherited events may not mmap */
+            fd = xemu_hw_attach(tid, 0);
+            if (fd >= 0) {
+                m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            }
+        }
+        if (fd < 0 || m == MAP_FAILED) {
+            bad++;
+            err = errno;
+            continue;
+        }
+        xemu_hw_ev[xemu_hw_nev].fd = fd;
+        xemu_hw_ev[xemu_hw_nev].tid = tid;
+        xemu_hw_ev[xemu_hw_nev].map = m;
+        xemu_hw_nev++;
+    }
+    if (d) {
+        closedir(d);
+    }
+    fprintf(stderr, "kprcb-hwwp: host %p (guest phys 0x35c08) armed in %d "
+            "threads (%d inheriting), %d failed (errno %d), vCPU %d skipped\n",
+            (void *)xemu_hw_addr, xemu_hw_nev, inh, bad, err, vcpu);
+}
+
+static unsigned xemu_hw_count(void)
+{
+    unsigned n = 0;
+    int i;
+
+    for (i = 0; i < xemu_hw_nev; i++) {
+        struct perf_event_mmap_page *mp = xemu_hw_ev[i].map;
+        n += (unsigned)(__atomic_load_n(&mp->data_head, __ATOMIC_ACQUIRE) -
+                        mp->data_tail);
+    }
+    return n;
+}
+
+static void xemu_hw_dump(void)
+{
+    int i;
+
+    fprintf(stderr, "kprcb-hwwp: %u bytes of samples in %d rings; now %08x\n",
+            xemu_hw_count(), xemu_hw_nev, xemu_hw_addr ? *xemu_hw_addr : 0);
+    for (i = 0; i < xemu_hw_nev; i++) {
+        struct perf_event_mmap_page *mp = xemu_hw_ev[i].map;
+        uint8_t *data = (uint8_t *)mp + 4096;
+        uint64_t size = XEMU_HW_PAGES * 4096;
+        uint64_t head = __atomic_load_n(&mp->data_head, __ATOMIC_ACQUIRE);
+        uint64_t pos = mp->data_tail;
+        int shown = 0;
+
+        while (pos < head && shown < 16) {
+            uint64_t rec[512];
+            struct perf_event_header *h;
+            uint64_t k, *q;
+            char comm[32] = "?", path[64];
+            FILE *f;
+
+            /* copy out one record, handling ring wrap */
+            for (k = 0; k < sizeof(struct perf_event_header); k++) {
+                ((uint8_t *)rec)[k] = data[(pos + k) % size];
+            }
+            h = (struct perf_event_header *)rec;
+            if (h->size < sizeof(*h) || h->size > sizeof(rec)) {
+                break;
+            }
+            for (k = 0; k < h->size; k++) {
+                ((uint8_t *)rec)[k] = data[(pos + k) % size];
+            }
+            pos += h->size;
+            if (h->type != PERF_RECORD_SAMPLE) {
+                fprintf(stderr, "kprcb-hwwp: ring %d record type %u\n",
+                        xemu_hw_ev[i].tid, h->type);
+                continue;
+            }
+            shown++;
+            q = (uint64_t *)(h + 1);
+            {
+                uint64_t ip = q[0];
+                uint32_t pid = q[1], tid = q[1] >> 32;
+                uint64_t t = q[2], nr = q[3], *ips = &q[4], *regs, abi;
+                uint32_t insn = 0, rt;
+                Dl_info di;
+                uint64_t j;
+
+                regs = &ips[nr];
+                abi = regs[0];
+                regs++;
+                snprintf(path, sizeof(path), "/proc/self/task/%u/comm", tid);
+                f = fopen(path, "r");
+                if (f) {
+                    if (fgets(comm, sizeof(comm), f)) {
+                        comm[strcspn(comm, "\n")] = 0;
+                    }
+                    fclose(f);
+                }
+                if (dladdr((void *)ip, &di)) {
+                    insn = *(uint32_t *)ip;
+                }
+                rt = insn & 0x1f;
+                fprintf(stderr, "kprcb-hwwp: t=%llu pid %u tid %u (%s) "
+                        "pc=%llx insn=%08x rt=x%u val=%016llx abi=%llu\n",
+                        (unsigned long long)t, pid, tid, comm,
+                        (unsigned long long)ip, insn, rt,
+                        (unsigned long long)(abi && rt < 31 ? regs[rt] : 0),
+                        (unsigned long long)abi);
+                for (j = 0; j < nr && j < 14; j++) {
+                    if (ips[j] >= (uint64_t)-4096) {   /* context marker */
+                        continue;
+                    }
+                    if (dladdr((void *)ips[j], &di) && di.dli_fname) {
+                        fprintf(stderr, "kprcb-hwwp:     %s+0x%llx %s\n",
+                                strrchr(di.dli_fname, '/') ?
+                                strrchr(di.dli_fname, '/') + 1 : di.dli_fname,
+                                (unsigned long long)(ips[j] -
+                                                     (uintptr_t)di.dli_fbase),
+                                di.dli_sname ? di.dli_sname : "");
+                    } else {
+                        fprintf(stderr, "kprcb-hwwp:     %llx\n",
+                                (unsigned long long)ips[j]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void xemu_kprcb_watch_arm(CPUState *cs)
+{
+    static bool done;
+    char v[PROP_VALUE_MAX] = { 0 };
+
+    if (done) {
+        return;
+    }
+    done = true;
+    if (__system_property_get("debug.xemu.kprcb_watch", v) <= 0 ||
+        v[0] != '1') {
+        return;
+    }
+    xemu_wp_log_hook = xemu_kprcb_wp_log;
+    cpu_watchpoint_insert(cs, 0x80035c04, 8, BP_MEM_WRITE | XEMU_BP_LOG,
+                          NULL);
+    cpu_watchpoint_insert(cs, 0xf0035c04, 8, BP_MEM_WRITE | XEMU_BP_LOG,
+                          NULL);
+    fprintf(stderr, "kprcb-watch: armed on CurrentThread/NextThread\n");
+    xemu_hw_arm();
+}
+
+void xemu_kprcb_watch_dump(void);
+void xemu_kprcb_watch_dump(void)
+{
+    unsigned n = MIN(xemu_kw_head, XEMU_KW_N), i;
+
+    xemu_hw_dump();
+    fprintf(stderr, "kprcb-watch: %u stores logged, last %u (oldest first):\n",
+            xemu_kw_head, n);
+    for (i = n; i > 0; i--) {
+        struct xemu_kw *e = &xemu_kw_ring[(xemu_kw_head - i) % XEMU_KW_N];
+        uint32_t pc = e->d0 < 0x1000 ? ((e->eip & ~0xfffu) | e->d0) : e->d0;
+
+        fprintf(stderr, "kprcb-watch: -%03u t=%llu ints=%u pc=%08x "
+                "(eip=%08x) st %08x/%u cur=%08x next=%08x irql=%02x "
+                "if=%d | eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x "
+                "ebp=%08x esi=%08x edi=%08x | stk %08x %08x %08x %08x "
+                "%08x %08x\n", i - 1, (unsigned long long)e->t, e->ints, pc,
+                e->eip, e->addr, e->len, e->cur, e->next, e->irql,
+                !!(e->eflags & IF_MASK), e->regs[0], e->regs[1], e->regs[2],
+                e->regs[3], e->regs[4], e->regs[5], e->regs[6], e->regs[7],
+                e->stk[0], e->stk[1], e->stk[2], e->stk[3], e->stk[4],
+                e->stk[5]);
+    }
+}
+
 void helper_xemu_idle(CPUX86State *env)
 {
+    xemu_kprcb_watch_arm(env_cpu(env));
     uint32_t ebp = env->regs[R_EBP], ebx = env->regs[R_EBX];
     CPUState *cs;
 

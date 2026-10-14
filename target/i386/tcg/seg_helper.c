@@ -1199,8 +1199,28 @@ static void do_interrupt_real(CPUX86State *env, int intno, int is_int,
 static struct {
     int intno, is_int, is_hw;
     uint32_t eip, eflags, next_eip;
+    uint64_t t;
 } xemu_int_ring[16];
-static unsigned xemu_int_head;
+unsigned xemu_int_head;
+
+/* The last 16 interrupt/exception deliveries, oldest first. */
+void xemu_x86_dump_int_ring(void);
+void xemu_x86_dump_int_ring(void)
+{
+    for (unsigned i = 16; i > 0; i--) {
+        unsigned k = (xemu_int_head - i) % 16;
+
+        if (i > xemu_int_head) {
+            continue;
+        }
+        fprintf(stderr, "guest-ints: #%u t=%llu vec=%02x int=%d hw=%d "
+                "eip=%08x eflags=%08x next=%08x\n", xemu_int_head - i,
+                (unsigned long long)xemu_int_ring[k].t,
+                xemu_int_ring[k].intno, xemu_int_ring[k].is_int,
+                xemu_int_ring[k].is_hw, xemu_int_ring[k].eip,
+                xemu_int_ring[k].eflags, xemu_int_ring[k].next_eip);
+    }
+}
 #endif
 
 void do_interrupt_all(X86CPU *cpu, int intno, int is_int,
@@ -1218,6 +1238,7 @@ void do_interrupt_all(X86CPU *cpu, int intno, int is_int,
         xemu_int_ring[h].eip = env->eip;
         xemu_int_ring[h].eflags = cpu_compute_eflags(env);
         xemu_int_ring[h].next_eip = next_eip;
+        asm volatile("mrs %0, cntvct_el0" : "=r"(xemu_int_ring[h].t));
         if (intno == 1) {
             static int reported;
             if (reported++ < 3) {

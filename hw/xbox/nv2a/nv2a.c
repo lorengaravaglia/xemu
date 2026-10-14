@@ -217,14 +217,7 @@ static void nv2a_vga_gfx_update(void *opaque)
     nv2a_update_irq(d);
 
 #if defined(__ANDROID__) || defined(ANDROID)
-    /* Tracks the Xbox kernel spin-wait at 0x8001b02f.  Samples every 6
-     * vblanks (~100ms).  When the kernel has been stuck for >=2s at that
-     * address with [EBX+0x2C]==0, writes 1 to unblock it (mimics the NOP
-     * ISR that normally signals the wait — absent after the game's GPU init
-     * empties PFIFO). */
     static unsigned vblank_count = 0;
-    static bool in_stuck_loop = false;
-    static unsigned stuck_entry_vblank = 0;
 
     vblank_count++;
 
@@ -266,39 +259,6 @@ static void nv2a_vga_gfx_update(void *opaque)
         }
     }
 
-    if (vblank_count % 6 == 0) {
-        CPUState *vcpu = first_cpu;
-        if (vcpu) {
-            CPUX86State *env = cpu_env(vcpu);
-            uint32_t linear_pc = (uint32_t)(env->segs[R_CS].base + env->eip);
-            uint32_t ebx = (uint32_t)env->regs[R_EBX];
-
-            bool at_loop = (linear_pc == 0x8001b02f);
-            if (at_loop && !in_stuck_loop) {
-                in_stuck_loop = true;
-                stuck_entry_vblank = vblank_count;
-            } else if (!at_loop && in_stuck_loop) {
-                in_stuck_loop = false;
-            } else if (at_loop && in_stuck_loop &&
-                       ebx == 0x80035bdc &&
-                       vblank_count - stuck_entry_vblank >= 120) {
-                uint32_t wait_field = 0;
-                cpu_memory_rw_debug(vcpu, ebx + 0x2c,
-                                    (uint8_t *)&wait_field, 4, 0);
-                if (wait_field == 0 &&
-                    (vblank_count - stuck_entry_vblank) % 60 == 0) {
-                    uint32_t signal_val = 1;
-                    cpu_memory_rw_debug(vcpu, ebx + 0x2c,
-                                        (uint8_t *)&signal_val, 4, 1);
-                    __android_log_print(ANDROID_LOG_INFO, "xemu-vcpu",
-                        "LOOP FORCE-SIGNAL vblank#%u (stuck %u vblanks): "
-                        "wrote 1 to [0x%08x+0x2C]",
-                        vblank_count, vblank_count - stuck_entry_vblank,
-                        ebx);
-                }
-            }
-        }
-    }
 #endif
 }
 
