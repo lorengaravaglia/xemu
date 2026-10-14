@@ -48,14 +48,16 @@ class LibraryPresentation(
     var focusSelected: () -> Unit = {}
     private var composeView: ComposeView? = null
 
+    /** Controller focus to the selected card.  This window may still be in
+     *  touch mode, where a focus request is refused: leave it first. */
+    fun focusSelectedFromTouch() {
+        composeView?.requestFocusFromTouch()
+        focusSelected()
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode !in NAV_KEYS) return super.dispatchKeyEvent(event)
-        if (event.action == KeyEvent.ACTION_DOWN && !hasCardFocus()) {
-            /* This window is still in touch mode, where a focus request is
-             * refused: leave it first. */
-            composeView?.requestFocusFromTouch()
-            focusSelected()
-        }
+        if (event.action == KeyEvent.ACTION_DOWN && !hasCardFocus()) focusSelectedFromTouch()
         /* Compose clicks on DPAD_CENTER, not BUTTON_A.  Unhandled, the
          * system would re-send A as DPAD_CENTER to the focused window --
          * possibly the top screen -- so translate it here. */

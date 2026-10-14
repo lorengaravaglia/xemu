@@ -65,7 +65,7 @@ val TEXT_SHADOW = TextStyle(shadow = Shadow(Color.Black.copy(alpha = 0.8f), Offs
  * of the screen is a blurred, darkened copy of the same art, into which the
  * hero's bottom edge fades.
  *
- * @param dim extra darkening, for use behind the card rows.
+ * @param dim extra darkening, for use behind the card rows (no blurred backdrop).
  * @param footer drawn under the hero band (dual-screen details).
  */
 @Composable
@@ -83,8 +83,12 @@ fun GameShowcase(
             val bandHeight = fullWidth / HERO_ASPECT
 
             /* Backdrop: the hero, or failing that a real cover (the disc's
-             * 128x128 title image is too small to blur into anything). */
-            val backdrop = g.heroUri ?: g.coverUri?.takeIf { !g.coverIsDiscArt }
+             * 128x128 title image is too small to blur into anything).  Not
+             * behind the card rows ([dim]): there the cards cover it and a
+             * blurred, darkened band only looks muddy, so the hero fades into
+             * the plain background instead. */
+            val backdrop = if (dim > 0f) null
+                           else g.heroUri ?: g.coverUri?.takeIf { !g.coverIsDiscArt }
             if (backdrop != null) {
                 AsyncImage(
                     model = backdrop, contentDescription = null,

@@ -251,6 +251,22 @@ fun GameLibraryScreen(
         }
     }
 
+    /* With a gamepad connected, the controller starts where the highlight is
+     * whenever the library comes to the front, on either screen.  Touching
+     * the screen puts it back in touch mode, and then -- as everywhere in
+     * Android -- the first D-pad press brings the focus back. */
+    val rootView = androidx.compose.ui.platform.LocalView.current
+    LaunchedEffect(started, useDual, games.isNotEmpty()) {
+        if (!started || games.isEmpty() || !gamepadConnected()) return@LaunchedEffect
+        kotlinx.coroutines.delay(150)          // the list (and lower window) laid out
+        if (useDual) {
+            LibraryPresentation.showing?.focusSelectedFromTouch()
+        } else {
+            rootView.requestFocusFromTouch()
+            try { selectedFocus.requestFocus() } catch (_: IllegalStateException) {}
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
     if (artShown) {
         GameShowcase(
@@ -496,3 +512,12 @@ private fun ShowcaseDetails(game: GameEntry, refresh: Int) {
         }
     }
 }
+
+/** A physical game controller is attached (the Thor's own counts). */
+private fun gamepadConnected(): Boolean =
+    android.view.InputDevice.getDeviceIds().any { id ->
+        val d = android.view.InputDevice.getDevice(id)
+        d != null && !d.isVirtual &&
+            d.sources and android.view.InputDevice.SOURCE_GAMEPAD ==
+                android.view.InputDevice.SOURCE_GAMEPAD
+    }

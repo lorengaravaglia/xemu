@@ -122,9 +122,20 @@ class MainActivity : ComponentActivity() {
     }
 
     /* Dual-screen library: controller navigation drives the card list on the
-     * lower screen, whichever display was touched last. */
-    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean =
-        com.boxxy.library.LibraryPresentation.forwardKey(event) || super.dispatchKeyEvent(event)
+     * lower screen, whichever display was touched last.  Elsewhere gamepad A
+     * selects: Compose clicks on DPAD_CENTER, and Android's fallback from A
+     * to DPAD_CENTER only comes after an unhandled A. */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (com.boxxy.library.LibraryPresentation.forwardKey(event)) return true
+        if (event.keyCode == android.view.KeyEvent.KEYCODE_BUTTON_A) {
+            return super.dispatchKeyEvent(android.view.KeyEvent(
+                event.downTime, event.eventTime, event.action,
+                android.view.KeyEvent.KEYCODE_DPAD_CENTER, event.repeatCount,
+                event.metaState, event.deviceId, event.scanCode, event.flags,
+                event.source))
+        }
+        return super.dispatchKeyEvent(event)
+    }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
