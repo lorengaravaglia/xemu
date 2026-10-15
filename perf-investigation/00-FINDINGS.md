@@ -4383,3 +4383,30 @@ clock now keeps real time, where it ran 3-4% slow before.
 against the real-time devices (APU, vblank) before blaming the change: here
 the change only amplified an existing drift.
 
+
+## BU. IDLE HALT OVER A 20-MINUTE SOAK: SLOW FRAMES −56%, ~11 °C COOLER, +0.15 GHz (2026-10-14)
+
+Slot 5 (the agreed benchmark save), back-to-back 600-frame BENCHMARK runs
+in one process per arm, 20 min each, on battery, fan and performance mode
+at the user's settings (Smart, High Performance). Halt on first (start
+34 °C), then halt off after a capped 25-min cool-down (start 38.8 °C, which
+it passed within its first run). Script: scratchpad `soak6.sh`.
+
+| 5-min period | halt | >50 ms/run | mean frame | vCPU ms | GHz | hottest CPU | fan |
+|---|---|---|---|---|---|---|---|
+| 0-5 | on | 4.7 | 33.67 | 25.4 | 2.93 | 76.5 °C | 48% |
+| 0-5 | off | 7.0 | 33.78 | 33.1 | 2.83 | 94.3 °C | 57% |
+| 5-10 | on | 8.8 | 33.80 | 25.6 | 2.89 | 81.7 °C | 57% |
+| 5-10 | off | 19.0 | 34.23 | 33.5 | 2.70 | 94.7 °C | 60% |
+| 10-15 | on | 9.3 | 33.83 | 26.2 | 2.84 | 83.9 °C | 59% |
+| 10-15 | off | 24.6 | 34.44 | 33.7 | 2.67 | 94.9 °C | 61% |
+| 15-20 | on | 12.2 | 33.93 | 26.4 | 2.81 | 84.2 °C | 60% |
+| 15-20 | off | 28.2 | 34.56 | 33.8 | 2.66 | 94.7 °C | 61% |
+
+All 47 runs per arm: >50 ms frames **416 (on) vs 938 (off)**, mean frame
+33.81 vs 34.26 ms; battery 6% vs 8% in 20 min. No frame over 66 ms in either.
+
+With the halt off the die reaches its ~95 °C regulation point in the first
+minute and the clock sags to 2.66 GHz; with it on it settles near 84 °C and
+holds 2.81 GHz. Same mechanism as C8 (heat -> clock -> slow frames), now
+removed at the source instead of with the fan. Confirms BQ/BT's default.
