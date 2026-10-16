@@ -405,6 +405,8 @@ From the heavy-frames agent, not yet measured:
 | ~~Guest busy-wait / spin elimination~~ **THIS ROW WAS WRONG — see sections M and N.** The spin is real and large: ~23% of generated-code time in a 64-bit clock wait at guest 0x000bb0df. It reads ORDINARY MEMORY, so the MMIO-based test below could not have detected it, and the conclusion drawn from that test was unjustified. It remains *not worth doing for frame rate* — section N shows it is 14.2% of on-time frames against 1.8% of dropped ones — but that is a different and better-supported reason. Original (MMIO-only) reasoning, kept as the record of the mistake: **MEASURED 2026-09-11.** MMIO is only ~730 accesses/frame, and it is FLAT across frame classes (x1.06, x1.09) while host work rises x1.48. Cheap frames sit at 93 Mcyc against a 98 Mcyc budget. The 96-98% utilisation figure reflects real work, not polling. |
 | MMIO lockless_io fast path (skipping BQL + device lock) | Same run: ~730 MMIO accesses/frame. Even at a generous ~1000 cycles each that is <1% of a 93 Mcyc frame. The ~10-line change is real and QEMU already ships the switch, but there is nothing to win. |
 | L3 contention from the GPU thread evicting the vCPU's data | **MEASURED 2026-09-11: IPC is FLAT across frame weights** (cheap vs expensive: 1.69/1.67, 1.85/1.90, 1.86/1.90). If GPU memory traffic were evicting us, heavy frames — which have more GPU work — would show *lower* IPC. They do not. My hypothesis, killed by my own measurement. |
+| Superblocks through jmp/call (lead C2) | **PRICED 2026-10-15 (BV):** only 15% of block ends are jmp/call; ~1.5-2.5% ceiling, fails the 3% gate. Through jcc: bounded by K's ~3% sync ceiling. |
+| Return-address stack for TB lookup | **BUILT AND MEASURED 2026-10-15 (BW):** ret IC misses 30% -> 4%, lookup helper share halved, but vCPU -0.18 +- 0.18 ms (12 paired rounds) and slow frames unchanged. `debug.xemu.ras`, off. |
 | ARM native-flag (NZCV/FEAT_FlagM2) mapping | AXFLAG needs 7 instructions where the current code needs 7 (PF = Z AND NOT C is not an AArch64 condition). NZCV-resident flags are impossible in system mode: the softmmu TLB check emits CMP+B.NE on every guest memory access and clobbers them. The hot `cmp; jcc` pattern already compiles to CMP+B.LT. |
 | NV2A surface churn forcing TLB + jump-cache flushes | **MEASURED 2026-09-11: 0.00 full flushes/frame, and full=0 ABSOLUTE since boot** (part=337, elide=7615 prove the counter works). The code path is real (vk/surface.c:582-601 -> physmem.c:891 async_safe_run_on_cpu + tlb_flush_all_cpus_synced, and cputlb.c:392 wipes the jump cache too) but it never fires in steady-state gameplay: `expire_old_surfaces` only evicts surfaces unused for 5+ frames, and a combat scene reuses its surfaces every frame. |
 
@@ -4465,4 +4467,44 @@ TB, else take today's path (so a mismatch costs only the check). Up to
 the tail, like LDAPR (AL). This is NOT the dead "return-address-stack"
 entry in section D, which was host branch prediction (0.10% mispredicts);
 this is the cost of finding the next translated block.
+
+
+
+## BW. RETURN-ADDRESS STACK FOR TB LOOKUP: WORKS, BUYS NOTHING (2026-10-15)
+
+Built BV's lead behind `debug.xemu.ras` (default off): each call site owns
+an inline-cache-shaped slot for "the code at my return address" and pushes
+it on a 16-entry ring after the guest's own push; `ret` pops it and, if
+generation, EIP and flags match, jumps there, else falls back to its own
+inline cache and the helper and fills the popped slot
+(`tcg_gen_lookup_and_goto_ptr_ras`, tcg-op.c; `gen_ras_push`, translate.c).
+Halo boots and plays with it on.
+
+**Mechanism confirmed (tbprof, slot 5):** ret IC misses 74.5k -> 9.7k per
+frame (30% -> 4.1%); all IC misses 85k -> 20.5k.
+
+**Profile, vCPU thread:** helper_lookup_tb_ptr 4.62% -> 2.04%,
+qht_lookup_custom 2.89% -> 2.22%, tb_lookup_cmp + TLS 1.22% -> 0.95%: the
+lookup path 8.7% -> 5.2%. qht barely moves -- most of its cost is other
+callers (the dispatcher's own lookups), not return misses.
+
+**Wall result, 12 paired rounds in one process, slot 5, halt on, 600 frames:**
+
+| | ras on | ras off |
+|---|---|---|
+| vCPU on-CPU | 25.73 ms | 25.91 ms |
+| paired difference | **-0.18 +- 0.18 ms (se)**, sd 0.63 | |
+| frames > 45 ms per run | 19.3 | 19.3 |
+| mean frame | 34.22 ms | 34.19 ms |
+
+A ~3.5-point drop in sampled lookup time becomes <1% of vCPU time and no
+tail change: the lookup work largely overlapped memory stalls (the W/AC
+pattern), and the push/pop code on every call and return pays back part of
+the rest. BV's 65-cycles-per-miss price came from sample shares and was the
+error -- the same trap as W. Disposition: off; code kept behind the switch.
+
+**Where this leaves "faster translated code":** superblocks, flags, register
+allocation, out-of-lining and now block lookup are all measured at <=1-3%.
+The vCPU's time is the game's own memory traffic (Z) and code fetch; the
+remaining lever with demonstrated size is heat/clock (BJ, BU).
 

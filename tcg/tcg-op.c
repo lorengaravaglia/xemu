@@ -3345,6 +3345,127 @@ void tcg_gen_lookup_and_goto_ptr_ic(const TCGICKeySpec *spec, void *slot,
 }
 #endif
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * xemu: a return.  Pop the guest return-address stack (a ring of slot
+ * pointers pushed at calls, see target/i386 gen_ras_push) and, if the popped
+ * slot -- the call site's cached "code at my return address" -- matches the
+ * real target (generation, pc, flags, as the inline cache checks), jump
+ * there.  Otherwise this exit's own inline cache, then the lookup helper;
+ * either way the popped slot is filled so the next return from that call
+ * site hits.  A wrong guess costs only the checks.
+ */
+void tcg_gen_lookup_and_goto_ptr_ras(const TCGICKeySpec *spec, void *slot,
+                                     void *genp, void *ras_stack,
+                                     void *ras_top, int mask);
+void tcg_gen_lookup_and_goto_ptr_ras(const TCGICKeySpec *spec, void *slot,
+                                     void *genp, void *ras_stack,
+                                     void *ras_top, int mask)
+{
+    TCGv_ptr slotp, gp, ptr, rslot, ra;
+    TCGv_i32 pc_now, flags_now, cs_base_now, a, b, t;
+    TCGLabel *ic, *slow, *fill, *done;
+
+    if (tcg_ctx->gen_tb->cflags & CF_NO_GOTO_PTR) {
+        tcg_gen_exit_tb(NULL, 0);
+        return;
+    }
+
+    plugin_gen_disable_mem_helpers();
+
+    ptr         = tcg_temp_new_ptr();
+    rslot       = tcg_temp_new_ptr();
+    ra          = tcg_temp_new_ptr();
+    pc_now      = tcg_temp_new_i32();
+    flags_now   = tcg_temp_new_i32();
+    cs_base_now = tcg_temp_new_i32();
+    a           = tcg_temp_new_i32();
+    b           = tcg_temp_new_i32();
+    t           = tcg_temp_new_i32();
+    ic   = gen_new_label();
+    slow = gen_new_label();
+    fill = gen_new_label();
+    done = gen_new_label();
+
+    slotp = tcg_constant_ptr(slot);
+    gp    = tcg_constant_ptr(genp);
+
+    tcg_gen_ld_i32(pc_now, tcg_env, spec->pc_ofs);
+    tcg_gen_ld_i32(flags_now, tcg_env, spec->flags_ofs);
+    tcg_gen_ld_i32(b, tcg_env, spec->flags2_ofs);
+    tcg_gen_andi_i32(b, b, spec->flags2_mask);
+    tcg_gen_or_i32(flags_now, flags_now, b);
+    tcg_gen_ld_i32(cs_base_now, tcg_env, spec->cs_base_ofs);
+
+    /* pop: rslot = stack[top]; top = (top - 1) & mask */
+    tcg_gen_ld_i32(t, tcg_constant_ptr(ras_top), 0);
+    tcg_gen_shli_i32(a, t, 3);
+    tcg_gen_ext_i32_ptr(ra, a);
+    tcg_gen_addi_ptr(ra, ra, (intptr_t)ras_stack);
+    tcg_gen_ld_ptr(rslot, ra, 0);
+    tcg_gen_subi_i32(t, t, 1);
+    tcg_gen_andi_i32(t, t, mask);
+    tcg_gen_st_i32(t, tcg_constant_ptr(ras_top), 0);
+
+    /* the call site's slot */
+    tcg_gen_ld_i32(a, gp, 0);
+    tcg_gen_ld_i32(b, rslot, 0);
+    tcg_gen_brcond_i32(TCG_COND_NE, a, b, ic);
+    tcg_gen_ld_i32(b, rslot, 4);
+    tcg_gen_brcond_i32(TCG_COND_NE, b, pc_now, ic);
+    tcg_gen_ld_i32(b, rslot, 8);
+    tcg_gen_brcond_i32(TCG_COND_NE, b, flags_now, ic);
+    tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env, spec->can_do_io_ofs);
+    tcg_gen_ld_ptr(ptr, rslot, 16);
+    tcg_gen_br(done);
+
+    /* this exit's own inline cache */
+    gen_set_label(ic);
+    tcg_gen_ld_i32(a, slotp, 0);
+    tcg_gen_ld_i32(b, gp, 0);
+    tcg_gen_brcond_i32(TCG_COND_NE, a, b, slow);
+    tcg_gen_ld_i32(a, slotp, 4);
+    tcg_gen_brcond_i32(TCG_COND_NE, a, pc_now, slow);
+    tcg_gen_ld_i32(a, slotp, 8);
+    tcg_gen_brcond_i32(TCG_COND_NE, a, flags_now, slow);
+    tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env, spec->can_do_io_ofs);
+    tcg_gen_ld_ptr(ptr, slotp, 16);
+    tcg_gen_br(fill);
+
+    gen_set_label(slow);
+    if (xemu_ic_miss_ctr) {
+        TCGv_ptr mp = tcg_constant_ptr(xemu_ic_miss_ctr);
+        TCGv_i64 mc = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(mc, mp, 0);
+        tcg_gen_addi_i64(mc, mc, 1);
+        tcg_gen_st_i64(mc, mp, 0);
+    }
+    gen_helper_lookup_tb_ptr(ptr, tcg_env);
+    /* never cache "no TB" (see tcg_gen_lookup_and_goto_ptr_ic) */
+    tcg_gen_brcondi_ptr(TCG_COND_EQ, ptr,
+                        (intptr_t)tcg_code_gen_epilogue, done);
+    tcg_gen_ld_i32(b, gp, 0);
+    tcg_gen_st_i32(b, slotp, 0);
+    tcg_gen_st_i32(pc_now, slotp, 4);
+    tcg_gen_st_i32(flags_now, slotp, 8);
+    tcg_gen_st_i32(cs_base_now, slotp, 12);
+    tcg_gen_st_ptr(ptr, slotp, 16);
+
+    gen_set_label(fill);
+    tcg_gen_ld_i32(b, gp, 0);
+    tcg_gen_st_i32(b, rslot, 0);
+    tcg_gen_st_i32(pc_now, rslot, 4);
+    tcg_gen_st_i32(flags_now, rslot, 8);
+    tcg_gen_st_i32(cs_base_now, rslot, 12);
+    tcg_gen_st_ptr(ptr, rslot, 16);
+
+    gen_set_label(done);
+    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+    tcg_temp_free_ptr(ptr);
+}
+#endif
+
 void tcg_gen_lookup_and_goto_ptr(void)
 {
     TCGv_ptr ptr;

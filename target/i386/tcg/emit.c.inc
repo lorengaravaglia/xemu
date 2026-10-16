@@ -1575,12 +1575,18 @@ static void gen_BZHI(DisasContext *s, X86DecodedInsn *decode)
 static void gen_CALL(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_push_v(s, eip_next_tl(s));
+#if defined(__ANDROID__) || defined(ANDROID)
+    gen_ras_push(s);
+#endif
     gen_JMP(s, decode);
 }
 
 static void gen_CALL_m(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_push_v(s, eip_next_tl(s));
+#if defined(__ANDROID__) || defined(ANDROID)
+    gen_ras_push(s);
+#endif
     gen_JMP_m(s, decode);
 }
 
@@ -3601,6 +3607,9 @@ static void gen_RET(DisasContext *s, X86DecodedInsn *decode)
     gen_op_jmp_v(s, s->T0);
     gen_bnd_jmp(s);
     s->base.is_jmp = DISAS_JUMP;
+#if defined(__ANDROID__) || defined(ANDROID)
+    s->xras_ret = true;
+#endif
 }
 
 static void gen_RETF(DisasContext *s, X86DecodedInsn *decode)

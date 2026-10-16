@@ -42,6 +42,7 @@ static int g_hard_fpu_helper_only;
 /* Inline cache for indirect branches; defined in full further down. */
 uint32_t xemu_ic_generation = 1;
 int g_x86_inline_ic = 1;                /* debug.xemu.ic=0 disables */
+int g_x86_ras;                          /* debug.xemu.ras=1 enables */
 #endif /* AArch64: use __hard helpers, skip native TCG float ops */
 
 #if defined(__ANDROID__) || defined(ANDROID)
@@ -225,6 +226,21 @@ void x86_refresh_fpu_mode(void)
             if (first_cpu) {
                 queue_tb_flush(first_cpu);
             }
+        }
+    }
+
+    {
+        char rv[PROP_VALUE_MAX] = { 0 };
+        int want_ras = __system_property_get("debug.xemu.ras", rv) > 0 &&
+                       rv[0] == '1';
+
+        if (want_ras != g_x86_ras) {
+            g_x86_ras = want_ras;
+            xemu_ic_generation++;       /* calls and returns re-translated */
+            if (first_cpu) {
+                queue_tb_flush(first_cpu);
+            }
+            fprintf(stderr, "ras: %s\n", want_ras ? "on" : "off");
         }
     }
 
@@ -801,6 +817,7 @@ typedef struct DisasContext {
     int xtb_slot;               /* tbprof: this block's counter, or -1 */
     target_ulong xtb_last_pc;   /* tbprof: start of the last instruction */
     uint8_t xtb_xpage;          /* tbprof: bit n = gen_jmp_rel(tb_num n) left the page */
+    bool xras_ret;              /* this block ends in a near ret */
 #endif
 
     /* Floating point */
@@ -3766,7 +3783,60 @@ typedef struct ICSlot {
 ICSlot xemu_ic_slots[IC_SLOTS];
 static unsigned xemu_ic_next_slot;
 
+/*
+ * Guest return-address stack for TB lookup (FINDINGS BV): a return's own
+ * inline cache misses ~30% of the time, because the target depends on the
+ * caller.  Each call site owns a slot caching the code at its return address
+ * and pushes it here; the ret pops it (tcg_gen_lookup_and_goto_ptr_ras).
+ * Mismatches -- unbalanced call/ret, context switches, longjmp, overflow of
+ * the 16-entry ring -- only fall back to the inline cache.
+ */
+#define RAS_SLOTS 8192
+#define RAS_DEPTH 16
+static ICSlot xemu_ras_slots[RAS_SLOTS];
+static unsigned xemu_ras_next;
+static ICSlot xemu_ras_dummy;
+static ICSlot *xemu_ras_stack[RAS_DEPTH] = {
+    [0 ... RAS_DEPTH - 1] = &xemu_ras_dummy
+};
+static uint32_t xemu_ras_top;
+
+/* At a call, after the guest's own push (so a faulting push skips this). */
+static void gen_ras_push(DisasContext *s)
+{
+    ICSlot *slot;
+    TCGv_i32 t;
+    TCGv_ptr a;
+
+    if (!g_x86_ras || !g_x86_inline_ic ||
+        (tb_cflags(s->base.tb) & CF_NO_GOTO_PTR)) {
+        return;
+    }
+    slot = &xemu_ras_slots[xemu_ras_next++ & (RAS_SLOTS - 1)];
+    t = tcg_temp_new_i32();
+    a = tcg_temp_new_ptr();
+    tcg_gen_ld_i32(t, tcg_constant_ptr(&xemu_ras_top), 0);
+    tcg_gen_addi_i32(t, t, 1);
+    tcg_gen_andi_i32(t, t, RAS_DEPTH - 1);
+    tcg_gen_st_i32(t, tcg_constant_ptr(&xemu_ras_top), 0);
+    tcg_gen_shli_i32(t, t, 3);
+    tcg_gen_ext_i32_ptr(a, t);
+    tcg_gen_addi_ptr(a, a, (intptr_t)xemu_ras_stack);
+    tcg_gen_st_ptr(tcg_constant_ptr(slot), a, 0);
+}
+
+void tcg_gen_lookup_and_goto_ptr_ras(const TCGICKeySpec *spec, void *slot,
+                                     void *genp, void *ras_stack,
+                                     void *ras_top, int mask);
+
+static void gen_lookup_and_goto_ptr_ic_ret(bool is_ret);
+
 static void gen_lookup_and_goto_ptr_ic(void)
+{
+    gen_lookup_and_goto_ptr_ic_ret(false);
+}
+
+static void gen_lookup_and_goto_ptr_ic_ret(bool is_ret)
 {
     /* Mirrors x86_get_tb_cpu_state(): flags = hflags | (eflags & MASK). */
     static const TCGICKeySpec spec = {
@@ -3792,6 +3862,12 @@ static void gen_lookup_and_goto_ptr_ic(void)
     QEMU_BUILD_BUG_ON(offsetof(ICSlot, cs_base) != 12);
     QEMU_BUILD_BUG_ON(offsetof(ICSlot, ptr) != 16);
 
+    if (is_ret && g_x86_ras) {
+        tcg_gen_lookup_and_goto_ptr_ras(&spec, slot, &xemu_ic_generation,
+                                        xemu_ras_stack, &xemu_ras_top,
+                                        RAS_DEPTH - 1);
+        return;
+    }
     tcg_gen_lookup_and_goto_ptr_ic(&spec, slot, &xemu_ic_generation);
 }
 #endif
@@ -3828,7 +3904,7 @@ gen_eob(DisasContext *s, int mode)
             extern uint64_t *xemu_ic_miss_ctr;
             xemu_ic_miss_ctr = s->xtb_slot >= 0 ?
                                &xtb[s->xtb_slot].ic_miss : NULL;
-            gen_lookup_and_goto_ptr_ic();
+            gen_lookup_and_goto_ptr_ic_ret(s->xras_ret);
             xemu_ic_miss_ctr = NULL;
         }
 #else
@@ -5366,6 +5442,7 @@ static void i386_tr_tb_start(DisasContextBase *db, CPUState *cpu)
     DisasContext *dc = container_of(db, DisasContext, base);
 
     dc->xtb_xpage = 0;
+    dc->xras_ret = false;
     dc->xtb_slot = xtb_alloc();
     if (dc->xtb_slot >= 0) {
         TCGv_ptr p = tcg_constant_ptr((uintptr_t)&xtb[dc->xtb_slot].count);
