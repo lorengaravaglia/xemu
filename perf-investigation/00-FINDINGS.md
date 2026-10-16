@@ -4508,3 +4508,44 @@ allocation, out-of-lining and now block lookup are all measured at <=1-3%.
 The vCPU's time is the game's own memory traffic (Z) and code fetch; the
 remaining lever with demonstrated size is heat/clock (BJ, BU).
 
+## BX. THE NV2A THREAD, PROFILED: HALF THE PROCESS, AND WHERE IT GOES (2026-10-15)
+
+Slot 5, 1200-frame BENCHMARK, halt on, simpleperf 20 s with `--call-graph
+fp` (scratchpad gpu/gpu.data). NV2A thread 18.7 ms/frame on-CPU, vCPU
+24.4 ms. Process share by thread: **nv2a.pfifo 50.4%**, vCPU 19.5%, the two
+APU voice workers 15.8%, apu_thread 5.8%, qemu_main 2.6%. With the idle
+halt, the GPU thread is now the biggest consumer by far.
+
+**NV2A thread, by library:** libxemu 51%, libc 28%, Turnip (Vulkan) 9.3%,
+**Adreno GLES 5.5%**, kernel 3.4%.
+
+**By cost, with callers** (about half the libc samples have no caller --
+no frame pointers in leaf functions -- so caller shares are lower bounds):
+
+| item | share of thread | where |
+|---|---|---|
+| mutex lock/unlock + CAS/SWP | ~12.7% | `pfifo_run_puller`: unlock pfifo, lock pgraph, unlock pgraph, lock pfifo -- four mutex ops per method |
+| memcpy | 10.9% | per-draw state copies: `pgraph_vk_bind_shaders` (24% of it), `update_descriptor_sets` (11%), `begin_draw`, `flush_draw` |
+| dirty tracking | ~8% | `physical_memory_test_and_clear_dirty` + bitmaps + `memory_region_sync/clear_dirty_bitmap`, from `pgraph_vk_bind_textures` on every bind |
+| apply_uniform_updates | 6.0% | `pgraph_vk_bind_shaders`, per draw |
+| Adreno GLES | 5.5% | all `glTexSubImage2D` in `pgraph_vk_render_display`: the per-frame upload of the Vulkan display image into a GL texture (section AY's path) |
+| pfifo_thread self | 5.6% | pushbuffer parsing |
+| XXH3 | 4.4% | texture content hashing in `begin_pre_draw` |
+| pgraph_method_log | 2.4% | a method-name table lookup on **every** method, though tracing is off; only the trace call is gated |
+| clock_gettime | 1.4% | `g_get_monotonic_time` per texture bind |
+
+**Candidates, cheapest first:**
+1. `pgraph_method_log`: skip unless a trace event is enabled -- ~2.4%.
+2. One timestamp per draw instead of per texture bind -- ~1.4%.
+3. Uniform updates: skip unchanged blocks earlier -- part of 6%.
+4. Dirty checks on texture binds: per-page tests repeated every draw -- part of ~8%.
+5. Display handoff without the CPU copy and GL upload (AHardwareBuffer or
+   presenting from Vulkan) -- 5.5% plus its share of memcpy, and a GPU->CPU
+   readback per frame.
+6. Per-method lock churn -- ~12.7%, but BL showed these locks govern the
+   vCPU's waits; any change must be measured on the tail.
+
+The point is heat, not frame rate: the vCPU does not wait on this thread
+(A, BL), but BU showed ~0.15 GHz of sustained clock halves slow frames, and
+this thread is now half the process's CPU.
+
