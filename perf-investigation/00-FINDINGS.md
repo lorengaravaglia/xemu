@@ -4410,3 +4410,59 @@ With the halt off the die reaches its ~95 °C regulation point in the first
 minute and the clock sags to 2.66 GHz; with it on it settles near 84 °C and
 holds 2.81 GHz. Same mechanism as C8 (heat -> clock -> slow frames), now
 removed at the source instead of with the fan. Confirms BQ/BT's default.
+
+## BV. PHASE 0 FOR SUPERBLOCKS: THEY FAIL THE GATE; RETURNS ARE THE BOUNDARY THAT COSTS (2026-10-15)
+
+Lead C2 (superblocks) priced before building, as planned. New diagnostic
+`debug.xemu.tbprof=1` (translate.c): every TB gets a slot with its guest PC,
+length and how it ended (opcode of the last instruction), and generated code
+bumps an exact execution counter on entry, chained or not; inline-cache
+misses are counted per exit site (tcg-op.c slow path). Zeroed at BENCHMARK
+start, written to `files/tbprof.bin` at its end.
+
+**Instrumentation check.** Same benchmark with `debug.xemu.nochain=1`, where
+the dispatcher's own counter is exact: guest instructions 10,356,801 vs
+10,356,958 per frame, TB executions 1,653,309 vs 1,653,338 -- agree to
+0.003%.
+
+**Correction to section V.** Slot 5 runs **~10.6M guest instructions per
+frame** (1.78M TB executions, 6.0 per TB), three times V's 3.56M measured on
+slot 2. The clock spin (M) does not run here (1 exec/frame). So V's "45 host
+instructions per guest instruction" does not describe this scene; with ~76
+Mcyc of vCPU time per frame it is ~7 cycles per guest instruction.
+
+**TB ends, slot 5, halt on, per frame (two runs agree within 2%):**
+
+| last instruction | execs | share | target off-page | IC misses |
+|---|---|---|---|---|
+| jcc | 1,195k | 67% | 2.4% | ~0 |
+| ret | 245k | 14% | -- | **74.5k (30%)** |
+| call rel | 197k | 11% | **82%** | 7.9k (4%) |
+| jmp rel | 69k | 4% | 3% | ~0 |
+| call r/m | 48k | 3% | -- | 1.2k |
+| other / fall / jmp r/m / sti | 25k | 1.4% | | 1.1k |
+
+**Superblocks fail the gate (≥ ~1 ms/frame, 3%).** Following direct `jmp` and
+`call` would remove 264k boundaries/frame. At section K's ~2.1 cycles per
+boundary plus the inline-cache check on the 160k off-page calls (which
+already hit 96%), that is ~1-2 Mcyc, **0.4-0.7 ms/frame (1.5-2.5%)**.
+Extending through `jcc` (67% of ends, both sides already chained) is bounded
+by K's sync ceiling (~3%) at far higher complexity. Not building.
+
+**What the measurement found instead: returns.** A `ret`'s target depends on
+the caller, so its single-entry inline cache misses 30% of the time, and
+each miss calls `helper_lookup_tb_ptr`, often falling through the jump cache
+to `qht_lookup_custom`. simpleperf on the vCPU thread during the same
+benchmark: helper_lookup_tb_ptr 4.36% + qht_lookup_custom 2.65% +
+tb_lookup_cmp 0.53% = **~7.5% of vCPU time, ~2.0 ms/frame for ~85k misses,
+~65 cycles per miss; 87% of the misses are returns.**
+
+**Lead (next): a guest return-address stack for TB lookup.** At a call, push
+the return EIP and a per-call-site slot caching the host TB for it; at
+`ret`, pop and, if the EIP, flags and IC generation match, goto the cached
+TB, else take today's path (so a mismatch costs only the check). Up to
+~1.7 ms/frame (~6%) if it removes most return misses; expected to show in
+the tail, like LDAPR (AL). This is NOT the dead "return-address-stack"
+entry in section D, which was host branch prediction (0.10% mispredicts);
+this is the cost of finding the next translated block.
+

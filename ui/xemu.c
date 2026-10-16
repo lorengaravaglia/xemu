@@ -2378,6 +2378,10 @@ void xemu_android_benchmark_start(int frames)
     s_cheap_n = s_exp_n = 0;
     s_bench_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     bench_idle_snap(&s_bench_idle0);
+    {
+        extern void xemu_tbprof_reset(void);
+        xemu_tbprof_reset();
+    }
     ALOGI("bench: started, %d guest frames (~%d s) — hands off the controls; "
           "the screen will look frozen, that is expected",
           frames, (frames + 29) / 30);
@@ -2925,6 +2929,11 @@ static void bench_tick(void)
     }
 
     xemu_dump_guest_map();
+    {
+        extern void xemu_tbprof_dump(const char *dir);
+        extern const char *xemu_map_dir;
+        xemu_tbprof_dump(xemu_map_dir);
+    }
     {
         /* C5: the NV2A side's own frame history for the same window. */
         extern void nv2a_profile_dump_history(int frames);

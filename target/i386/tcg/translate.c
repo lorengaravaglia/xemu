@@ -797,6 +797,11 @@ typedef struct DisasContext {
     sigjmp_buf jmpbuf;
     TCGOp *prev_insn_start;
     TCGOp *prev_insn_end;
+#if defined(__ANDROID__) || defined(ANDROID)
+    int xtb_slot;               /* tbprof: this block's counter, or -1 */
+    target_ulong xtb_last_pc;   /* tbprof: start of the last instruction */
+    uint8_t xtb_xpage;          /* tbprof: bit n = gen_jmp_rel(tb_num n) left the page */
+#endif
 
     /* Floating point */
     bool flcr_set;
@@ -3587,6 +3592,145 @@ static void gen_bnd_jmp(DisasContext *s)
  * shadow.
  */
 #if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * DIAGNOSTIC (debug.xemu.tbprof=1, read at the first translation): an exact
+ * execution count for every translation block, with how it ended, to size
+ * superblocks (FINDINGS C2 / "C9").  Each block gets a slot; generated code
+ * bumps the slot's counter on entry, so chained execution is counted too.
+ * The benchmark zeroes the counters at its start and writes tbprof.bin
+ * (next to guestmap.bin) at its end.
+ */
+enum {
+    XTB_FALL,       /* ran into the page end / insn limit: no branch */
+    XTB_JMP,        /* jmp rel */
+    XTB_CALL,       /* call rel */
+    XTB_JCC,        /* jcc / loop / jcxz */
+    XTB_RET,        /* ret */
+    XTB_JMP_IND,    /* jmp r/m */
+    XTB_CALL_IND,   /* call r/m */
+    XTB_STI,        /* sti, mov ss, popf...: interrupt-window ends */
+    XTB_OTHER,      /* far transfers, iret, helpers ending the block, ... */
+    XTB_N
+};
+typedef struct XemuTbProf {
+    uint64_t count;
+    uint64_t ic_miss;           /* inline-cache misses at this block's exit */
+    uint32_t pc;
+    uint16_t icount;
+    uint8_t reason;
+    uint8_t xpage;
+} XemuTbProf;
+#define XTB_CAP (1 << 20)
+static XemuTbProf *xtb;
+static unsigned xtb_n;
+static int xtb_on = -1;
+
+static int xtb_alloc(void)
+{
+    if (xtb_on < 0) {
+        char v[PROP_VALUE_MAX] = { 0 };
+
+        xtb_on = __system_property_get("debug.xemu.tbprof", v) > 0 &&
+                 v[0] == '1';
+        if (xtb_on) {
+            xtb = calloc(XTB_CAP, sizeof(*xtb));
+            xtb_on = xtb != NULL;
+        }
+        fprintf(stderr, "tbprof: %s\n", xtb_on ? "counting" : "off");
+    }
+    if (!xtb_on || xtb_n >= XTB_CAP) {
+        return -1;
+    }
+    return xtb_n++;
+}
+
+void xemu_tbprof_reset(void);
+void xemu_tbprof_reset(void)
+{
+    unsigned i;
+
+    for (i = 0; i < xtb_n; i++) {
+        qatomic_set(&xtb[i].count, 0);
+        qatomic_set(&xtb[i].ic_miss, 0);
+    }
+}
+
+void xemu_tbprof_dump(const char *dir);
+void xemu_tbprof_dump(const char *dir)
+{
+    char path[512];
+    FILE *f;
+    uint32_t n = 0, i;
+
+    if (xtb_on != 1) {
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/tbprof.bin", dir ? dir : ".");
+    f = fopen(path, "wb");
+    if (!f) {
+        return;
+    }
+    fwrite("XTBP2", 1, 5, f);
+    fwrite(&n, 4, 1, f);
+    for (i = 0; i < xtb_n; i++) {
+        if (xtb[i].count) {
+            fwrite(&xtb[i], sizeof(xtb[i]), 1, f);
+            n++;
+        }
+    }
+    fseek(f, 5, SEEK_SET);
+    fwrite(&n, 4, 1, f);
+    fclose(f);
+    fprintf(stderr, "tbprof: wrote %s (%u executed TBs of %u, cap %s)\n",
+            path, n, xtb_n, xtb_n >= XTB_CAP ? "HIT" : "ok");
+}
+
+/* Classify the block's last instruction by its opcode. */
+static uint8_t xtb_reason(DisasContext *dc, CPUX86State *env)
+{
+    target_ulong pc = dc->xtb_last_pc;
+    uint8_t b;
+    int i;
+
+    if (dc->base.is_jmp == DISAS_TOO_MANY) {
+        return XTB_FALL;
+    }
+    for (i = 0; i < 15; i++, pc++) {
+        b = translator_ldub(env, &dc->base, pc);
+        if (b != 0x66 && b != 0x67 && b != 0xf2 && b != 0xf3 && b != 0xf0 &&
+            b != 0x2e && b != 0x3e && b != 0x26 && b != 0x36 && b != 0x64 &&
+            b != 0x65) {
+            break;
+        }
+    }
+    if (b == 0xe9 || b == 0xeb) {
+        return XTB_JMP;
+    }
+    if (b == 0xe8) {
+        return XTB_CALL;
+    }
+    if ((b >= 0x70 && b <= 0x7f) || (b >= 0xe0 && b <= 0xe3)) {
+        return XTB_JCC;
+    }
+    if (b == 0x0f) {
+        uint8_t b2 = translator_ldub(env, &dc->base, pc + 1);
+        return b2 >= 0x80 && b2 <= 0x8f ? XTB_JCC : XTB_OTHER;
+    }
+    if (b == 0xc3 || b == 0xc2) {
+        return XTB_RET;
+    }
+    if (b == 0xff) {
+        int reg = (translator_ldub(env, &dc->base, pc + 1) >> 3) & 7;
+        return reg == 2 ? XTB_CALL_IND : reg == 4 ? XTB_JMP_IND : XTB_OTHER;
+    }
+    if (b == 0xfb || b == 0x9d || b == 0x17 || b == 0x8e) {
+        return XTB_STI;
+    }
+    return XTB_OTHER;
+}
+#endif
+
+#if defined(__ANDROID__) || defined(ANDROID)
 /* ---- PROTOTYPE: inline cache for indirect branches ----------------------
  *
  * Measured motivation: HELPER(lookup_tb_ptr) is called ~375,000 times per
@@ -3680,7 +3824,13 @@ gen_eob(DisasContext *s, int mode)
                /* give irqs a chance to happen */
                !inhibit_reset) {
 #if defined(__ANDROID__) || defined(ANDROID)
-        gen_lookup_and_goto_ptr_ic();
+        {
+            extern uint64_t *xemu_ic_miss_ctr;
+            xemu_ic_miss_ctr = s->xtb_slot >= 0 ?
+                               &xtb[s->xtb_slot].ic_miss : NULL;
+            gen_lookup_and_goto_ptr_ic();
+            xemu_ic_miss_ctr = NULL;
+        }
 #else
         tcg_gen_lookup_and_goto_ptr();
 #endif
@@ -3729,6 +3879,11 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
         new_pc = (uint32_t)(new_eip + s->cs_base);
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (!(use_goto_tb && translator_use_goto_tb(&s->base, new_pc))) {
+        s->xtb_xpage |= 1 << tb_num;        /* tbprof: leaves the page */
+    }
+#endif
     if (use_goto_tb && translator_use_goto_tb(&s->base, new_pc)) {
         /* jump to same page: we can use a direct jump */
         tcg_gen_goto_tb(tb_num);
@@ -5204,8 +5359,24 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->in_fp_flush = false;
 }
 
+
 static void i386_tr_tb_start(DisasContextBase *db, CPUState *cpu)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    DisasContext *dc = container_of(db, DisasContext, base);
+
+    dc->xtb_xpage = 0;
+    dc->xtb_slot = xtb_alloc();
+    if (dc->xtb_slot >= 0) {
+        TCGv_ptr p = tcg_constant_ptr((uintptr_t)&xtb[dc->xtb_slot].count);
+        TCGv_i64 c = tcg_temp_new_i64();
+
+        xtb[dc->xtb_slot].pc = dc->base.pc_first;
+        tcg_gen_ld_i64(c, p, 0);
+        tcg_gen_addi_i64(c, c, 1);
+        tcg_gen_st_i64(c, p, 0);
+    }
+#endif
 }
 
 static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
@@ -5213,6 +5384,9 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     DisasContext *dc = container_of(dcbase, DisasContext, base);
     target_ulong pc_arg = dc->base.pc_next;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    dc->xtb_last_pc = dc->base.pc_next;
+#endif
     dc->prev_insn_start = dc->base.insn_start;
     dc->prev_insn_end = tcg_last_op();
     if (tb_cflags(dcbase->tb) & CF_PCREL) {
@@ -5365,6 +5539,13 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (dc->xtb_slot >= 0) {
+        xtb[dc->xtb_slot].icount = dc->base.num_insns;
+        xtb[dc->xtb_slot].reason = xtb_reason(dc, cpu_env(cpu));
+    }
+#endif
+
     gen_flush_fp(dc);
 
     switch (dc->base.is_jmp) {
@@ -5398,6 +5579,11 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
     default:
         g_assert_not_reached();
     }
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (dc->xtb_slot >= 0) {
+        xtb[dc->xtb_slot].xpage = dc->xtb_xpage;
+    }
+#endif
 }
 
 static const TranslatorOps i386_tr_ops = {

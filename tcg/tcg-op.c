@@ -3247,6 +3247,10 @@ void tcg_gen_goto_tb(unsigned idx)
 
 
 #if defined(__ANDROID__) || defined(ANDROID)
+/* tbprof (target/i386 translate.c): when set during code generation, the
+ * slow path below also bumps this counter -- inline-cache misses per site. */
+uint64_t *xemu_ic_miss_ctr;
+
 void tcg_gen_lookup_and_goto_ptr_ic(const TCGICKeySpec *spec, void *slot,
                                     void *genp)
 {
@@ -3308,6 +3312,14 @@ void tcg_gen_lookup_and_goto_ptr_ic(const TCGICKeySpec *spec, void *slot,
     tcg_gen_br(done);
 
     gen_set_label(slow);
+    if (xemu_ic_miss_ctr) {
+        TCGv_ptr mp = tcg_constant_ptr(xemu_ic_miss_ctr);
+        TCGv_i64 mc = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(mc, mp, 0);
+        tcg_gen_addi_i64(mc, mc, 1);
+        tcg_gen_st_i64(mc, mp, 0);
+    }
     gen_helper_lookup_tb_ptr(ptr, tcg_env);
 
     /*
