@@ -4549,3 +4549,10 @@ The point is heat, not frame rate: the vCPU does not wait on this thread
 (A, BL), but BU showed ~0.15 GHz of sustained clock halves slow frames, and
 this thread is now half the process's CPU.
 
+**Done (same benchmark, re-profiled):** candidates 1 and 2.
+`pgraph_method_log` now returns unless one of its trace events is enabled
+(2.41% -> gone); the `vk-tex` stats check reads the clock every 256th draw
+instead of every draw (clock_gettime 1.37% -> 0.15% -- it was our own BK
+diagnostic, not texture code). NV2A thread 18.69 -> 18.15 ms/frame
+(-2.9%, cross-session, so approximate).
+

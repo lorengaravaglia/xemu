@@ -547,6 +547,14 @@ static void tex_stats_maybe_log(void)
 {
     static int64_t last_us;
     static uint64_t last_user_polls;
+    static unsigned calls;
+
+    /* Called once per draw; reading the clock each time cost ~1.4% of the
+     * pfifo thread (FINDINGS BX).  The log is every 10 s, so look rarely. */
+    if (++calls & 255) {
+        return;
+    }
+
     int64_t now = g_get_monotonic_time();
     uint64_t user_polls = qatomic_read(&g_nv2a_user_reads);
 
