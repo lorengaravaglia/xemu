@@ -3112,14 +3112,41 @@ void qemu_init(int argc, char **argv)
             char *escaped_hdd_path = strdup_double_commas(hdd_path);
             const char *extra = "";
 #if defined(__ANDROID__) || defined(ANDROID)
-            /* DIAGNOSTIC: debug.xemu.hdd_opts appends -drive options to the
-             * HDD (e.g. "cache=unsafe" or "lazy-refcounts=on"), to price the
-             * slow guest writes into a snapshotted image. */
+            /*
+             * lazy-refcounts=on by default (FINDINGS CB).  After a save state
+             * is loaded every cluster is shared with the snapshot, so a guest
+             * write copies on write and qcow2 orders the refcount update with
+             * an fdatasync: ~2.5 ms per 128 KB write, and Halo's 27-write
+             * cache burst froze a frame for ~100 ms.  Lazy refcounts keep data
+             * and L2 ordering and defer only refcounts (0.18 ms per write);
+             * after an unclean stop QEMU repairs them when it opens the image
+             * (0.25 s measured).  Only for qcow2 v3 images: on v2 QEMU refuses
+             * the option and the disk would not open.
+             * debug.xemu.hdd_opts: "none" adds nothing; any other value is
+             * appended instead (e.g. "cache=unsafe").
+             */
             static char hdd_opts[PROP_VALUE_MAX + 1];
             {
                 char v[PROP_VALUE_MAX] = { 0 };
-                if (__system_property_get("debug.xemu.hdd_opts", v) > 0 &&
-                    strcmp(v, "auto") && strcmp(v, "0")) {
+                bool have = __system_property_get("debug.xemu.hdd_opts", v) > 0 &&
+                            strcmp(v, "auto");
+                if (!have) {
+                    unsigned char hdr[8] = { 0 };
+                    FILE *hf = fopen(hdd_path, "rb");
+                    if (hf) {
+                        if (fread(hdr, 1, sizeof(hdr), hf) != sizeof(hdr)) {
+                            memset(hdr, 0, sizeof(hdr));
+                        }
+                        fclose(hf);
+                    }
+                    if (!memcmp(hdr, "QFI\xfb", 4) && hdr[7] >= 3) {
+                        strcpy(v, "lazy-refcounts=on");
+                        have = true;
+                    } else {
+                        ALOGI("qemu_init: hdd is not qcow2 v3, no lazy refcounts");
+                    }
+                }
+                if (have && strcmp(v, "none") && strcmp(v, "0")) {
                     snprintf(hdd_opts, sizeof(hdd_opts), ",%s", v);
                     extra = hdd_opts;
                     ALOGI("qemu_init: hdd extra options '%s'", v);

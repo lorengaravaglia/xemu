@@ -4696,6 +4696,9 @@ reclaimed) and qemu_init took 0.61 s; the next one after a force-stop
 repaired 1 cluster, qemu_init 0.25 s. `cache=unsafe` also works but ignores
 guest flushes, so power loss could lose data the guest believed written.
 
-**Not yet default** -- pending a decision; candidate: lazy-refcounts=on for
-the HDD.
+**Made the default (user's decision):** the HDD gets `lazy-refcounts=on`
+when its image is qcow2 v3 (header checked: v2 would refuse the option and
+the disk would not open); `debug.xemu.hdd_opts=none` turns it off, any
+other value replaces it. Verified with no property set: option applied,
+slot 7's 27 writes 0.16 ms median (9.3 ms total), freeze frame gone.
 
