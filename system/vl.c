@@ -23,6 +23,9 @@
  */
 
 #include "qemu/osdep.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/system_properties.h>
+#endif
 #include "qemu/help-texts.h"
 #include "qemu/datadir.h"
 #include "qemu/units.h"
@@ -3107,9 +3110,25 @@ void qemu_init(int argc, char **argv)
         } else {
             fake_argv[fake_argc++] = strdup("-drive");
             char *escaped_hdd_path = strdup_double_commas(hdd_path);
-            fake_argv[fake_argc++] = g_strdup_printf("index=0,media=disk,file=%s%s",
+            const char *extra = "";
+#if defined(__ANDROID__) || defined(ANDROID)
+            /* DIAGNOSTIC: debug.xemu.hdd_opts appends -drive options to the
+             * HDD (e.g. "cache=unsafe" or "lazy-refcounts=on"), to price the
+             * slow guest writes into a snapshotted image. */
+            static char hdd_opts[PROP_VALUE_MAX + 1];
+            {
+                char v[PROP_VALUE_MAX] = { 0 };
+                if (__system_property_get("debug.xemu.hdd_opts", v) > 0 &&
+                    strcmp(v, "auto") && strcmp(v, "0")) {
+                    snprintf(hdd_opts, sizeof(hdd_opts), ",%s", v);
+                    extra = hdd_opts;
+                    ALOGI("qemu_init: hdd extra options '%s'", v);
+                }
+            }
+#endif
+            fake_argv[fake_argc++] = g_strdup_printf("index=0,media=disk,file=%s%s%s",
                 escaped_hdd_path,
-                strlen(escaped_hdd_path) > 0 ? ",locked=on" : "");
+                strlen(escaped_hdd_path) > 0 ? ",locked=on" : "", extra);
             free(escaped_hdd_path);
         }
     }

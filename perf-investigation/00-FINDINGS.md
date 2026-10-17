@@ -4658,3 +4658,44 @@ already removed this scene's tail).
 still 33.5 ms, then recovered. Symmetric across arms; possibly a state load
 that did not take. Watch for it.
 
+## CB. SLOT 7 (USER CAPTURE): THE FREEZE IS HDD WRITES PAYING qcow2 METADATA FLUSHES (2026-10-17)
+
+User's auto-capture saved to slot 7. 900-frame replays (x2) are steady at
+29.6 fps (vCPU 28 ms/frame) with three kinds of slow frame per run:
+- **post-load** 470-770 ms then ~120 ms: 13-14k fresh translations right
+  after the state load (an artifact of loading, as in play after a load);
+- **8-9 frames of 50-67 ms**: vCPU busy throughout, no halts -- Halo's own
+  work over 33 ms (BP);
+- **one freeze, 99-185 ms, ~6.8 s in (deterministic)**: the vCPU *halted*
+  48-93 ms of it in 74-137 short halts, the NV2A thread idle ~70 ms of its
+  95 ms frame (cpu 16, fence 10) -- both sides waiting.
+
+**Cause (per-command IDE timing, `debug.xemu.ide_log=1`):** at the freeze
+Halo issues **27 back-to-back WRITE DMA (0xCA) commands of 256 sectors**
+(~3.4 MB, sequential LBAs ~4.57M -- its HDD cache), each **~2.5 ms**, ~70
+ms in all; READ DMA takes 0.15 ms. The image has many internal snapshots
+(save slots), so after a load every cluster is shared and each first write
+copies on write, allocating clusters; qcow2 orders refcount and L2 updates
+with flushes, i.e. an fdatasync per allocation on flash. The writes are
+also not cluster-aligned (+52 KB), so each touches three clusters.
+
+**Priced with `debug.xemu.hdd_opts` (appends -drive options at boot), slot
+7, 300 frames:**
+
+| HDD option | median 128 KB write | 27-write burst | freeze frame |
+|---|---|---|---|
+| default (writeback) | 2.47 ms | 70 ms | 99 ms, 48 ms halted |
+| cache=unsafe | 0.29 ms | 8.6 ms | gone |
+| **lazy-refcounts=on** | **0.18 ms** | 9.7 ms | **gone** |
+
+**lazy-refcounts** keeps data and L2 ordering and only defers refcounts;
+after an unclean stop QEMU repairs them at open. Measured: the first
+lazy-open after years of force-stops repaired **18,793 leaked clusters**
+(refcount > references, from earlier unclean stops -- ~1.2 GB of dead space
+reclaimed) and qemu_init took 0.61 s; the next one after a force-stop
+repaired 1 cluster, qemu_init 0.25 s. `cache=unsafe` also works but ignores
+guest flushes, so power loss could lose data the guest believed written.
+
+**Not yet default** -- pending a decision; candidate: lazy-refcounts=on for
+the HDD.
+

@@ -24,6 +24,9 @@
  */
 
 #include "qemu/osdep.h"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <sys/system_properties.h>
+#endif
 #include "hw/irq.h"
 #include "hw/isa/isa.h"
 #include "migration/vmstate.h"
@@ -2170,8 +2173,33 @@ static bool ide_cmd_permitted(IDEState *s, uint32_t cmd)
         && (ide_cmd_table[cmd].flags & (1u << s->drive_kind));
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/* DIAGNOSTIC: time each ATA command from issue to its completion IRQ and log
+ * the slow ones (> 15 ms) -- a guest waiting on a disk command idles. */
+static struct { IDEBus *bus; int64_t t0; uint8_t cmd; int unit; } ide_cmd_t[4];
+
+static int ide_cmd_slot(IDEBus *bus)
+{
+    for (int i = 0; i < 4; i++) {
+        if (ide_cmd_t[i].bus == bus || !ide_cmd_t[i].bus) {
+            ide_cmd_t[i].bus = bus;
+            return i;
+        }
+    }
+    return 0;
+}
+#endif
+
 void ide_bus_exec_cmd(IDEBus *bus, uint32_t val)
 {
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        int k = ide_cmd_slot(bus);
+        ide_cmd_t[k].t0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        ide_cmd_t[k].cmd = val;
+        ide_cmd_t[k].unit = bus->unit;
+    }
+#endif
     IDEState *s;
     bool complete;
 
@@ -2856,6 +2884,36 @@ void ide_bus_set_irq(IDEBus *bus)
                 (unsigned)s->status, (unsigned)s->nsector);
         }
         ide_irq_count++;
+        {
+            int k = ide_cmd_slot(bus);
+            if (ide_cmd_t[k].t0) {
+                int64_t us = qemu_clock_get_us(QEMU_CLOCK_REALTIME) -
+                             ide_cmd_t[k].t0;
+                IDEState *s = &bus->ifs[ide_cmd_t[k].unit];
+                static int all_log = -1;
+                static unsigned n_cmd;
+                if (all_log < 0 || (++n_cmd & 255) == 0) {
+                    char v[PROP_VALUE_MAX] = { 0 };
+                    all_log = __system_property_get("debug.xemu.ide_log", v) > 0
+                              && v[0] == '1';
+                }
+                if (all_log) {
+                    __android_log_print(ANDROID_LOG_INFO, "xemu-ide",
+                        "ide-cmd: 0x%02x %s %.2f ms nsec %u lba %" PRId64,
+                        ide_cmd_t[k].cmd,
+                        s->drive_kind == IDE_CD ? "cd" : "hd", us / 1000.0,
+                        (unsigned)s->nsector, ide_get_sector(s));
+                } else if (us > 15000) {
+                    __android_log_print(ANDROID_LOG_INFO, "xemu-ide",
+                        "ide-slow: cmd 0x%02x unit %d (%s) took %.1f ms, "
+                        "nsector %u lba %" PRId64, ide_cmd_t[k].cmd,
+                        ide_cmd_t[k].unit,
+                        s->drive_kind == IDE_CD ? "cd" : "hd", us / 1000.0,
+                        (unsigned)s->nsector, ide_get_sector(s));
+                }
+                ide_cmd_t[k].t0 = 0;
+            }
+        }
 #endif
         qemu_irq_raise(bus->irq);
     }
