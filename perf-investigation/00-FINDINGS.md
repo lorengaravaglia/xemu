@@ -4640,6 +4640,19 @@ NV2A thread 15.03/15.00/14.99/15.41/15.48/15.06 vs
 -0.54 -> **~-0.5 ms/frame (-3%)**. Frames > 45 ms ~0 in both arms (BY/BZ
 already removed this scene's tail).
 
+**What is left of the per-draw copies (slot 5, per 10 s ≈ 300 frames):**
+- Shader binds 480k (~1,600/frame). The coarse dirty check rebuilds the
+  2.8 KB ShaderState for 50% of them (~800/frame), and only ~52% of those
+  rebuilds produce a different state (~415/frame). The wasted rebuilds
+  (clear + fill + 2.8 KB memcmp) and the hash + LRU compare on real changes
+  are ~4-5% of the NV2A thread. Fixing it needs per-bit dirty tracking of
+  CONTROL_0, SETUPRASTER etc.; a missed bit renders the wrong shader. Not
+  done; counters left in the `vk-pipekey:` line.
+- `begin_draw` / `flush_draw` memcpy is vertex and index data (inline
+  arrays and elements, vertex RAM sync) -- real uploads.
+- `update_descriptor_sets` memcpy appends the uniform data, which changes
+  every draw on this scene (BY) -- also real.
+
 **Anomaly, unexplained:** in rounds 3-5 (both arms) the vCPU barely halted
 (on-CPU ~31.5 ms vs ~24.5, 1-2 halts/frame vs 13, CPU 94 C) with frames
 still 33.5 ms, then recovered. Symmetric across arms; possibly a state load

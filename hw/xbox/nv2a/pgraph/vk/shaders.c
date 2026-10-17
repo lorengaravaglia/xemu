@@ -617,6 +617,10 @@ static void update_shader_uniforms(PGRAPHState *pg)
     NV2A_VK_DGROUP_END();
 }
 
+/* Diagnostic, logged with vk-pipekey: draws, shader-state rebuilds, and
+ * rebuilds that produced a different state. */
+uint64_t g_vk_shbind_checks, g_vk_shbind_rebuilt, g_vk_shbind_changed;
+
 void pgraph_vk_bind_shaders(PGRAPHState *pg)
 {
     NV2A_VK_DGROUP_BEGIN("%s", __func__);
@@ -625,11 +629,14 @@ void pgraph_vk_bind_shaders(PGRAPHState *pg)
 
     r->shader_bindings_changed = false;
 
+    g_vk_shbind_checks++;
     if (!r->shader_binding ||
         pgraph_glsl_check_shader_state_dirty(pg, &r->shader_binding->state)) {
+        g_vk_shbind_rebuilt++;
         ShaderState new_state = pgraph_glsl_get_shader_state(pg);
         if (!r->shader_binding || memcmp(&r->shader_binding->state, &new_state,
                                          sizeof(ShaderState))) {
+            g_vk_shbind_changed++;
             r->shader_binding = get_shader_binding_for_state(r, &new_state);
             r->shader_bindings_changed = true;
         }

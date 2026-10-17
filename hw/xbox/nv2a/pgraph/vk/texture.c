@@ -670,8 +670,14 @@ static void tex_stats_maybe_log(void)
             qatomic_set(&g_tex_dirty_fast, m);
 
             extern int g_vk_pipe_key_serial;
-            fprintf(stderr, "vk-pipekey: mode %d\n",
-                    qatomic_read(&g_vk_pipe_key_serial));
+            extern uint64_t g_vk_shbind_checks, g_vk_shbind_rebuilt,
+                g_vk_shbind_changed;
+            fprintf(stderr, "vk-pipekey: mode %d | shader binds %" PRIu64
+                    " state rebuilt %" PRIu64 " changed %" PRIu64 "\n",
+                    qatomic_read(&g_vk_pipe_key_serial), g_vk_shbind_checks,
+                    g_vk_shbind_rebuilt, g_vk_shbind_changed);
+            g_vk_shbind_checks = g_vk_shbind_rebuilt = 0;
+            g_vk_shbind_changed = 0;
             qatomic_set(&g_vk_pipe_key_serial,
                         !(__system_property_get("debug.xemu.pipe_key_serial",
                                                 v) > 0 && v[0] == '0'));
