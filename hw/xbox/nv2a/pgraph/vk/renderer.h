@@ -450,6 +450,7 @@ typedef struct PGRAPHVkState {
 
     // FIXME: Merge these into a structure
     uint64_t uniform_buffer_hashes[2];
+    void *uniform_last_binding;     /* ubo_cmp: binding of the last update */
     size_t uniform_buffer_offsets[2];
     bool uniforms_changed;
 

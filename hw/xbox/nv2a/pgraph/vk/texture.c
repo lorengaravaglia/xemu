@@ -614,6 +614,22 @@ static void tex_stats_maybe_log(void)
         qatomic_set(&g_nv2a_lockfree,
                     !(__system_property_get("debug.xemu.nv2a_lockfree", v) > 0 &&
                       v[0] == '0'));
+        {
+            extern int g_nv2a_ubo_cmp;
+            extern uint64_t g_nv2a_ubo_updates, g_nv2a_ubo_changed,
+                g_nv2a_ubo_missed;
+            int m = 1;
+            if (__system_property_get("debug.xemu.ubo_cmp", v) > 0 &&
+                v[0] >= '0' && v[0] <= '2') {
+                m = v[0] - '0';
+            }
+            fprintf(stderr, "vk-ubo: mode %d | updates %" PRIu64 " changed %"
+                    PRIu64 " missed-vs-hash %" PRIu64 "\n",
+                    qatomic_read(&g_nv2a_ubo_cmp), g_nv2a_ubo_updates,
+                    g_nv2a_ubo_changed, g_nv2a_ubo_missed);
+            g_nv2a_ubo_updates = g_nv2a_ubo_changed = 0;
+            qatomic_set(&g_nv2a_ubo_cmp, m);
+        }
     }
 #endif
 }

@@ -460,6 +460,68 @@ static void apply_uniform_updates(ShaderUniformLayout *layout,
     }
 }
 
+/*
+ * Per draw, every uniform is rebuilt from state and written into the layout.
+ * The old path copied each array element with its own memcpy (the 192
+ * vertex constants alone are 192 calls) and then hashed both layouts in
+ * full to see whether anything changed -- ~11% of the pfifo thread
+ * (FINDINGS BX).  This compares while copying, one memcmp/memcpy per
+ * contiguous array, and reports whether anything differed.
+ * debug.xemu.ubo_cmp=0 restores the old path, for A/B.
+ */
+int g_nv2a_ubo_cmp = 1;
+/* ubo_cmp=2 also runs the hash check and counts updates it would have
+ * flagged that the comparison did not: must stay 0. */
+uint64_t g_nv2a_ubo_updates, g_nv2a_ubo_changed, g_nv2a_ubo_missed;
+
+static bool uniform_copy_cmp(ShaderUniformLayout *layout, int idx,
+                             const void *values, size_t value_size,
+                             size_t count)
+{
+    ShaderUniform *u = &layout->uniforms[idx - 1];
+    const size_t element_size = value_size * u->dim_v;
+    size_t bytes = value_size * count;
+    char *p_out = uniform_ptr(layout, idx);
+    const char *p_in = values;
+    bool changed = false;
+
+    assert(p_out + (bytes / element_size - 1) * u->stride + element_size <=
+           (char *)layout->allocation + layout->total_size);
+    if (u->stride == element_size) {
+        if (memcmp(p_out, p_in, bytes)) {
+            memcpy(p_out, p_in, bytes);
+            changed = true;
+        }
+        return changed;
+    }
+    while (bytes) {
+        if (memcmp(p_out, p_in, element_size)) {
+            memcpy(p_out, p_in, element_size);
+            changed = true;
+        }
+        bytes -= element_size;
+        p_out += u->stride;
+        p_in += element_size;
+    }
+    return changed;
+}
+
+static bool apply_uniform_updates_cmp(ShaderUniformLayout *layout,
+                                      const UniformInfo *info, int *locs,
+                                      void *values, size_t count)
+{
+    bool changed = false;
+
+    for (int i = 0; i < count; i++) {
+        if (locs[i] != -1) {
+            changed |= uniform_copy_cmp(layout, locs[i],
+                                        (char *)values + info[i].val_offs, 4,
+                                        (info[i].size * info[i].count) / 4);
+        }
+    }
+    return changed;
+}
+
 // FIXME: Dirty tracking
 static void update_shader_uniforms(PGRAPHState *pg)
 {
@@ -473,12 +535,21 @@ static void update_shader_uniforms(PGRAPHState *pg)
     ShaderUniformLayout *layouts[] = { &binding->vsh.module_info->uniforms,
                                        &binding->psh.module_info->uniforms };
 
+    bool cmp = qatomic_read(&g_nv2a_ubo_cmp);
+    bool changed = false;
+
     VshUniformValues vsh_values;
     pgraph_glsl_set_vsh_uniform_values(pg, &binding->state.vsh,
                                   binding->vsh.uniform_locs, &vsh_values);
-    apply_uniform_updates(&binding->vsh.module_info->uniforms, VshUniformInfo,
-                          binding->vsh.uniform_locs, &vsh_values,
-                          VshUniform__COUNT);
+    if (cmp) {
+        changed |= apply_uniform_updates_cmp(
+            &binding->vsh.module_info->uniforms, VshUniformInfo,
+            binding->vsh.uniform_locs, &vsh_values, VshUniform__COUNT);
+    } else {
+        apply_uniform_updates(&binding->vsh.module_info->uniforms,
+                              VshUniformInfo, binding->vsh.uniform_locs,
+                              &vsh_values, VshUniform__COUNT);
+    }
 
     PshUniformValues psh_values;
     pgraph_glsl_set_psh_uniform_values(pg, binding->psh.uniform_locs,
@@ -497,15 +568,45 @@ static void update_shader_uniforms(PGRAPHState *pg)
 
         psh_values.texScale[i] = scale;
     }
-    apply_uniform_updates(&binding->psh.module_info->uniforms, PshUniformInfo,
-                          binding->psh.uniform_locs, &psh_values,
-                          PshUniform__COUNT);
+    if (cmp) {
+        changed |= apply_uniform_updates_cmp(
+            &binding->psh.module_info->uniforms, PshUniformInfo,
+            binding->psh.uniform_locs, &psh_values, PshUniform__COUNT);
+        /* The hash compared against the last layouts uploaded, whichever
+         * binding they came from; a binding's own contents only say what
+         * changed in it.  So a different (or recycled: the shader cache
+         * reuses nodes) binding than last time counts as changed too --
+         * never fewer uploads than the hash path. */
+        bool flag = changed || r->shader_bindings_changed ||
+                    binding != r->uniform_last_binding;
+        if (qatomic_read(&g_nv2a_ubo_cmp) == 2) {
+            bool hash_changed = false;
+            for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
+                uint64_t hash =
+                    fast_hash(layouts[i]->allocation, layouts[i]->total_size);
+                hash_changed |= (hash != r->uniform_buffer_hashes[i]);
+                r->uniform_buffer_hashes[i] = hash;
+            }
+            g_nv2a_ubo_missed += hash_changed && !flag;
+        } else {
+            r->uniform_buffer_hashes[0] = r->uniform_buffer_hashes[1] = 0;
+        }
+        g_nv2a_ubo_updates++;
+        g_nv2a_ubo_changed += flag;
+        r->uniforms_changed |= flag;
+        r->uniform_last_binding = binding;
+    } else {
+        apply_uniform_updates(&binding->psh.module_info->uniforms,
+                              PshUniformInfo, binding->psh.uniform_locs,
+                              &psh_values, PshUniform__COUNT);
 
-    for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
-        uint64_t hash =
-            fast_hash(layouts[i]->allocation, layouts[i]->total_size);
-        r->uniforms_changed |= (hash != r->uniform_buffer_hashes[i]);
-        r->uniform_buffer_hashes[i] = hash;
+        for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
+            uint64_t hash =
+                fast_hash(layouts[i]->allocation, layouts[i]->total_size);
+            r->uniforms_changed |= (hash != r->uniform_buffer_hashes[i]);
+            r->uniform_buffer_hashes[i] = hash;
+        }
+        r->uniform_last_binding = NULL;
     }
 
     nv2a_profile_inc_counter(r->uniforms_changed ?

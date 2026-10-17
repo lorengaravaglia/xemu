@@ -4556,3 +4556,37 @@ instead of every draw (clock_gettime 1.37% -> 0.15% -- it was our own BK
 diagnostic, not texture code). NV2A thread 18.69 -> 18.15 ms/frame
 (-2.9%, cross-session, so approximate).
 
+## BY. UNIFORM UPDATES: COMPARE WHILE COPYING -- NV2A THREAD −8%, SLOW FRAMES −86% (2026-10-17)
+
+BX candidate 3. Per draw, `update_shader_uniforms` rebuilt every uniform
+from state, copied each array element with its own memcpy (the 192 vertex
+constants: 192 calls) and then hashed both layouts in full to see whether
+anything changed. Now (`debug.xemu.ubo_cmp`, default 1) one memcmp/memcpy
+per contiguous array, with the change flag computed while copying; a
+different or recycled binding than last time also counts as changed, so it
+never uploads less than the hash path.
+
+**Correctness check, `ubo_cmp=2`** (new path plus the old hash, counting
+draws the hash would flag and the comparison did not): **0 missed in ~2M
+updates.** On slot 5 every update counts as changed under both -- Halo
+rewrites its constants every draw (~1,600/frame) -- so the saving is the
+copy loop and the hashing, not skipped uploads.
+
+**Slot 5, 600 frames, one process, ABBA x3, mode confirmed per run by the
+`vk-ubo:` line (device charging, equal for both arms):**
+
+| | ubo_cmp=1 | old (0) |
+|---|---|---|
+| NV2A thread on-CPU | **17.00, 17.04, 17.10, 17.35, 17.40, 17.66** | 18.47, 18.44, 18.74, 18.81, 18.96, 19.04 |
+| frames > 45 ms | **1, 1, 2, 3, 1, 2** | 9, 7, 14, 11, 13, 18 |
+| mean frame | 33.5-33.6 ms | 33.7-34.0 ms |
+| vCPU on-CPU | 24.5-26.1 | 24.8-26.3 |
+
+-1.4 ms/frame on the NV2A thread (-8%) in every pair, and the tail falls
+~86%. The tail effect is BL's mechanism: the pfifo thread holds pg->lock
+for whole draws, the vCPU's NV2A accesses queue behind it, and shorter
+draws shorten those waits.
+
+**Lesson:** NV2A-thread savings are not only heat. While draws run under
+the lock, making them cheaper also helps the vCPU directly.
+
