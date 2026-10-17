@@ -124,11 +124,28 @@ static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
     snode->layout = VK_NULL_HANDLE;
 }
 
+/*
+ * The pipeline key used to embed the whole 2.8 KB ShaderState, so every
+ * lookup cleared, copied, hashed and compared ~3.3 KB.  A ShaderBinding is
+ * unique per ShaderState and gets a fresh serial whenever it is
+ * (re)initialised, so its serial identifies the shader state exactly; the key
+ * then ends before shader_state (~0.5 KB).  Serials start at 1 and the old
+ * mode keeps 0, so entries from one mode never match lookups from the other.
+ * debug.xemu.pipe_key_serial=0 restores the full key.
+ */
+int g_vk_pipe_key_serial = 1;
+
+static size_t pipe_key_len(void)
+{
+    return qatomic_read(&g_vk_pipe_key_serial) ?
+               offsetof(PipelineKey, shader_state) : sizeof(PipelineKey);
+}
+
 static bool pipeline_cache_entry_compare(Lru *lru, LruNode *node,
                                          const void *key)
 {
     PipelineBinding *snode = container_of(node, PipelineBinding, node);
-    return memcmp(&snode->key, key, sizeof(PipelineKey));
+    return memcmp(&snode->key, key, pipe_key_len());
 }
 
 /*
@@ -641,7 +658,7 @@ static void create_clear_pipeline(PGRAPHState *pg)
 
     key.regs[0] = r->clear_parameter;
 
-    uint64_t hash = fast_hash((void *)&key, sizeof(key));
+    uint64_t hash = fast_hash((void *)&key, pipe_key_len());
     LruNode *node = lru_lookup(&r->pipeline_cache, hash, &key);
     PipelineBinding *snode = container_of(node, PipelineBinding, node);
 
@@ -655,7 +672,7 @@ static void create_clear_pipeline(PGRAPHState *pg)
 
     NV2A_VK_DPRINTF("Cache miss");
     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_GEN);
-    memcpy(&snode->key, &key, sizeof(key));
+    memcpy(&snode->key, &key, pipe_key_len());
 
     bool clear_any_color_channels =
         r->clear_parameter & NV097_CLEAR_SURFACE_COLOR;
@@ -876,9 +893,14 @@ static void init_pipeline_key(PGRAPHState *pg, PipelineKey *key)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    memset(key, 0, sizeof(*key));
+    memset(key, 0, pipe_key_len());
     init_render_pass_state(pg, &key->render_pass_state);
-    memcpy(&key->shader_state, &r->shader_binding->state, sizeof(ShaderState));
+    if (qatomic_read(&g_vk_pipe_key_serial)) {
+        key->shader_serial = r->shader_binding->serial;
+    } else {
+        memcpy(&key->shader_state, &r->shader_binding->state,
+               sizeof(ShaderState));
+    }
     memcpy(key->binding_descriptions, r->vertex_binding_descriptions,
            sizeof(key->binding_descriptions[0]) *
                r->num_active_vertex_binding_descriptions);
@@ -1138,7 +1160,9 @@ static uint32_t pipe_key_diff(const PipelineKey *a, const PipelineKey *b)
     uint32_t m = 0;
     if (a->clear != b->clear) m |= 1u << PD_CLEAR;
     if (memcmp(&a->render_pass_state, &b->render_pass_state, sizeof(a->render_pass_state))) m |= 1u << PD_RENDER_PASS;
-    if (memcmp(&a->shader_state, &b->shader_state, sizeof(a->shader_state))) m |= 1u << PD_SHADER;
+    if (qatomic_read(&g_vk_pipe_key_serial) ?
+            a->shader_serial != b->shader_serial :
+            !!memcmp(&a->shader_state, &b->shader_state, sizeof(a->shader_state))) m |= 1u << PD_SHADER;
     if (memcmp(a->binding_descriptions, b->binding_descriptions, sizeof(a->binding_descriptions)) ||
         memcmp(a->attribute_descriptions, b->attribute_descriptions, sizeof(a->attribute_descriptions))) m |= 1u << PD_VERTEX;
     for (int i = 0; i < 9; i++) {
@@ -1205,7 +1229,7 @@ static bool create_pipeline(PGRAPHState *pg)
 
     PipelineKey key;
     init_pipeline_key(pg, &key);
-    uint64_t hash = fast_hash((void *)&key, sizeof(key));
+    uint64_t hash = fast_hash((void *)&key, pipe_key_len());
 
     LruNode *node = lru_lookup(&r->pipeline_cache, hash, &key);
     PipelineBinding *snode = container_of(node, PipelineBinding, node);
@@ -1228,7 +1252,7 @@ static bool create_pipeline(PGRAPHState *pg)
         pipe_diff_note(r, &key);
     }
 
-    memcpy(&snode->key, &key, sizeof(key));
+    memcpy(&snode->key, &key, pipe_key_len());
 
     uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
     bool depth_test = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;

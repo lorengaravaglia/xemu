@@ -668,6 +668,13 @@ static void tex_stats_maybe_log(void)
                     g_tex_dirty_skipped, g_tex_dirty_missed);
             g_tex_dirty_checks = g_tex_dirty_skipped = 0;
             qatomic_set(&g_tex_dirty_fast, m);
+
+            extern int g_vk_pipe_key_serial;
+            fprintf(stderr, "vk-pipekey: mode %d\n",
+                    qatomic_read(&g_vk_pipe_key_serial));
+            qatomic_set(&g_vk_pipe_key_serial,
+                        !(__system_property_get("debug.xemu.pipe_key_serial",
+                                                v) > 0 && v[0] == '0'));
         }
     }
 #endif

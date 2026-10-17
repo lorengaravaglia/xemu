@@ -259,6 +259,7 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     PGRAPHVkState *r = container_of(lru, PGRAPHVkState, shader_cache);
     ShaderBinding *binding = container_of(node, ShaderBinding, node);
     memcpy(&binding->state, state, sizeof(ShaderState));
+    binding->serial = ++r->shader_serial_next;
 
     NV2A_VK_DPRINTF("cache miss");
     nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);

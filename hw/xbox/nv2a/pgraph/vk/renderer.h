@@ -64,10 +64,14 @@ typedef struct RenderPass {
 typedef struct PipelineKey {
     bool clear;
     RenderPassState render_pass_state;
-    ShaderState shader_state;
+    /* debug.xemu.pipe_key_serial (default): the shader binding's serial
+     * stands in for its 2.8 KB ShaderState, and the key is hashed, compared
+     * and stored only up to shader_state -- which must stay last. */
+    uint64_t shader_serial;
     uint32_t regs[9];
     VkVertexInputBindingDescription binding_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     VkVertexInputAttributeDescription attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
+    ShaderState shader_state;
 } PipelineKey;
 
 typedef struct PipelineBinding {
@@ -196,6 +200,7 @@ typedef struct ShaderModuleCacheEntry {
 
 typedef struct ShaderBinding {
     LruNode node;
+    uint64_t serial;        /* unique per (re)initialisation, from 1 */
     ShaderState state;
     struct {
         ShaderModuleInfo *module_info;
@@ -451,6 +456,7 @@ typedef struct PGRAPHVkState {
     // FIXME: Merge these into a structure
     uint64_t uniform_buffer_hashes[2];
     void *uniform_last_binding;     /* ubo_cmp: binding of the last update */
+    uint64_t shader_serial_next;    /* last ShaderBinding serial handed out */
     size_t uniform_buffer_offsets[2];
     bool uniforms_changed;
 

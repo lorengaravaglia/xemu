@@ -4616,3 +4616,32 @@ were clean and skip the walk.
 -1.6 ms/frame (-9%) in every pair; with BY, the NV2A thread is ~18.7 ->
 ~16.1 ms/frame (-14%) since BX. Same mechanism for the tail as BY.
 
+## CA. PIPELINE KEY: SHADER SERIAL INSTEAD OF THE 2.8 KB SHADERSTATE -- NV2A THREAD −3% (2026-10-17)
+
+Re-profile after BY/BZ (NV2A 14.8 ms/frame on a cool start): memcpy 8.5%
+(update_descriptor_sets 17%, begin_draw 12%, flush_draw 10%, bind_shaders
+8% of it) and memcmp 7% (bind_shaders, lru_lookup from begin_pre_draw).
+Much of it is two big structures moved whole: `ShaderState` 2,768 bytes
+(VshState 2,388) and `PipelineKey` 3,264 bytes, which embedded a full
+ShaderState -- so each pipeline lookup cleared, copied, hashed and (on a
+hit) compared ~3.3 KB.
+
+`debug.xemu.pipe_key_serial` (default 1): each ShaderBinding gets a serial
+whenever it is (re)initialised (from 1); the key carries the serial and is
+hashed/compared/stored only up to `shader_state`, now its last field
+(~0.5 KB). Exact: the shader cache holds one binding per distinct
+ShaderState, and recycling gives a new serial, so a stale pipeline can only
+miss, never falsely hit. The old mode keeps serial 0, so the modes never
+match each other's entries.
+
+**Slot 5, ABBA x3, one process, mode confirmed per run (`vk-pipekey:`):**
+NV2A thread 15.03/15.00/14.99/15.41/15.48/15.06 vs
+15.46/15.51/15.83/15.88/15.57/15.60 ms; clean pairs -0.43, -0.51, -0.47,
+-0.54 -> **~-0.5 ms/frame (-3%)**. Frames > 45 ms ~0 in both arms (BY/BZ
+already removed this scene's tail).
+
+**Anomaly, unexplained:** in rounds 3-5 (both arms) the vCPU barely halted
+(on-CPU ~31.5 ms vs ~24.5, 1-2 halts/frame vs 13, CPU 94 C) with frames
+still 33.5 ms, then recovered. Symmetric across arms; possibly a state load
+that did not take. Watch for it.
+
