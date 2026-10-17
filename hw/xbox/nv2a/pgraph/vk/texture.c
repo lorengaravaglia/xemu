@@ -483,17 +483,43 @@ static struct {
  * in full, which measured at ~1.6 GB/s of hashing that almost always concluded
  * the contents were unchanged.
  */
+/*
+ * Every bound texture is checked on every draw, and the per-page
+ * test-and-clear (with a dirty-bitmap sync each) cost ~8% of the pfifo
+ * thread, though textures are rarely written (FINDINGS BX).  So test the
+ * whole range once, read-only, and walk the pages only when something is
+ * dirty: with nothing dirty there is nothing to clear.
+ * debug.xemu.tex_dirty_fast: 1 (default), 0 old path, 2 verify (also walk
+ * when the range test says clean, counting dirty pages it missed: must be 0).
+ */
+int g_tex_dirty_fast = 1;
+uint64_t g_tex_dirty_checks, g_tex_dirty_skipped, g_tex_dirty_missed;
+bool memory_region_get_dirty_range(MemoryRegion *mr, hwaddr addr,
+                                   hwaddr size, unsigned client);
+
 static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size,
                                 hwaddr *dirty_start, hwaddr *dirty_end)
 {
     hwaddr end = TARGET_PAGE_ALIGN(addr + size);
     hwaddr page = addr & TARGET_PAGE_MASK;
     bool any = false;
+    bool verify_clean = false;
+    int fast = qatomic_read(&g_tex_dirty_fast);
 
     assert(end < memory_region_size(d->vram));
 
     *dirty_start = ~(hwaddr)0;
     *dirty_end = 0;
+
+    g_tex_dirty_checks++;
+    if (fast && !memory_region_get_dirty_range(d->vram, page, end - page,
+                                               DIRTY_MEMORY_NV2A_TEX)) {
+        g_tex_dirty_skipped++;
+        if (fast != 2) {
+            return false;
+        }
+        verify_clean = true;
+    }
 
     for (; page < end; page += TARGET_PAGE_SIZE) {
         tex_stats.dirty_pages_tested++;
@@ -505,6 +531,7 @@ static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size,
             }
             *dirty_end = page + TARGET_PAGE_SIZE - 1;
             any = true;
+            g_tex_dirty_missed += verify_clean;
         }
     }
     return any;
@@ -629,6 +656,18 @@ static void tex_stats_maybe_log(void)
                     g_nv2a_ubo_changed, g_nv2a_ubo_missed);
             g_nv2a_ubo_updates = g_nv2a_ubo_changed = 0;
             qatomic_set(&g_nv2a_ubo_cmp, m);
+
+            m = 1;
+            if (__system_property_get("debug.xemu.tex_dirty_fast", v) > 0 &&
+                v[0] >= '0' && v[0] <= '2') {
+                m = v[0] - '0';
+            }
+            fprintf(stderr, "vk-dirty: mode %d | range checks %" PRIu64
+                    " clean-skipped %" PRIu64 " missed %" PRIu64 "\n",
+                    qatomic_read(&g_tex_dirty_fast), g_tex_dirty_checks,
+                    g_tex_dirty_skipped, g_tex_dirty_missed);
+            g_tex_dirty_checks = g_tex_dirty_skipped = 0;
+            qatomic_set(&g_tex_dirty_fast, m);
         }
     }
 #endif

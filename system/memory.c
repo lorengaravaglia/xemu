@@ -2370,6 +2370,28 @@ bool memory_region_test_and_clear_dirty(MemoryRegion *mr, hwaddr addr,
             memory_region_get_ram_addr(mr) + addr, size, client);
 }
 
+/*
+ * xemu: whether any page of the range is dirty for @client, without
+ * clearing -- one bitmap scan instead of a test-and-clear per page.  Aliases
+ * are resolved exactly as memory_region_test_and_clear_dirty() does.
+ */
+bool physical_memory_get_dirty_range(ram_addr_t start, ram_addr_t length,
+                                     unsigned client);
+bool memory_region_get_dirty_range(MemoryRegion *mr, hwaddr addr,
+                                   hwaddr size, unsigned client);
+bool memory_region_get_dirty_range(MemoryRegion *mr, hwaddr addr,
+                                   hwaddr size, unsigned client)
+{
+    if (mr->alias) {
+        return memory_region_get_dirty_range(mr->alias,
+                                             addr - mr->alias_offset,
+                                             size, client);
+    }
+    assert(mr->terminates);
+    return physical_memory_get_dirty_range(
+            memory_region_get_ram_addr(mr) + addr, size, client);
+}
+
 void memory_region_clear_dirty_bitmap(MemoryRegion *mr, hwaddr start,
                                       hwaddr len)
 {

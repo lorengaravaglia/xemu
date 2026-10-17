@@ -4590,3 +4590,29 @@ draws shorten those waits.
 **Lesson:** NV2A-thread savings are not only heat. While draws run under
 the lock, making them cheaper also helps the vCPU directly.
 
+## BZ. TEXTURE DIRTY CHECK: ONE RANGE TEST BEFORE THE PAGE WALK -- NV2A THREAD −9%, SLOW FRAMES −80% (2026-10-17)
+
+BX candidate 4. `check_texture_dirty` ran `memory_region_test_and_clear_dirty`
+(a dirty-bitmap sync plus test-and-clear) for every page of every bound
+texture on every draw. Now (`debug.xemu.tex_dirty_fast`, default 1) the
+whole range is tested once, read-only (`memory_region_get_dirty_range`,
+new in memory.c, aliases resolved as test_and_clear does, over a new
+`physical_memory_get_dirty_range` in physmem.c), and the page walk runs only
+when something is dirty -- with nothing dirty there is nothing to clear.
+
+**Correctness, mode 2** (also walk when the range test says clean, count
+dirty pages it found): **0 missed in ~4.9M range checks**; 99.99% of checks
+were clean and skip the walk.
+
+**Slot 5, 600 frames, one process, ABBA x3, mode confirmed per run
+(`vk-dirty:` line; device charging, both arms):**
+
+| | fast (1) | old (0) |
+|---|---|---|
+| NV2A thread on-CPU | **15.90, 16.11, 16.05, 16.18, 16.27, 16.25** | 17.54, 17.64, 17.66, 17.68, 17.75, 18.08 |
+| frames > 45 ms | **1, 1, 2, 1, 1, 1** | 5, 6, 6, 5, 6, 10 |
+| mean frame | 33.5 ms | 33.6-33.8 ms |
+
+-1.6 ms/frame (-9%) in every pair; with BY, the NV2A thread is ~18.7 ->
+~16.1 ms/frame (-14%) since BX. Same mechanism for the tail as BY.
+

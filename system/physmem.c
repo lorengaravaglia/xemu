@@ -1050,6 +1050,15 @@ static bool physical_memory_get_dirty(ram_addr_t start, ram_addr_t length,
     return dirty;
 }
 
+/* xemu: read-only test of a range, for the NV2A texture check (BZ). */
+bool physical_memory_get_dirty_range(ram_addr_t start, ram_addr_t length,
+                                     unsigned client);
+bool physical_memory_get_dirty_range(ram_addr_t start, ram_addr_t length,
+                                     unsigned client)
+{
+    return physical_memory_get_dirty(start, length, client);
+}
+
 bool physical_memory_get_dirty_flag(ram_addr_t addr, unsigned client)
 {
     return physical_memory_get_dirty(addr, 1, client);
