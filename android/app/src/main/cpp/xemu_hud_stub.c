@@ -45,12 +45,26 @@ void xemu_hud_set_filter_nearest(bool nearest) {
     g_filter_nearest = nearest;
 }
 
+// ---- Brightness ----
+// A gamma curve on the displayed picture, out = in^(100 / percent): blacks
+// and whites stay put, mid-tones lift (or drop below 100%).  The emulator
+// does not model the Xbox's own gamma ramp (OPEN-WORK C13), so games' own
+// brightness controls do nothing; this is the user's control instead.
+static float g_gamma = 1.0f;
+
+void xemu_hud_set_brightness(int percent) {
+    if (percent < 50) percent = 50;
+    if (percent > 300) percent = 300;
+    g_gamma = 100.0f / (float)percent;
+}
+
 // ---- Fullscreen blit state ----
 static GLuint s_blit_tex  = 0;
 static GLuint s_blit_prog = 0;
 static GLuint s_blit_vao  = 0;
 static GLint  s_blit_tex_loc  = -1;
 static GLint  s_blit_ndc_loc  = -1;
+static GLint  s_blit_gamma_loc = -1;
 
 static void check_shader_compile(GLuint shader, const char *name)
 {
@@ -106,20 +120,23 @@ static void init_blit_resources(void)
         "#version 300 es\n"
         "precision highp float;\n"
         "uniform sampler2D tex;\n"
+        "uniform float u_gamma;\n"
         "in vec2 v_uv;\n"
         "layout(location = 0) out vec4 fragColor;\n"
         "void main() {\n"
-        "    fragColor = vec4(texture(tex, v_uv).rgb, 1.0);\n"
+        "    vec3 c = pow(max(texture(tex, v_uv).rgb, vec3(0.0)), vec3(u_gamma));\n"
+        "    fragColor = vec4(c, 1.0);\n"
         "}\n";
 
     const char *fs_srgb_decode =
         "#version 300 es\n"
         "precision highp float;\n"
         "uniform sampler2D tex;\n"
+        "uniform float u_gamma;\n"
         "in vec2 v_uv;\n"
         "layout(location = 0) out vec4 fragColor;\n"
         "void main() {\n"
-        "    vec3 c = texture(tex, v_uv).rgb;\n"
+        "    vec3 c = pow(max(texture(tex, v_uv).rgb, vec3(0.0)), vec3(u_gamma));\n"
         "    vec3 lin = mix(c / 12.92,\n"
         "                   pow((c + 0.055) / 1.055, vec3(2.4)),\n"
         "                   step(vec3(0.04045), c));\n"
@@ -154,6 +171,7 @@ static void init_blit_resources(void)
 
     s_blit_tex_loc  = glGetUniformLocation(s_blit_prog, "tex");
     s_blit_ndc_loc  = glGetUniformLocation(s_blit_prog, "dst_ndc");
+    s_blit_gamma_loc = glGetUniformLocation(s_blit_prog, "u_gamma");
 
     glGenVertexArrays(1, &s_blit_vao);
 
@@ -291,6 +309,7 @@ void xemu_hud_render(void)
     }
     glUniform1i(s_blit_tex_loc, 0);
     glUniform4f(s_blit_ndc_loc, x0, y0, x1, y1);
+    glUniform1f(s_blit_gamma_loc, g_gamma);
 
     glBindVertexArray(s_blit_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

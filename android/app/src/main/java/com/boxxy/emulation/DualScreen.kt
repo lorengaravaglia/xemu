@@ -147,6 +147,7 @@ class BottomPanelState {
     /* Menu tab labels -- the in-game menu's, set by the activity. */
     val overlayLabel = mutableStateOf("")
     val perfLabel = mutableStateOf("")
+    val brightnessLabel = mutableStateOf("")
     val recordingLabel = mutableStateOf("Record input")
     val recordingBusy = mutableStateOf(false)
     /** "Exit to library", or "Exit game" when a frontend started the game. */
@@ -179,11 +180,12 @@ class BottomPanelState {
 
         const val MENU_OVERLAY = 0
         const val MENU_PERF = 1
-        const val MENU_MAP_CONTROLS = 2
-        const val MENU_RECORD = 3
-        const val MENU_PLAY_RECORDING = 4
-        const val MENU_EXIT = 5
-        const val MENU_TILES = 6
+        const val MENU_BRIGHTNESS = 2
+        const val MENU_MAP_CONTROLS = 3
+        const val MENU_RECORD = 4
+        const val MENU_PLAY_RECORDING = 5
+        const val MENU_EXIT = 6
+        const val MENU_TILES = 7
     }
 }
 
@@ -580,6 +582,7 @@ private fun MenuGrid(state: BottomPanelState, actions: BottomPanelActions) {
     val labels = listOf(
         "Touch controls\n${state.overlayLabel.value}",
         "Performance\n${state.perfLabel.value}",
+        "Brightness\n${state.brightnessLabel.value}",
         "Map controls",
         state.recordingLabel.value,
         "Play recording",

@@ -77,6 +77,7 @@ import kotlinx.coroutines.launch
 fun InGameMenu(
     initialOverlayLabel: String,
     initialPerfLabel: String,
+    initialBrightnessLabel: String,
     exitLabel: String,
     recordingLabel: String,
     isRecordingBusy: Boolean,
@@ -85,6 +86,7 @@ fun InGameMenu(
     onFullyHidden: () -> Unit,
     onCycleOverlay: () -> String,
     onTogglePerf: () -> String,
+    onCycleBrightness: () -> String,
     onSaveState: () -> Unit,
     onLoadState: () -> Unit,
     onMapControls: () -> Unit,
@@ -148,6 +150,7 @@ fun InGameMenu(
                  */
                 var overlayLabel by remember { mutableStateOf(initialOverlayLabel) }
                 var perfLabel by remember { mutableStateOf(initialPerfLabel) }
+                var brightnessLabel by remember { mutableStateOf(initialBrightnessLabel) }
 
                 MenuSectionLabel("Display")
                 MenuRow(
@@ -160,6 +163,11 @@ fun InGameMenu(
                     value = perfLabel,
                     dismissesMenu = false,
                 ) { perfLabel = onTogglePerf() }
+                MenuRow(
+                    label = "Brightness",
+                    value = brightnessLabel,
+                    dismissesMenu = false,
+                ) { brightnessLabel = onCycleBrightness() }
 
                 MenuSeparator()
                 MenuSectionLabel("Save States")

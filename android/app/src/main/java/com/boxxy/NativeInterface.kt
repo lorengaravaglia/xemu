@@ -96,6 +96,10 @@ object NativeInterface {
      */
     external fun setAspectRatio(ratio: Int)
 
+    /** Brightness of the displayed picture, in percent (100 = unchanged):
+     *  a gamma curve, so black and white stay put.  Takes effect at once. */
+    external fun setBrightness(percent: Int)
+
     /**
      * Set the blit texture filter.
      * nearest=true → GL_NEAREST (sharp/pixel-art).

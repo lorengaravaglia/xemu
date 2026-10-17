@@ -22,6 +22,7 @@ void xemu_hud_render(void);
  * ratio: 0=Native (integer scale), 1=Auto (stretch), 2=4:3 (pillarbox), 3=16:9 (stretch).
  * xemu_hud_set_aspect_16x9 kept for legacy callers. */
 void xemu_hud_set_aspect_ratio(int ratio);
+void xemu_hud_set_brightness(int percent);
 void xemu_hud_set_aspect_16x9(bool wide);
 
 /* Texture filter for the final blit.

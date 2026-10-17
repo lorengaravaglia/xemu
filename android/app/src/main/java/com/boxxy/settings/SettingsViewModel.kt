@@ -125,6 +125,14 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val _aspectRatio = MutableStateFlow(prefs.getInt("aspect_ratio", 1))
     val aspectRatio: StateFlow<Int> = _aspectRatio
 
+    private val _brightness = MutableStateFlow(prefs.getInt("brightness", 100))
+    val brightness: StateFlow<Int> = _brightness
+
+    fun setBrightness(value: Int) {
+        _brightness.value = value
+        prefs.edit().putInt("brightness", value).apply()
+    }
+
     /** The Xbox's own widescreen setting (EEPROM), written at each launch. */
     private val _xboxWidescreen = MutableStateFlow(prefs.getBoolean("xbox_widescreen", false))
     val xboxWidescreen: StateFlow<Boolean> = _xboxWidescreen

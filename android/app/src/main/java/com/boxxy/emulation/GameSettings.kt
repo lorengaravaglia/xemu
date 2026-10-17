@@ -20,6 +20,9 @@ import com.boxxy.library.XisoReader
 object GameSettings {
     private const val PREFS = "game_settings"
 
+    /** Brightness choices, in percent; 100 leaves the picture unchanged. */
+    val BRIGHTNESS_STEPS = listOf(85, 100, 115, 130, 150, 175, 200)
+
     /** One overridable setting: its main_prefs key, label and choices. */
     data class Spec(
         val prefKey: String,
@@ -44,6 +47,9 @@ object GameSettings {
              { it.getInt("aspect_ratio", 1).toString() }),
         /* The Xbox's EEPROM widescreen flag: games that support it render
          * true 16:9, and Auto aspect then fills the screen. */
+        Spec("brightness", "Brightness", "Graphics",
+             BRIGHTNESS_STEPS.map { it.toString() to "$it%" },
+             { it.getInt("brightness", 100).toString() }),
         Spec("xbox_widescreen", "Widescreen (16:9)", "Graphics",
              listOf("false" to "Off", "true" to "On"),
              { it.getBoolean("xbox_widescreen", false).toString() }),

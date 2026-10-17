@@ -158,6 +158,11 @@ Java_com_boxxy_NativeInterface_setAspectRatio(JNIEnv *env, jclass clazz, jint ra
 }
 
 JNIEXPORT void JNICALL
+Java_com_boxxy_NativeInterface_setBrightness(JNIEnv *env, jclass clazz, jint percent) {
+    xemu_hud_set_brightness((int)percent);
+}
+
+JNIEXPORT void JNICALL
 Java_com_boxxy_NativeInterface_setFilterNearest(JNIEnv *env, jclass clazz, jboolean nearest) {
     xemu_hud_set_filter_nearest((bool)nearest);
 }

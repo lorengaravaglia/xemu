@@ -1344,6 +1344,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                 maxHeight = maxHeightDp,
                 visibleState = transition,
                 onFullyHidden = onHidden,
+                initialBrightnessLabel = "${gameInt("brightness", 100)}%",
+                onCycleBrightness = { cycleBrightness() },
                 onCycleOverlay = { cycleOverlayMode() },
                 onTogglePerf = { togglePerfOverlay() },
                 onSaveState = { dismissOverlay(); showSlotPicker(isSave = true) },
@@ -2167,6 +2169,8 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
                     panelState.overlayLabel.value = cycleOverlayMode()
                 BottomPanelState.MENU_PERF ->
                     panelState.perfLabel.value = togglePerfOverlay()
+                BottomPanelState.MENU_BRIGHTNESS ->
+                    panelState.brightnessLabel.value = cycleBrightness()
                 BottomPanelState.MENU_MAP_CONTROLS -> startActivity(
                     Intent(this@EmulationActivity, MappingActivity::class.java))
                 BottomPanelState.MENU_RECORD -> {
@@ -2193,6 +2197,7 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
     private fun refreshPanelMenuLabels() {
         panelState.overlayLabel.value = overlayModeLabel()
         panelState.perfLabel.value = perfOverlayLabel()
+        panelState.brightnessLabel.value = "${gameInt("brightness", 100)}%"
         panelState.recordingLabel.value = when {
             InputRecorder.isRecording -> "Stop recording"
             InputRecorder.isPlaying   -> "Playback active"
@@ -2336,9 +2341,26 @@ class EmulationActivity : AppCompatActivity(), InputManager.InputDeviceListener 
         physicalGamepadDeviceId()?.let { InputDevice.getDevice(it)?.vibratorManager?.cancel() }
     }
 
+    /**
+     * In-game menu: step this game's brightness to the next choice and apply
+     * it at once.  Saved as this game's setting; landing back on the global
+     * value removes the override, so the game follows the global again.
+     */
+    private fun cycleBrightness(): String {
+        val steps = GameSettings.BRIGHTNESS_STEPS
+        val cur = gameInt("brightness", 100)
+        val next = steps[(steps.indexOf(cur).coerceAtLeast(0) + 1) % steps.size]
+        val global = mainPrefs.getInt("brightness", 100)
+        GameSettings.setOverride(this, gameSettingsKey, "brightness",
+                                 if (next == global) null else next.toString())
+        NativeInterface.setBrightness(next)
+        return "$next%"
+    }
+
     /** Read graphics settings from main_prefs and push to native layer. */
     private fun applyGraphicsSettings() {
         NativeInterface.setAspectRatio(gameInt("aspect_ratio", 1))
+        NativeInterface.setBrightness(gameInt("brightness", 100))
         NativeInterface.setFilterNearest(mainPrefs.getBoolean("filter_nearest", false))
         NativeInterface.setSurfaceScale(gameInt("surface_scale", 1))
     }

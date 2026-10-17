@@ -25,6 +25,7 @@ fun GraphicsSettingsScreen(
     val driverEnabled by settingsViewModel.driverEnabled.collectAsState()
     val driverLabel   by settingsViewModel.driverLabel.collectAsState()
     val aspectRatio   by settingsViewModel.aspectRatio.collectAsState()
+    val brightness    by settingsViewModel.brightness.collectAsState()
     val surfaceScale  by settingsViewModel.surfaceScale.collectAsState()
     val filterNearest by settingsViewModel.filterNearest.collectAsState()
     val dualScreen    by settingsViewModel.dualScreen.collectAsState()
@@ -148,6 +149,30 @@ fun GraphicsSettingsScreen(
                                    "Applies the next time a game starts.",
                         checked = xboxWidescreen,
                     ) { settingsViewModel.setXboxWidescreen(it) }
+                }
+            }
+
+            // Brightness
+            SettingsSectionLabel("Brightness")
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp),
+                       verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val steps = com.boxxy.emulation.GameSettings.BRIGHTNESS_STEPS
+                    SettingsDropdown(
+                        value = "$brightness%",
+                        options = steps.map { "$it%" },
+                        onSelect = { label ->
+                            settingsViewModel.setBrightness(label.removeSuffix("%").toInt())
+                        },
+                    )
+                    Text(
+                        "Lifts the darker parts of the picture without washing " +
+                        "out black or white. 100% shows the game unchanged. " +
+                        "Also in the in-game menu, where it is saved for that " +
+                        "game.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 
