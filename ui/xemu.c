@@ -532,8 +532,10 @@ static void main_thread_bh(void *opaque)
         break;
 
     case MAIN_OP_LOAD: {
+        extern bool xemu_load_touched;
         bool was_running = runstate_is_running();
         int64_t lt0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        xemu_load_touched = false;
         vm_stop(RUN_STATE_RESTORE_VM);
         if (!was_running) {
             vm_state_notify(false, RUN_STATE_RESTORE_VM);
@@ -551,9 +553,42 @@ static void main_thread_bh(void *opaque)
         ALOGI("loadstate '%s': %lld ms, ok=%d", g_main_req.name,
               (long long)(qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - lt0),
               g_main_req.ok);
-        if (g_main_req.ok && was_running) {
-            vm_start();
+        if (g_main_req.ok) {
+            if (was_running) {
+                vm_start();
+            }
+        } else if (!xemu_load_touched) {
+            /*
+             * Failed before anything was changed (no such state, damaged
+             * file): the game carries on as it was.  It used to stay stopped
+             * in RESTORE_VM -- frozen, with the UI saying "Playing", and
+             * neither Resume (PAUSED only) nor a later load (which saw it as
+             * not running) started it again (OPEN-WORK A15).
+             */
+            if (was_running) {
+                vm_start();
+            }
+        } else {
+            /*
+             * The machine was partly overwritten: there is no consistent state
+             * to continue from.  Restart the game rather than leave it frozen,
+             * and say so.
+             */
+            Error *e = NULL;
+            error_setg(&e, "%s -- the game was restarted",
+                       g_main_req.err ? error_get_pretty(g_main_req.err)
+                                      : "Load failed");
+            error_free(g_main_req.err);
+            g_main_req.err = e;
+            qemu_system_reset(SHUTDOWN_CAUSE_HOST_UI);
+            if (was_running) {
+                vm_start();
+            }
         }
+        ALOGI("loadstate '%s': %s", g_main_req.name,
+              g_main_req.ok ? "loaded" :
+              !xemu_load_touched ? "failed, nothing changed, continuing" :
+              "failed partway, machine reset");
         break;
     }
 

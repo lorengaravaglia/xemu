@@ -3599,6 +3599,13 @@ int xemu_fast_prune(const char *dir)
  * loadable state called name.  *handled is false when that is an old-format
  * state, which the caller loads with load_snapshot() instead.
  */
+/*
+ * Set when a load has begun to overwrite the machine (disk snapshot reverted,
+ * device state about to be read).  A load that fails before this changed
+ * nothing, so the game can simply carry on (OPEN-WORK A15).
+ */
+bool xemu_load_touched;
+
 bool xemu_fast_load(const char *name, const char *dir, bool *handled,
                     Error **errp)
 {
@@ -3644,6 +3651,7 @@ bool xemu_fast_load(const char *name, const char *dir, bool *handled,
 
     replay_flush_events();
     bdrv_drain_all_begin();
+    xemu_load_touched = true;
     ret = bdrv_all_goto_snapshot(sn->id_str, false, NULL, errp);
     if (ret < 0) {
         close(fd);
@@ -3826,6 +3834,12 @@ bool load_snapshot(const char *name, const char *vmstate,
     /* Flush all IO requests so they don't interfere with the new state.  */
     bdrv_drain_all_begin();
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        extern bool xemu_load_touched;
+        xemu_load_touched = true;
+    }
+#endif
     ret = bdrv_all_goto_snapshot(name, has_devices, devices, errp);
     if (ret < 0) {
         goto err_drain;
