@@ -372,6 +372,31 @@ static void add_optional_device_extension_names(
     r->pipeline_cache_control_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
         VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME);
+
+#ifdef __ANDROID__
+    /* Display hand-off through an AHardwareBuffer shared with GL (OPEN-WORK
+     * C10): needs the AHB external memory extension and, to hand the image
+     * to another API, the foreign queue family. */
+    {
+        bool ahb = false, foreign = false;
+        for (int i = 0; i < available_extensions->len; i++) {
+            const char *n = g_array_index(available_extensions,
+                                          VkExtensionProperties, i).extensionName;
+            ahb |= !strcmp(n, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+            foreign |= !strcmp(n, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+        }
+        fprintf(stderr, "vk-ahb: %s %d, %s %d\n",
+                VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
+                ahb, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME, foreign);
+        r->ahb_extension_enabled = ahb && foreign &&
+            add_extension_if_available(available_extensions,
+                                       enabled_extension_names,
+                                       VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME) &&
+            add_extension_if_available(available_extensions,
+                                       enabled_extension_names,
+                                       VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+    }
+#endif
 }
 
 static bool check_device_support_required_extensions(VkPhysicalDevice device)

@@ -330,6 +330,21 @@ typedef struct PGRAPHVkDisplayState {
     VkBuffer readback_buffer;
     VkDeviceMemory readback_memory;
     void *readback_mapped;
+    GLuint gl_upload_tex;      /* the readback path's texture */
+
+    /* Zero-copy path (OPEN-WORK C10): a ring of AHardwareBuffers, each a
+     * VkImage the display image is copied into on the GPU and an
+     * EGLImage-backed GL texture the render thread samples directly. */
+    bool ahb_ok;
+    int ahb_cur;
+    uint32_t ahb_queue_family;
+    struct {
+        void *ahb;              /* AHardwareBuffer * */
+        VkImage image;
+        VkDeviceMemory memory;
+        void *egl_image;        /* EGLImageKHR */
+        GLuint gl_tex;
+    } ahb_slot[3];
 #endif
 } PGRAPHVkDisplayState;
 
@@ -365,6 +380,7 @@ typedef struct PGRAPHVkState {
     bool custom_border_color_extension_enabled;
     bool memory_budget_extension_enabled;
     bool pipeline_cache_control_enabled;
+    bool ahb_extension_enabled;   /* Android: AHB display hand-off possible */
 
     /* Background shader/pipeline compilation (draw.c). */
     GThreadPool *compile_pool;

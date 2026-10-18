@@ -4702,3 +4702,42 @@ the disk would not open); `debug.xemu.hdd_opts=none` turns it off, any
 other value replaces it. Verified with no property set: option applied,
 slot 7's 27 writes 0.16 ms median (9.3 ms total), freeze frame gone.
 
+## CC. ZERO-COPY DISPLAY HAND-OFF (AHardwareBuffer): NV2A THREAD −1.0 ms/frame (2026-10-17)
+
+OPEN-WORK C10. Before: after the display pass, Vulkan copied the display
+image into a host-visible buffer, the pfifo thread waited for the GPU, then
+uploaded the pixels with `glTexSubImage2D` in its own GL context for the
+render thread's blit (Adreno GL ~6.7% of the thread, BX).
+
+Now (`debug.xemu.display_ahb`, default 1): a ring of three
+AHardwareBuffers, each imported into Vulkan (VK_ANDROID_external_memory_
+android_hardware_buffer + VK_EXT_queue_family_foreign) and into GL as an
+EGLImage-backed texture. Per frame the display image is copied GPU-to-GPU
+into the next buffer (acquire from VK_QUEUE_FAMILY_FOREIGN_EXT, copy,
+release to foreign), and after the existing submit-and-wait that buffer's
+texture is published to the render thread. No CPU copy, no GL upload.
+Probed first: Turnip + Adreno GLES have every extension needed, including
+EGL_ANDROID_native_fence_sync / EGL_KHR_wait_sync for a later GPU-side
+fence. Falls back to the readback path if any step fails.
+
+**Slot 5, ABBA x3, one process, path confirmed per run (`display_ahb` in
+the vk-pipekey line):** NV2A thread 14.01/13.97/14.50/14.01/14.77/14.94 vs
+15.05/14.98/15.09/15.70/15.80/15.93 ms -> **~-1.0 ms/frame (-7%)**; slow
+frames ~0 in both. Five games cold-booted on the new path render correctly
+(Jade, MGS2, Halo 2, JSRF, THPS2x; Halo earlier). The NV2A thread is now
+~14 ms/frame (18.7 at BX).
+
+**Not done (follow-up):** the pfifo thread still waits for the GPU each
+frame (`end_single_time_commands`, the ~10 ms "fence" in nvf lines). A
+sync_fd exported from Vulkan and waited on in GL (`EGL_ANDROID_native_
+fence_sync` + `eglWaitSyncKHR`) would remove that block. It is not CPU time,
+so it matters for pipelining and latency rather than heat. Stock Qualcomm
+Vulkan not tested on this path (falls back if unsupported).
+
+**Anomaly, now frequent (see CA):** in 6 of 12 runs here, in both arms, the
+vCPU barely halted -- on-CPU ~31-32 ms vs ~24.5, 1-2 halts/frame vs ~13,
+hottest CPU sensor 94-96 C vs ~80 C -- with frame times unchanged at 33.5
+ms. Bimodal by run, not by arm. The guest seems to busy-wait (not in the
+kernel idle loop: idle spin 0) instead of blocking. Unexplained; could be a
+large heat lever. Investigate next.
+

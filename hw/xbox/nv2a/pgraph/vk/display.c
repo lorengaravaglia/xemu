@@ -21,6 +21,11 @@
 #include <sys/system_properties.h>
 #endif
 #include "renderer.h"
+#ifdef __ANDROID__
+#include <epoxy/egl.h>
+#include <vulkan/vulkan_android.h>
+static void destroy_ahb_slots(PGRAPHState *pg);
+#endif
 #include <math.h>
 
 static uint8_t *convert_texture_data__CR8YB8CB8YA8(uint8_t *data_out,
@@ -558,10 +563,12 @@ static void destroy_current_display_image(PGRAPHState *pg)
         vkFreeMemory(r->device, d->readback_memory, NULL);
         d->readback_memory = VK_NULL_HANDLE;
     }
-    if (d->gl_texture_id) {
-        glDeleteTextures(1, &d->gl_texture_id);
-        d->gl_texture_id = 0;
+    destroy_ahb_slots(pg);
+    if (d->gl_upload_tex) {
+        glDeleteTextures(1, &d->gl_upload_tex);
+        d->gl_upload_tex = 0;
     }
+    d->gl_texture_id = 0;
 #else /* !__ANDROID__ */
     glDeleteTextures(1, &d->gl_texture_id);
     d->gl_texture_id = 0;
@@ -590,6 +597,220 @@ static void destroy_current_display_image(PGRAPHState *pg)
 
 // FIXME: We may need to use two images. One for actually rendering display,
 // and another for GL in the correct tiling mode
+
+#ifdef __ANDROID__
+#include <android/hardware_buffer.h>
+
+/*
+ * Zero-copy display hand-off (OPEN-WORK C10).  The readback path copies the
+ * finished display image into a host-visible buffer and re-uploads it with
+ * glTexSubImage2D in the pfifo thread's GL context -- a CPU round trip every
+ * frame (~6.7% of the pfifo thread in the Adreno GL driver, FINDINGS BX).
+ * Instead the display image is copied, on the GPU, into one of three
+ * AHardwareBuffers that GL also sees, through an EGLImage-backed texture the
+ * render thread samples directly.  The ring keeps Vulkan from writing the
+ * buffer the render thread may still be showing.
+ *
+ * debug.xemu.display_ahb=0 selects the readback path (re-read every 60
+ * frames, so the two can be A/B'd in one process).
+ */
+int g_vk_display_ahb = 1;
+int g_vk_display_ahb_ok;        /* the ring exists (for the vk-pipekey log) */
+static PFN_vkGetAndroidHardwareBufferPropertiesANDROID pfn_ahb_props;
+
+static void destroy_ahb_slots(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *d = &r->display;
+    EGLDisplay ed = eglGetCurrentDisplay();
+
+    for (int i = 0; i < ARRAY_SIZE(d->ahb_slot); i++) {
+        typeof(d->ahb_slot[0]) *s = &d->ahb_slot[i];
+        if (s->gl_tex) {
+            glDeleteTextures(1, &s->gl_tex);
+            s->gl_tex = 0;
+        }
+        if (s->egl_image && ed != EGL_NO_DISPLAY) {
+            eglDestroyImageKHR(ed, (EGLImageKHR)s->egl_image);
+        }
+        s->egl_image = NULL;
+        if (s->image != VK_NULL_HANDLE) {
+            vkDestroyImage(r->device, s->image, NULL);
+            s->image = VK_NULL_HANDLE;
+        }
+        if (s->memory != VK_NULL_HANDLE) {
+            vkFreeMemory(r->device, s->memory, NULL);
+            s->memory = VK_NULL_HANDLE;
+        }
+        if (s->ahb) {
+            AHardwareBuffer_release((AHardwareBuffer *)s->ahb);
+            s->ahb = NULL;
+        }
+    }
+    d->ahb_ok = false;
+    qatomic_set(&g_vk_display_ahb_ok, 0);
+}
+
+static bool create_ahb_slots(PGRAPHState *pg, int width, int height)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *d = &r->display;
+    EGLDisplay ed = eglGetCurrentDisplay();
+    const char *why = NULL;
+
+    if (!r->ahb_extension_enabled) {
+        return false;
+    }
+    if (!pfn_ahb_props) {
+        pfn_ahb_props = (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)
+            vkGetDeviceProcAddr(r->device,
+                                "vkGetAndroidHardwareBufferPropertiesANDROID");
+    }
+    if (!pfn_ahb_props || ed == EGL_NO_DISPLAY) {
+        fprintf(stderr, "display-ahb: unavailable (%s)\n",
+                !pfn_ahb_props ? "no entry point" : "no EGL display");
+        return false;
+    }
+    d->ahb_queue_family =
+        pgraph_vk_find_queue_families(r->physical_device).queue_family;
+
+    for (int i = 0; i < ARRAY_SIZE(d->ahb_slot) && !why; i++) {
+        typeof(d->ahb_slot[0]) *s = &d->ahb_slot[i];
+        AHardwareBuffer_Desc desc = {
+            .width = width,
+            .height = height,
+            .layers = 1,
+            .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+            .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                     AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT,
+        };
+        AHardwareBuffer *ahb = NULL;
+        if (AHardwareBuffer_allocate(&desc, &ahb) != 0 || !ahb) {
+            why = "AHardwareBuffer_allocate";
+            break;
+        }
+        s->ahb = ahb;
+
+        VkAndroidHardwareBufferFormatPropertiesANDROID fmt = {
+            .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID,
+        };
+        VkAndroidHardwareBufferPropertiesANDROID props = {
+            .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+            .pNext = &fmt,
+        };
+        if (pfn_ahb_props(r->device, ahb, &props) != VK_SUCCESS ||
+            !props.memoryTypeBits) {
+            why = "vkGetAndroidHardwareBufferPropertiesANDROID";
+            break;
+        }
+
+        VkExternalMemoryImageCreateInfo ext = {
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+            .handleTypes =
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+        };
+        VkImageCreateInfo ici = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = &ext,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .extent = { width, height, 1 },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        if (vkCreateImage(r->device, &ici, NULL, &s->image) != VK_SUCCESS) {
+            why = "vkCreateImage";
+            break;
+        }
+
+        VkImportAndroidHardwareBufferInfoANDROID imp = {
+            .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+            .buffer = ahb,
+        };
+        VkMemoryDedicatedAllocateInfo ded = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+            .pNext = &imp,
+            .image = s->image,
+        };
+        VkMemoryAllocateInfo mai = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = &ded,
+            .allocationSize = props.allocationSize,
+            .memoryTypeIndex = __builtin_ctz(props.memoryTypeBits),
+        };
+        if (vkAllocateMemory(r->device, &mai, NULL, &s->memory) != VK_SUCCESS ||
+            vkBindImageMemory(r->device, s->image, s->memory, 0) != VK_SUCCESS) {
+            why = "import/bind";
+            break;
+        }
+
+        EGLClientBuffer cb = eglGetNativeClientBufferANDROID(ahb);
+        EGLint attrs[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE };
+        EGLImageKHR img = cb ? eglCreateImageKHR(ed, EGL_NO_CONTEXT,
+                                                 EGL_NATIVE_BUFFER_ANDROID,
+                                                 cb, attrs)
+                             : EGL_NO_IMAGE_KHR;
+        if (img == EGL_NO_IMAGE_KHR) {
+            why = "eglCreateImageKHR";
+            break;
+        }
+        s->egl_image = img;
+
+        glGenTextures(1, &s->gl_tex);
+        glBindTexture(GL_TEXTURE_2D, s->gl_tex);
+        glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)img);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        if (glGetError() != GL_NO_ERROR) {
+            why = "glEGLImageTargetTexture2DOES";
+            break;
+        }
+    }
+    if (why) {
+        fprintf(stderr, "display-ahb: %dx%d failed at %s; readback path\n",
+                width, height, why);
+        destroy_ahb_slots(pg);
+        return false;
+    }
+    d->ahb_cur = 0;
+    qatomic_set(&g_vk_display_ahb_ok, 1);
+    fprintf(stderr, "display-ahb: %dx%d ring of %d ready\n", width, height,
+            (int)ARRAY_SIZE(d->ahb_slot));
+    return true;
+}
+
+static void ahb_barrier(VkCommandBuffer cmd, VkImage image,
+                        VkImageLayout from, VkImageLayout to,
+                        uint32_t src_q, uint32_t dst_q,
+                        VkAccessFlags src_a, VkAccessFlags dst_a,
+                        VkPipelineStageFlags src_s, VkPipelineStageFlags dst_s)
+{
+    VkImageMemoryBarrier b = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = src_a,
+        .dstAccessMask = dst_a,
+        .oldLayout = from,
+        .newLayout = to,
+        .srcQueueFamilyIndex = src_q,
+        .dstQueueFamilyIndex = dst_q,
+        .image = image,
+        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .subresourceRange.levelCount = 1,
+        .subresourceRange.layerCount = 1,
+    };
+    vkCmdPipelineBarrier(cmd, src_s, dst_s, 0, 0, NULL, 0, NULL, 1, &b);
+}
+#endif
 
 static void create_display_image(PGRAPHState *pg, int width, int height)
 {
@@ -755,6 +976,33 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                  0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glBindTexture(GL_TEXTURE_2D, 0);
     assert(glGetError() == GL_NO_ERROR);
+    d->gl_upload_tex = d->gl_texture_id;
+    d->ahb_ok = create_ahb_slots(pg, image_create_info.extent.width,
+                                 image_create_info.extent.height);
+
+    {   /* C10 probe: what an AHardwareBuffer hand-off would need on GL. */
+        static bool logged;
+        if (!logged) {
+            const char *gx = (const char *)glGetString(GL_EXTENSIONS);
+            EGLDisplay ed = eglGetCurrentDisplay();
+            const char *ex = ed != EGL_NO_DISPLAY ?
+                             eglQueryString(ed, EGL_EXTENSIONS) : NULL;
+#define HAS(list, name) ((list) && strstr((list), (name)) != NULL)
+            fprintf(stderr, "gl-ahb: GL_OES_EGL_image %d GL_EXT_EGL_image_storage %d"
+                    " | EGL_ANDROID_get_native_client_buffer %d"
+                    " EGL_ANDROID_image_native_buffer %d EGL_KHR_image_base %d"
+                    " EGL_ANDROID_native_fence_sync %d EGL_KHR_wait_sync %d"
+                    " | vk ahb ext %d\n",
+                    HAS(gx, "GL_OES_EGL_image"), HAS(gx, "GL_EXT_EGL_image_storage"),
+                    HAS(ex, "EGL_ANDROID_get_native_client_buffer"),
+                    HAS(ex, "EGL_ANDROID_image_native_buffer"),
+                    HAS(ex, "EGL_KHR_image_base"),
+                    HAS(ex, "EGL_ANDROID_native_fence_sync"),
+                    HAS(ex, "EGL_KHR_wait_sync"), r->ahb_extension_enabled);
+#undef HAS
+            logged = true;
+        }
+    }
 
 #else /* !__ANDROID__ */
 
@@ -1084,7 +1332,46 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
      * copy it into the host-visible staging buffer. The GL texture upload
      * happens after end_single_time_commands (GPU work complete).
      */
-    if (disp->readback_buffer != VK_NULL_HANDLE) {
+    static int ahb_frames;
+    if (ahb_frames++ % 60 == 0) {
+        char v[PROP_VALUE_MAX];
+        qatomic_set(&g_vk_display_ahb,
+                    !(__system_property_get("debug.xemu.display_ahb", v) > 0 &&
+                      v[0] == '0'));
+    }
+    bool use_ahb = disp->ahb_ok && qatomic_read(&g_vk_display_ahb);
+    int ahb_next = (disp->ahb_cur + 1) % (int)ARRAY_SIZE(disp->ahb_slot);
+
+    if (use_ahb) {
+        VkImage dst = disp->ahb_slot[ahb_next].image;
+
+        pgraph_vk_transition_image_layout(
+            pg, cmd, disp->image, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        /* Take the buffer back from GL (foreign), then hand it over again. */
+        ahb_barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_QUEUE_FAMILY_FOREIGN_EXT, disp->ahb_queue_family,
+                    0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageCopy region = {
+            .srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .srcSubresource.layerCount = 1,
+            .dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .dstSubresource.layerCount = 1,
+            .extent = { disp->width, disp->height, 1 },
+        };
+        vkCmdCopyImage(cmd, disp->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        ahb_barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    disp->ahb_queue_family, VK_QUEUE_FAMILY_FOREIGN_EXT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    } else if (disp->readback_buffer != VK_NULL_HANDLE) {
         pgraph_vk_transition_image_layout(
             pg, cmd, disp->image, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1122,10 +1409,16 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
 
 #ifdef __ANDROID__
+    if (use_ahb) {
+        /* GPU work is done (the submit above waits): show the new buffer. */
+        disp->ahb_cur = ahb_next;
+        disp->gl_texture_id = disp->ahb_slot[ahb_next].gl_tex;
+    } else
     /* GPU work is done; upload staging buffer data to the GL texture */
-    if (disp->readback_buffer != VK_NULL_HANDLE && disp->gl_texture_id &&
+    if (disp->readback_buffer != VK_NULL_HANDLE && disp->gl_upload_tex &&
         disp->readback_mapped) {
-        glBindTexture(GL_TEXTURE_2D, disp->gl_texture_id);
+        disp->gl_texture_id = disp->gl_upload_tex;
+        glBindTexture(GL_TEXTURE_2D, disp->gl_upload_tex);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, disp->width, disp->height,
                         GL_RGBA, GL_UNSIGNED_BYTE, disp->readback_mapped);
         glBindTexture(GL_TEXTURE_2D, 0);

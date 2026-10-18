@@ -140,6 +140,7 @@ find_library(GLESV3_LIB GLESv3 REQUIRED)
 find_library(EGL_LIB EGL REQUIRED)
 find_library(AAUDIO_LIB aaudio REQUIRED)
 find_library(VULKAN_LIB vulkan REQUIRED)
+find_library(NATIVEWINDOW_LIB nativewindow REQUIRED)   # AHardwareBuffer
 
 # Link everything
 target_link_libraries(xemu
@@ -217,6 +218,7 @@ target_link_libraries(xemu
     ${EGL_LIB}
     ${AAUDIO_LIB}
     ${VULKAN_LIB}
+    ${NATIVEWINDOW_LIB}
     ZLIB::ZLIB
     OpenSSL::SSL
     OpenSSL::Crypto
