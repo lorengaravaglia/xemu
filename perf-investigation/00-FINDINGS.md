@@ -4826,3 +4826,21 @@ staging and descriptor pools, deferred reuse) would recover it. At 14 ms
 CPU + 12 ms fence the frame still fits in 33 ms on slot 5, so it is
 headroom for heavy scenes, not fps or heat. A large refactor of upstream's
 synchronous design; not started.
+
+## CG. FRAMES IN FLIGHT: NO HEADROOM PROBLEM IN ANY CAPTURE (2026-10-18)
+
+Follow-up to CF. NV2A thread record time (`nvf` cpu) + draw-fence wait per
+guest frame, from the end-of-bench nvf dump (290 frames, first 15
+dropped), two runs per slot:
+
+| slot | cpu | fence (p95) | cpu+fence mean / p95 / max | frames > 30 ms | finishes/frame | draws |
+|------|-----|-------------|----------------------------|----------------|----------------|-------|
+| 1 | 5.0 | 3.7 (4.3) | 8.7 / 9.4 / 10.7 | 0 | 2.0 | 439 |
+| 7 | 13.6 | 10.1 (11.5) | 23.7 / 25.7 / 26.9 | 0 | 3.7 | 1548 |
+| 5 (CF) | 14.2 | ~12 | ~26 | -- | ~6-7 | -- |
+
+Not one frame comes near the 33.4 ms budget. The serial record-then-wait
+design costs nothing at today's frame rate. Frames in flight (overlapping
+the GPU's work with the next frame's recording) stays parked. Revisit
+only if a capture shows cpu+fence above ~30 ms, or if a 60 fps target
+arrives (16.7 ms: slot 7 would need it).
