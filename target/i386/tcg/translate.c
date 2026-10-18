@@ -5531,6 +5531,47 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         }
     }
 
+    /* Guest clock wait at its load: see helper_xemu_spin_wait(). */
+    {
+        /* a1 <ctr> 39 35 <ctr+4> 7c <back> 7f <fwd> 3b c7 72 <back> */
+        target_ulong pc = dc->base.pc_next;
+        static bool logged_spin;
+
+        if (CODE32(dc) && !CODE64(dc) &&
+            (pc & ~TARGET_PAGE_MASK) <= TARGET_PAGE_SIZE - 19 &&
+            translator_ldub(cpu_env(cpu), &dc->base, pc) == 0xa1 &&
+            translator_ldub(cpu_env(cpu), &dc->base, pc + 5) == 0x39 &&
+            translator_ldub(cpu_env(cpu), &dc->base, pc + 6) == 0x35 &&
+            translator_ldub(cpu_env(cpu), &dc->base, pc + 11) == 0x7c &&
+            (int8_t)translator_ldub(cpu_env(cpu), &dc->base, pc + 12) < 0 &&
+            translator_ldub(cpu_env(cpu), &dc->base, pc + 13) == 0x7f &&
+            translator_ldub(cpu_env(cpu), &dc->base, pc + 15) == 0x3b &&
+            translator_ldub(cpu_env(cpu), &dc->base, pc + 16) == 0xc7 &&
+            translator_ldub(cpu_env(cpu), &dc->base, pc + 17) == 0x72 &&
+            (int8_t)translator_ldub(cpu_env(cpu), &dc->base, pc + 18) < 0) {
+            uint32_t lo_addr = translator_ldl(cpu_env(cpu), &dc->base, pc + 1);
+            uint32_t hi_addr = translator_ldl(cpu_env(cpu), &dc->base, pc + 7);
+
+            if (hi_addr == lo_addr + 4) {
+                if (!logged_spin) {
+                    extern int g_xemu_spin_halt;
+                    char v[PROP_VALUE_MAX] = { 0 };
+                    logged_spin = true;
+                    if (__system_property_get("debug.xemu.spin_halt", v) > 0 &&
+                        (v[0] == '0' || v[0] == '1') && !v[1]) {
+                        g_xemu_spin_halt = v[0] - '0';
+                    }
+                    fprintf(stderr, "spin_halt: clock wait at 0x%lx on [0x%x], "
+                            "mode %d\n", (unsigned long)pc, lo_addr,
+                            g_xemu_spin_halt);
+                }
+                gen_update_cc_op(dc);
+                gen_update_eip_cur(dc);
+                gen_helper_xemu_spin_wait(tcg_env, tcg_constant_i32(lo_addr));
+            }
+        }
+    }
+
     /* Kernel idle loop, at the nop after its sti: see helper_xemu_idle(). */
     {
         /* ...je +0Ch: the main loop only.  A second loop at 0x8001b078

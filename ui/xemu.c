@@ -3484,6 +3484,17 @@ static void gl_render_frame(struct xemu_console *scon)
                                 v[0] >= '0' && v[0] <= '4' && !v[1]) {
                                 g_xemu_idle_halt = v[0] - '0';
                             }
+                            {
+                                extern int g_xemu_spin_halt;
+                                char sv[PROP_VALUE_MAX] = { 0 };
+                                if (__system_property_get("debug.xemu.spin_halt",
+                                                          sv) > 0 &&
+                                    (sv[0] == '0' || sv[0] == '1') && !sv[1]) {
+                                    g_xemu_spin_halt = sv[0] - '0';
+                                } else {
+                                    g_xemu_spin_halt = 1;
+                                }
+                            }
                         }
                         static unsigned long long p_nd, p_spin, p_sleep, p_smc;
                         static unsigned long long p_full, p_part;

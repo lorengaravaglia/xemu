@@ -825,6 +825,48 @@ void xemu_kprcb_watch_dump(void)
     }
 }
 
+/*
+ * Guest clock wait -> hlt (OPEN-WORK C14).  Halo's frame limiter spins
+ *
+ *     mov eax,[ctr]; cmp [ctr+4],esi; jl loop; jg done; cmp eax,edi; jb loop
+ *
+ * until a 64-bit counter that only a timer interrupt advances reaches
+ * ESI:EDI (FINDINGS M/O).  In about 40% of runs Halo waits this way instead
+ * of blocking in the kernel: ~725k iterations and ~7 ms of vCPU per frame,
+ * the CPU ~15 C hotter.  Since only an interrupt can end the wait, halting
+ * until the next one is exact: the interrupt returns to the mov and the loop
+ * re-tests.  The translator matches the instruction pattern, not an address.
+ * debug.xemu.spin_halt=0 turns it off (re-read about once a second).
+ */
+int g_xemu_spin_halt = 1;
+unsigned long long xemu_spin_halts;
+
+void helper_xemu_spin_wait(CPUX86State *env, uint32_t ctr)
+{
+    CPUState *cs;
+    uint32_t lo, tlo;
+    int32_t hi, thi;
+
+    if (!g_xemu_spin_halt || !(env->eflags & IF_MASK) ||
+        (env->hflags & HF_INHIBIT_IRQ_MASK)) {
+        return;
+    }
+    lo = cpu_ldl_data_ra(env, ctr, GETPC());
+    hi = (int32_t)cpu_ldl_data_ra(env, ctr + 4, GETPC());
+    thi = (int32_t)env->regs[R_ESI];
+    tlo = (uint32_t)env->regs[R_EDI];
+    if (hi > thi || (hi == thi && lo >= tlo)) {
+        return;                         /* reached: the loop exits */
+    }
+    xemu_spin_halts++;
+    xemu_idle_halts++;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(xemu_idle_halt_t0));
+    cs = env_cpu(env);
+    cs->halted = 1;
+    cs->exception_index = EXCP_HLT;
+    cpu_loop_exit(cs);
+}
+
 void helper_xemu_idle(CPUX86State *env)
 {
     xemu_kprcb_watch_arm(env_cpu(env));

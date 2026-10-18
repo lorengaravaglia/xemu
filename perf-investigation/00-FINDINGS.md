@@ -4741,3 +4741,38 @@ ms. Bimodal by run, not by arm. The guest seems to busy-wait (not in the
 kernel idle loop: idle spin 0) instead of blocking. Unexplained; could be a
 large heat lever. Investigate next.
 
+
+## CD. HALO CLOCK-WAIT SPIN -> HALT: vCPU −7 ms/frame, CPU ~10 C COOLER IN BUSY RUNS (2026-10-17)
+
+OPEN-WORK C14 (the CA/CC anomaly). The tbprof profiler (XTBP2) on a busy
+slot-5 run shows the vCPU spending the extra time in one Halo loop,
+0xbb0d4-0xbb0f2: it polls the 64-bit counter at [0x1f8c80] until it
+reaches ESI:EDI (optionally calling a yield first). ~725k iterations per
+frame, ~5.6M guest instructions. In halting runs the loop runs 0 times and
+the game blocks in the kernel. Which mode a run lands in seems to depend
+on thread timing at the load. The counter is advanced only by the timer
+interrupt (M/O), so spinning before that interrupt arrives is wasted work.
+
+Fix (`debug.xemu.spin_halt`, default 1): translate.c matches the exact
+byte pattern `a1 <ctr> 39 35 <ctr+4> 7c .. 7f .. 3b c7 72 ..` and emits a
+call to `helper_xemu_spin_wait` before the load. If IF=1, there is no
+interrupt shadow, and counter < ESI:EDI, it halts the vCPU (EXCP_HLT). Any
+interrupt wakes it, and the loop re-checks as before. Otherwise it is a
+no-op, so guest semantics are unchanged. Logged once:
+`spin_halt: clock wait at 0xbb0df on [0x1f8c80]`.
+
+**Slot 5, interleaved in one process, 5 rounds (12 s settle after each
+toggle):**
+
+| arm | vCPU on-CPU | halts/frame | hottest CPU | mean frame |
+|-----|-------------|-------------|-------------|------------|
+| off | 32.2-32.3 ms (4 of 5 runs busy; 1 landed in halting mode, 25.3) | 0.9 | 94-96 C | 33.5 |
+| on  | 24.8-25.5 ms (5 of 5 halting) | 11.6-12.6 | 83-86 C (one 95.5 right after a busy arm) | 33.5 |
+
+Plus 14 more on-runs earlier, all in halting mode (24.0-25.1 ms). Frame
+time is vsync-bound, so the gain is CPU time and heat (~-22% vCPU thread),
+not fps. Slow frames are 0-1 in both arms. The NV2A thread is also ~0.7 ms
+lower in on-runs (less contention for the big cores).
+
+Not done: other games were not checked for the same pattern. The matcher
+is exact, so a game without it is untouched.
