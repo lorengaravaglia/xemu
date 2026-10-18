@@ -4802,3 +4802,27 @@ contain it. The stalls:
 Lesson: auto-capture is good for scenes that are slow in themselves. For
 one-off stalls, the evidence is the SLOW FRAME line at the time it
 happened, not the save.
+
+## CF. C15 PREMISE WRONG: THE DISPLAY HAND-OFF WAIT IS 0.43 ms, NOT ~10 ms (2026-10-18)
+
+CC and OPEN-WORK C15 read the `fence` column of the `nvf:` lines (~8-12
+ms/frame) as the pfifo thread waiting for the display copy. It is not.
+`fence_us` is filled only in `pgraph_vk_finish` (draw.c), which waits on
+`command_buffer_fence` for the **game's own draw submission**. The display
+submit's wait is a separate counter, `g_c5_waitidle_us` (display.c), shown
+in the `rl:` lines (`debug.xemu.clockprobe=N`).
+
+Slot 5, steady state, 120 rl lines: display `disp` 450-510 us in total,
+of which `waitidle` 426-480 us; render-thread sync wait 0; pickup ~10 us.
+Same window: nvf `fence` 11.5-12.5 ms, cpu 14.2 ms, mspf 26-27.
+
+So a sync_fd + eglWaitSyncKHR hand-off would save at most ~0.45 ms/frame
+of pfifo blocking. Not worth the complexity. Dropped.
+
+The real wait is the per-finish draw fence (~12 ms/frame here): the pfifo
+thread submits a frame's draws and blocks until the GPU finishes them.
+Only overlapping that (frames in flight: double-buffered command buffers,
+staging and descriptor pools, deferred reuse) would recover it. At 14 ms
+CPU + 12 ms fence the frame still fits in 33 ms on slot 5, so it is
+headroom for heavy scenes, not fps or heat. A large refactor of upstream's
+synchronous design; not started.
