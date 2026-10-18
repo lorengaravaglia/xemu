@@ -4776,3 +4776,29 @@ lower in on-runs (less contention for the big cores).
 
 Not done: other games were not checked for the same pattern. The matcher
 is exact, so a game without it is untouched.
+
+## CE. 2026-10-18 AUTO-CAPTURES: THE STUTTERS DON'T REPLAY -- ONE-OFF STALLS PLUS HALO CATCH-UP
+
+Two auto-captures (11:20, 11:23) and the user's slot 8 (11:23:54), taken
+in play. Replayed twice each: the scene is smooth, with no frames over 45
+ms after the load warm-up. bench_auto: vCPU 22.8 ms, NV2A 5.4 ms. Slot 8:
+vCPU 27.0 ms, NV2A 11.3 ms (a busy scene; xpage 3.5-7.5k/frame is normal
+here). The user also saw it smooth after the reload.
+
+In the live log, each burst is one long stall followed by ~1 s of 50 ms
+frames with 0 halts and the vCPU at ~48 ms. Translation (gen) was low in
+those frames: that is Halo running its missed 30 Hz ticks, not new work.
+The stall itself happened *before* the capture point, so a replay can't
+contain it. The stalls:
+- 11:20:03, 484 ms: 7414 new TBs and NV2A 105 ms. New code and data
+  arriving (an area change).
+- 11:22:57, 352 ms: 405,924 dispatches in one frame with 12k longjmps,
+  vCPU 313 ms, no disk. Cause unknown.
+- 11:23:05, 537 ms: one HDD WRITE DMA (0xca, lba 3073225) took 219.7 ms
+  (`ide-slow`), and the vCPU sat halted 209 ms waiting for it. Likely a
+  checkpoint save. Writes run ~0.2 ms with lazy-refcounts (CB), so this one
+  is an outlier. Host flash or qcow2 allocation; not established.
+
+Lesson: auto-capture is good for scenes that are slow in themselves. For
+one-off stalls, the evidence is the SLOW FRAME line at the time it
+happened, not the save.
