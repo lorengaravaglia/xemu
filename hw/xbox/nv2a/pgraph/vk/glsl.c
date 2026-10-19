@@ -133,25 +133,6 @@ static const glslang_resource_t
                             .general_constant_matrix_vector_indexing = 1,
                         } };
 
-static glslang_target_client_version_t g_client_version =
-    GLSLANG_TARGET_VULKAN_1_1;
-static glslang_target_language_version_t g_target_spv =
-    GLSLANG_TARGET_SPV_1_3;
-
-void pgraph_vk_set_glsl_target(uint32_t device_api_version)
-{
-    if (device_api_version >= VK_API_VERSION_1_3) {
-        g_client_version = GLSLANG_TARGET_VULKAN_1_3;
-        g_target_spv = GLSLANG_TARGET_SPV_1_6;
-    } else if (device_api_version >= VK_API_VERSION_1_2) {
-        g_client_version = GLSLANG_TARGET_VULKAN_1_2;
-        g_target_spv = GLSLANG_TARGET_SPV_1_5;
-    } else {
-        g_client_version = GLSLANG_TARGET_VULKAN_1_1;
-        g_target_spv = GLSLANG_TARGET_SPV_1_3;
-    }
-}
-
 void pgraph_vk_init_glsl_compiler(void)
 {
     glslang_initialize_process();
@@ -162,16 +143,31 @@ void pgraph_vk_finalize_glsl_compiler(void)
     glslang_finalize_process();
 }
 
-GByteArray *pgraph_vk_compile_glsl_to_spv(glslang_stage_t stage,
+GByteArray *pgraph_vk_compile_glsl_to_spv(PGRAPHVkState *r,
+                                          glslang_stage_t stage,
                                           const char *glsl_source)
 {
+    glslang_target_client_version_t client_version;
+    glslang_target_language_version_t target_spv;
+
+    if (r->vk_api_version >= VK_API_VERSION_1_3) {
+        client_version = GLSLANG_TARGET_VULKAN_1_3;
+        target_spv = GLSLANG_TARGET_SPV_1_6;
+    } else if (r->vk_api_version >= VK_API_VERSION_1_2) {
+        client_version = GLSLANG_TARGET_VULKAN_1_2;
+        target_spv = GLSLANG_TARGET_SPV_1_5;
+    } else {
+        client_version = GLSLANG_TARGET_VULKAN_1_1;
+        target_spv = GLSLANG_TARGET_SPV_1_3;
+    }
+
     const glslang_input_t input = {
         .language = GLSLANG_SOURCE_GLSL,
         .stage = stage,
         .client = GLSLANG_CLIENT_VULKAN,
-        .client_version = g_client_version,
+        .client_version = client_version,
         .target_language = GLSLANG_TARGET_SPV,
-        .target_language_version = g_target_spv,
+        .target_language_version = target_spv,
         .code = glsl_source,
         .default_version = 460,
         .default_profile = GLSLANG_NO_PROFILE,
@@ -419,18 +415,29 @@ static bool spv_disk_cache_enabled(void)
            !g_config.display.vulkan.debug_shaders;
 }
 
-static char *spv_cache_path(VkShaderStageFlagBits stage, const char *glsl,
-                            size_t glsl_len)
+/*
+ * SPIR-V is compiled for the negotiated Vulkan version (upstream a6195c4142),
+ * so switching driver (Adreno 1.3, Turnip 1.4) must not serve another
+ * version's modules.  1.3 keeps the original unsuffixed names, so existing
+ * caches stay valid; other versions get their own files.
+ */
+static char *spv_cache_path(PGRAPHVkState *r, VkShaderStageFlagBits stage,
+                            const char *glsl, size_t glsl_len)
 {
     uint64_t hash = fast_hash((const uint8_t *)glsl, glsl_len) ^ stage;
-    return g_strdup_printf("%s/shaders_vk/%016" PRIx64 ".spv",
-                           xemu_settings_get_base_path(), hash);
+    uint32_t major = VK_API_VERSION_MAJOR(r->vk_api_version);
+    uint32_t minor = VK_API_VERSION_MINOR(r->vk_api_version);
+    g_autofree char *tag = (major == 1 && minor == 3) ?
+                               g_strdup("") :
+                               g_strdup_printf("-vk%u%u", major, minor);
+    return g_strdup_printf("%s/shaders_vk/%016" PRIx64 "%s.spv",
+                           xemu_settings_get_base_path(), hash, tag);
 }
 
-static GByteArray *spv_cache_load(VkShaderStageFlagBits stage,
+static GByteArray *spv_cache_load(PGRAPHVkState *r, VkShaderStageFlagBits stage,
                                   const char *glsl, size_t glsl_len)
 {
-    g_autofree char *path = spv_cache_path(stage, glsl, glsl_len);
+    g_autofree char *path = spv_cache_path(r, stage, glsl, glsl_len);
     g_autofree char *buf = NULL;
     gsize len = 0;
 
@@ -460,10 +467,11 @@ static GByteArray *spv_cache_load(VkShaderStageFlagBits stage,
                                h.spv_len);
 }
 
-static void spv_cache_store(VkShaderStageFlagBits stage, const char *glsl,
-                            size_t glsl_len, const GByteArray *spv)
+static void spv_cache_store(PGRAPHVkState *r, VkShaderStageFlagBits stage,
+                            const char *glsl, size_t glsl_len,
+                            const GByteArray *spv)
 {
-    g_autofree char *path = spv_cache_path(stage, glsl, glsl_len);
+    g_autofree char *path = spv_cache_path(r, stage, glsl, glsl_len);
     g_autofree char *dir = g_path_get_dirname(path);
     g_mkdir_with_parents(dir, 0755);
 
@@ -492,20 +500,20 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     size_t glsl_len = strlen(glsl);
     bool use_disk = spv_disk_cache_enabled();
     int64_t t0 = g_get_monotonic_time();
-    info->spirv = use_disk ? spv_cache_load(stage, glsl, glsl_len) : NULL;
+    info->spirv = use_disk ? spv_cache_load(r, stage, glsl, glsl_len) : NULL;
     int64_t t1 = g_get_monotonic_time();
     if (info->spirv) {
         qatomic_inc(&pgraph_vk_cache_stats.spv_disk_hits);
         qatomic_add(&pgraph_vk_cache_stats.spv_disk_us, t1 - t0);
     } else {
         info->spirv = pgraph_vk_compile_glsl_to_spv(
-            vk_shader_stage_to_glslang_stage(stage), glsl);
+            r, vk_shader_stage_to_glslang_stage(stage), glsl);
         int64_t t2 = g_get_monotonic_time();
         qatomic_inc(&pgraph_vk_cache_stats.spv_compiles);
         qatomic_add(&pgraph_vk_cache_stats.spv_compile_us, t2 - t1);
         pgraph_note_shader_compile();
         if (use_disk) {
-            spv_cache_store(stage, glsl, glsl_len, info->spirv);
+            spv_cache_store(r, stage, glsl, glsl_len, info->spirv);
         }
     }
     info->module = pgraph_vk_create_shader_module_from_spv(r, info->spirv);
@@ -524,7 +532,7 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_async(
 
     size_t glsl_len = strlen(glsl);
     int64_t t0 = g_get_monotonic_time();
-    info->spirv = spv_cache_load(stage, glsl, glsl_len);
+    info->spirv = spv_cache_load(r, stage, glsl, glsl_len);
     if (info->spirv) {
         qatomic_inc(&pgraph_vk_cache_stats.spv_disk_hits);
         qatomic_add(&pgraph_vk_cache_stats.spv_disk_us,
@@ -544,12 +552,12 @@ void pgraph_vk_compile_module(PGRAPHVkState *r, VkShaderStageFlagBits stage,
 {
     int64_t t0 = g_get_monotonic_time();
     *spirv = pgraph_vk_compile_glsl_to_spv(
-        vk_shader_stage_to_glslang_stage(stage), glsl);
+        r, vk_shader_stage_to_glslang_stage(stage), glsl);
     qatomic_inc(&pgraph_vk_cache_stats.spv_compiles);
     qatomic_add(&pgraph_vk_cache_stats.spv_compile_us,
                 g_get_monotonic_time() - t0);
     pgraph_note_shader_compile();
-    spv_cache_store(stage, glsl, strlen(glsl), *spirv);
+    spv_cache_store(r, stage, glsl, strlen(glsl), *spirv);
     *module = pgraph_vk_create_shader_module_from_spv(r, *spirv);
 }
 
