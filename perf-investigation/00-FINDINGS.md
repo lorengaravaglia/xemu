@@ -4844,3 +4844,58 @@ design costs nothing at today's frame rate. Frames in flight (overlapping
 the GPU's work with the next frame's recording) stays parked. Revisit
 only if a capture shows cpu+fence above ~30 ms, or if a 60 fps target
 arrives (16.7 ms: slot 7 would need it).
+
+## CH. C7: -march=armv8.2-a -> armv8.6-a (NOT armv9-a): NV2A THREAD −0.6 ms/frame, ALL FROM ONE LOAD (2026-10-19)
+
+**Why not armv9-a:** the Thor's /proc/cpuinfo has no `sve`/`sve2`
+(Qualcomm disables SVE on kalama), and `-march=armv9-a` defines
+`__ARM_FEATURE_SVE2`. Even `armv9-a+nosve2+nosve` still does in NDK r29
+clang, so auto-vectorised code could SIGILL. `armv8.6-a` is v9.0 minus SVE.
+Every feature it enables (LSE/LSE2, RCPC/RCPC2, dotprod, FRINT, BF16,
+I8MM, PAuth, BTI, JSCVT, FCMA, FlagM) is listed in cpuinfo. 0 SVE
+instructions in the result.
+
+**What changed in the binary:** 450 of 43,684 functions; about 150 of 6.17M
+instructions. 29 LDAR -> LDAPR (the rest of the LDARs are in the vcpkg
+libs, which this flag doesn't rebuild), 3 dot-product instructions, and
+xpaclri -> xpaci in `__builtin_return_address` (GETPC). In the NV2A thread
+exactly one instruction changed: the pusher's
+`qatomic_load_acquire(dma_put)` in `pfifo_run_pusher` (inlined into
+pfifo_thread), LDAR -> LDAPR.
+
+**Cross-build (ABA; new, baseline, new; slots 5/7 x3 each):** NV2A thread
+slot 5 13.27-13.49 vs 13.99-14.08 ms, slot 7 12.81-12.99 vs 13.45-13.59.
+The second new-build session ran hottest and was still fast. vCPU
+unchanged (25.6 / 23.5).
+
+**In-process confirmation** (temporary `debug.xemu.put_ldar` switch,
+inline asm LDAR vs LDAPR at that one site, 4 interleaved rounds):
+slot 5 LDAR 14.08-14.24 vs LDAPR 13.58-13.68 (−0.53 ms), slot 7
+13.51-13.59 vs 12.86-13.10 (−0.6 ms), clean separation every round. So the
+whole gain is that one load, not layout. Switch removed afterwards; plain
+qatomic_load_acquire now compiles to LDAPR.
+
+**Mechanism:** LDAR (RCsc) can't complete until the thread's earlier STLRs
+are globally visible. The pusher loop runs once per command and sits right
+after the puller's mutex unlocks (store-release), so every iteration waited
+for those to drain. LDAPR (RCpc) doesn't wait. Implication for C11: the
+per-method lock/unlock pairs cost more than their own instructions, through
+the ordering stalls they impose on what follows. That raises C11's
+expected value.
+
+**Smoke test:** Halo through 40+ benchmarks and Jade Empire cold-boots to
+title at 59.9 fps; no SIGILL. The APK's floor is now ARMv8.6 (e.g. it
+excludes Snapdragon 888 / Cortex-X1); the Thor is the floor (A7).
+
+**Build trap:** `c_args` in android_arm64.txt's [built-in options] are
+copied into Meson's coredata at setup. Editing the cross-file and
+regenerating changes nothing (2886 rules still had the old flag). Use
+`meson configure build -Dc_args=[...] -Dcpp_args=[...]` with the NDK env
+exported (ANDROID_NDK_ROOT and the toolchain on PATH, as in
+rebuild_meson.sh, or the glslang CMake subproject fails to configure).
+Then recompile every `.o` target (`ninja -t targets all`, filtered on `.o$`,
+`-k 0`; the 34 known 9p/vfio-user/TPM objects fail as usual and none are
+libsystem members). Swap the existing members of the regular archives
+libsystem.a and libcommon.a in place with `llvm-ar r` (all 961/25 map
+1:1 to their own .p dir), slim libqemu-i386-softmmu.a, and leave the thin
+archives as they are.

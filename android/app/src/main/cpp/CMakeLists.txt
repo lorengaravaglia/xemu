@@ -121,13 +121,13 @@ add_library(xemu SHARED
 
 # CRITICAL: Disable all hardening for the core logic.
 # -march/-mtune must stay in sync with android_arm64.txt (see the comment there
-# for why -march=armv8.2-a matters: inline LSE atomics instead of outline-atomic
-# PLT calls).  Both build systems must use identical flags.
+# for why -march=armv8.6-a and not armv9-a: v9 minus SVE, which the Thor
+# lacks).  Both build systems must use identical flags.
 target_compile_options(xemu PRIVATE
     -mbranch-protection=none
     -fno-sanitize=shadow-call-stack
     -fno-emulated-tls
-    -march=armv8.2-a
+    -march=armv8.6-a
     -mtune=cortex-x3
     -O2
 )

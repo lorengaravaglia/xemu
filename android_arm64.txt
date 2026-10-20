@@ -35,15 +35,18 @@ cmake_android_native_api_level = api
 cmake_make_program = 'ninja'
 
 [built-in options]
-# -march=armv8.2-a: raises the ISA floor from the armv8-a default so the compiler
-#   can emit LSE single-instruction atomics (casal/ldaddal, ARMv8.1+) inline.
-#   Without it clang defaults to -moutline-atomics, turning every atomic into a
-#   PLT call into a compiler-rt helper that runtime-checks a global and branches.
-#   Target device (SD 8 Gen 2 "kalama": Cortex-X3/A715/A710/A510) is ARMv9.0-A,
-#   well above this floor; /proc/cpuinfo confirms 'atomics' (LSE) + 'uscat' (LSE2).
-#   NOTE: this is a hard floor — the APK will SIGILL on pre-ARMv8.2 devices.
+# -march=armv8.6-a: the newest ISA level every Thor core (SD 8 Gen 2 "kalama":
+#   Cortex-X3/A715/A710/A510, all ARMv9.0-A) runs WITHOUT SVE.  Qualcomm turns
+#   SVE off on this SoC (/proc/cpuinfo lists no sve/sve2), and -march=armv9-a
+#   enables SVE2 (even "+nosve2+nosve" still defines __ARM_FEATURE_SVE2), so the
+#   auto-vectoriser could emit instructions that SIGILL.  armv8.6-a = v9.0 minus
+#   SVE: inline LSE atomics (not -moutline-atomics PLT calls), RCPC (LDAPR for
+#   acquire loads instead of LDAR), LSE2, dotprod, FRINT, BF16, I8MM -- every
+#   one listed in the Thor's /proc/cpuinfo (OPEN-WORK C7, FINDINGS CH).
+#   NOTE: this is a hard floor -- the APK will SIGILL on pre-ARMv8.6 devices
+#   (e.g. Snapdragon 888 / Cortex-X1).  The Thor is the floor (OPEN-WORK A7).
 # -mtune=cortex-x3: kalama's prime core (x4 is Snapdragon 8 Gen 3). Scheduling
 #   hint only; does not affect which instructions are legal.
-c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.2-a', '-mtune=cortex-x3']
-cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.2-a', '-mtune=cortex-x3']
+c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.6-a', '-mtune=cortex-x3']
+cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.6-a', '-mtune=cortex-x3']
 b_staticpic = true

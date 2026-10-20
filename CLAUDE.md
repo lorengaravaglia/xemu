@@ -66,6 +66,15 @@ Open `android/` as the project root in Android Studio. Use **Build → Clean Bui
 
 After changing `CMakeLists.txt`: use **Build → Refresh Linked C++ Projects** before running.
 
+### Changing compiler flags for the Meson core
+
+Editing `c_args`/`cpp_args` in `android_arm64.txt` and regenerating does **not**
+change the build: Meson copied them into its coredata at setup. Use
+`meson configure build -Dc_args="[...]" -Dcpp_args="[...]"` with the NDK
+environment from `rebuild_meson.sh` exported, then recompile every `.o` and
+swap archive members in place. The exact procedure is in FINDINGS CH. Keep the
+CMake `target_compile_options` in step.
+
 ### Updating Meson-compiled core files (e.g. `hw/xbox/nv2a/*.c`)
 
 CMake links `libqemu-i386-softmmu.a` (a regular static archive). After editing any core file compiled by Meson, a **two-step** rebuild is required:
