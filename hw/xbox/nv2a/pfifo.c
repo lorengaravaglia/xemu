@@ -120,9 +120,14 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
         d->pfifo.enabled_interrupts = val;
         nv2a_update_irq(d);
         break;
-    default:
+    default: {
+        bool pg = pfifo_exclude_pusher(d);     /* C11 pg mode */
         d->pfifo.regs[addr] = val;
+        if (pg) {
+            qemu_mutex_unlock(&d->pgraph.lock);
+        }
         break;
+    }
     }
 
     pfifo_kick(d);
@@ -218,14 +223,120 @@ static bool pfifo_puller_should_stall(NV2AState *d)
            !can_fifo_access(d);
 }
 
+/*
+ * C11 (FINDINGS CI): "pg mode".  The puller used to drop pfifo.lock, take
+ * pg->lock, run ONE method and swap back -- four mutex operations per
+ * pushbuffer command, ~50k commands a frame in Halo, ~17% of this thread.
+ * In pg mode the pusher keeps pg->lock across commands and parses with
+ * pfifo.lock released, swapping back only every g_pfifo_batch methods and
+ * wherever pfifo.lock is needed.
+ *
+ * Why not simply hold both locks: methods drop pg->lock to take the BQL
+ * (interrupts), and the vCPU takes pfifo.lock under the BQL in its MMIO,
+ * so this thread must never hold pfifo.lock across a method.  pg mode keeps
+ * that rule and the pfifo -> pgraph lock order.
+ *
+ * Pusher state is still excluded from the vCPU: g_pfifo_pg_mode is set and
+ * cleared only under pfifo.lock, and the MMIO paths that store pusher
+ * registers (pfifo_write's plain stores, user_write's locked path) check it
+ * under pfifo.lock and then also take pg->lock -- see
+ * pfifo_exclude_pusher().  Interrupt acks and the lock-free status and
+ * DMA_PUT paths (FINDINGS BL) never wait on it.
+ *
+ * Leaves pg mode: after g_pfifo_batch methods (bounds how long a vCPU
+ * pgraph_write waits behind it), on a flip wait (pfifo_stall_for_flip takes
+ * pg->lock), before a mid-stream display sync, for object/context methods,
+ * and when the pusher loop ends (pfifo_thread expects pfifo.lock).
+ *
+ * debug.xemu.pfifo_batch: unset = 64 (default), 0 or 1 = off (one swap per
+ * method, the old behaviour), N = up to N methods per pg->lock hold.
+ */
+#define PFIFO_BATCH_DEFAULT 64
+static int g_pfifo_batch = PFIFO_BATCH_DEFAULT;
+int g_pfifo_pg_mode;            /* only the pfifo thread writes it */
+static int g_pfifo_hold_methods;
+static uint64_t g_pfifo_stat_calls, g_pfifo_stat_methods, g_pfifo_stat_words,
+                g_pfifo_stat_holds;
+
+static void pfifo_batch_refresh(void)
+{
+#if defined(__ANDROID__) || defined(ANDROID)
+    static unsigned calls;
+    static int64_t last_log_us;
+    if (calls++ % 4096) {
+        return;
+    }
+    char v[PROP_VALUE_MAX];
+    g_pfifo_batch = __system_property_get("debug.xemu.pfifo_batch", v) > 0 ?
+                    atoi(v) : PFIFO_BATCH_DEFAULT;
+    int64_t now = g_get_monotonic_time();
+    if (now - last_log_us >= 10 * G_USEC_PER_SEC) {
+        if (last_log_us) {
+            fprintf(stderr, "pfifo-batch: mode %d | puller calls %" PRIu64
+                    " methods %" PRIu64 " words %" PRIu64 " pg holds %" PRIu64
+                    " per 10 s\n", g_pfifo_batch, g_pfifo_stat_calls,
+                    g_pfifo_stat_methods, g_pfifo_stat_words,
+                    g_pfifo_stat_holds);
+        }
+        g_pfifo_stat_calls = g_pfifo_stat_methods = g_pfifo_stat_words = 0;
+        g_pfifo_stat_holds = 0;
+        last_log_us = now;
+    }
+#endif
+}
+
+/* Pusher thread, holding pfifo.lock: switch to holding pg->lock only. */
+static void pfifo_enter_pg(NV2AState *d)
+{
+    if (g_pfifo_pg_mode) {
+        return;
+    }
+    qatomic_set(&g_pfifo_pg_mode, 1);
+    g_pfifo_hold_methods = 0;
+    g_pfifo_stat_holds++;
+    qemu_mutex_unlock(&d->pfifo.lock);
+    qemu_mutex_lock(&d->pgraph.lock);
+}
+
+/* Pusher thread: back to holding pfifo.lock only (no-op if not in pg mode). */
+static void pfifo_leave_pg(NV2AState *d)
+{
+    if (!g_pfifo_pg_mode) {
+        return;
+    }
+    qemu_mutex_unlock(&d->pgraph.lock);
+    qemu_mutex_lock(&d->pfifo.lock);
+    qatomic_set(&g_pfifo_pg_mode, 0);
+}
+
+/*
+ * MMIO writers of pusher registers, holding pfifo.lock: if the pusher is in
+ * pg mode, also take pg->lock so the store cannot land mid-parse.  Returns
+ * whether it did; the caller unlocks pg->lock after its store.
+ */
+bool pfifo_exclude_pusher(NV2AState *d)
+{
+    if (!qatomic_read(&g_pfifo_pg_mode)) {
+        return false;
+    }
+    qemu_mutex_lock(&d->pgraph.lock);
+    return true;
+}
+
 static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
                                 uint32_t parameter, uint32_t *parameters,
                                 size_t num_words_available,
                                 size_t max_lookahead_words)
 {
+    if (qatomic_read(&d->pgraph.waiting_for_flip)) {
+        pfifo_leave_pg(d);          /* pfifo_stall_for_flip takes pg->lock */
+    }
     if (pfifo_puller_should_stall(d)) {
         return -1;
     }
+
+    pfifo_batch_refresh();
+    g_pfifo_stat_calls++;
 
     uint32_t *pull0 = &d->pfifo.regs[NV_PFIFO_CACHE1_PULL0];
     uint32_t *pull1 = &d->pfifo.regs[NV_PFIFO_CACHE1_PULL1];
@@ -246,6 +357,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
     bool inc = !GET_MASK(method_entry, NV_PFIFO_CACHE1_METHOD_TYPE);
 
     if (method == 0) {
+        pfifo_leave_pg(d);
         RAMHTEntry entry = ramht_lookup(d, parameter);
         assert(entry.valid);
         // assert(entry.channel_id == state->channel_id);
@@ -291,24 +403,41 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
         assert(engine == ENGINE_GRAPHICS);
         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, engine);
 
-        // TODO: this is fucked
-        qemu_mutex_unlock(&d->pfifo.lock);
-        qemu_mutex_lock(&d->pgraph.lock);
+        if (g_pfifo_batch > 1) {
+            pfifo_enter_pg(d);
+            if (can_fifo_access(d)) {
+                num_proc =
+                    pgraph_method(d, subchannel, method, parameter, parameters,
+                                  num_words_available, max_lookahead_words, inc);
+                g_pfifo_stat_methods++;
+            }
+            if (++g_pfifo_hold_methods >= g_pfifo_batch) {
+                pfifo_leave_pg(d);
+            }
+        } else {
+            pfifo_leave_pg(d);
 
-        if (can_fifo_access(d)) {
-            num_proc =
-                pgraph_method(d, subchannel, method, parameter, parameters,
-                              num_words_available, max_lookahead_words, inc);
+            // TODO: this is fucked
+            qemu_mutex_unlock(&d->pfifo.lock);
+            qemu_mutex_lock(&d->pgraph.lock);
+
+            if (can_fifo_access(d)) {
+                num_proc =
+                    pgraph_method(d, subchannel, method, parameter, parameters,
+                                  num_words_available, max_lookahead_words, inc);
+                g_pfifo_stat_methods++;
+            }
+
+            qemu_mutex_unlock(&d->pgraph.lock);
+            qemu_mutex_lock(&d->pfifo.lock);
         }
-
-        qemu_mutex_unlock(&d->pgraph.lock);
-        qemu_mutex_lock(&d->pfifo.lock);
     } else {
         assert(!"Unrecognized pfifo puller method");
     }
 
     if (num_proc > 0) {
         *status |= NV_PFIFO_CACHE1_STATUS_LOW_MARK;
+        g_pfifo_stat_words += num_proc;
     }
 
     return num_proc;
@@ -475,6 +604,7 @@ static void pfifo_run_pusher(NV2AState *d)
              * changes.  debug.xemu.sync_midstream=0 disables, for A/B.
              */
             if (qatomic_read(&d->pgraph.sync_pending) && pfifo_sync_midstream()) {
+                pfifo_leave_pg(d);
                 pgraph_process_pending(d);
             }
 
@@ -567,6 +697,8 @@ static void pfifo_run_pusher(NV2AState *d)
             break;
         }
     }
+
+    pfifo_leave_pg(d);              /* the caller expects pfifo.lock */
 
     // NV2A_DPRINTF("DMA pusher done: max 0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx " - 0x%" HWADDR_PRIx "\n",
     //      dma_len, control->dma_get, control->dma_put);

@@ -279,6 +279,7 @@ DEFINE_PROTO(user)
 
 DMAObject nv_dma_load(NV2AState *d, hwaddr dma_obj_address);
 void *nv_dma_map(NV2AState *d, hwaddr dma_obj_address, hwaddr *len);
+bool pfifo_exclude_pusher(NV2AState *d);
 
 /**
  * Clips an image blit to fit into a GPU tile it overlaps.

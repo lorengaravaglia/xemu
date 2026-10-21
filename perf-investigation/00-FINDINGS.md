@@ -4899,3 +4899,59 @@ libsystem members). Swap the existing members of the regular archives
 libsystem.a and libcommon.a in place with `llvm-ar r` (all 961/25 map
 1:1 to their own .p dir), slim libqemu-i386-softmmu.a, and leave the thin
 archives as they are.
+
+## CI. C11: "PG MODE" -- ONE pg->lock HOLD PER 64 METHODS, NV2A THREAD −18% (2026-10-20)
+
+**Measured first (counters, batching off):** slots 5 and 7 make ~15M puller
+calls per 10 s, about **50k pfifo -> pgraph -> pfifo lock round trips per
+frame**, ~3.7 words each. simpleperf on the NV2A thread (slot 7):
+`qemu_mutex_unlock_impl` 11.7% + `qemu_mutex_lock_impl` 8.0% inclusive
+(`__aarch64_swp2_rel` 6.0%, `__aarch64_cas2_acq` 4.6%, the pthread
+functions 7.1%), 86% of it called straight from pfifo_thread (the inlined
+puller). About 17% of the thread, ~2.1 ms/frame, ~42 ns per round trip.
+
+**First attempt, batching within one command:** cut the calls by only
+~10% (most commands carry ONE method; the 3.7 words come from
+pgraph_method's own lookahead). NV2A −0.25 ms in 8 of 8 pairs, which
+matches 10% of 2.1 ms. Superseded.
+
+**Why the obvious fix is unsafe:** methods drop pg->lock to take the BQL
+(interrupts), and the vCPU takes pfifo.lock under the BQL in its MMIO.
+Holding pfifo.lock across a method can deadlock, which is why the puller
+swaps locks per method.
+
+**Fix -- pg mode (`pfifo.c`, `debug.xemu.pfifo_batch`, default 64; 0/1 =
+old behaviour):** the pusher keeps pg->lock *across commands* and parses
+with pfifo.lock released, swapping back after 64 methods, on a flip wait
+(pfifo_stall_for_flip takes pg->lock), before a mid-stream display sync,
+for object/context methods, and when the loop ends. pfifo.lock is still
+never held across a method, and the pfifo -> pgraph order is unchanged.
+Pusher registers stay excluded from the vCPU: `g_pfifo_pg_mode` is
+set/cleared only under pfifo.lock, and the MMIO stores to pusher state
+(pfifo_write's plain register stores, user_write's locked DMA_GET/REF
+path) check it under pfifo.lock and then also take pg->lock
+(`pfifo_exclude_pusher`). Interrupt acks and the lock-free paths (BL) never
+wait on it. Holds per 10 s: ~230k vs ~15M calls (64:1).
+
+**Interleaved A/B, one process, 4 rounds, arm order rotated (0 / 16 / 64):**
+
+| | off | 16 | 64 |
+|---|---|---|---|
+| slot 5 NV2A | 13.72-13.81 | 11.52-11.57 | **11.25-11.35 (−2.45 ms, −18%)** |
+| slot 7 NV2A | 13.21-13.26 | 10.91-11.04 | **10.68-10.78 (−2.5 ms, −19%)** |
+| vCPU slot 5 | 26.60-26.70 | 26.11-26.41 | 26.19-26.45 |
+| frames > 45 ms (8 runs) | 12 | 8 | 12 |
+
+(The absolute levels are ~1 ms higher than CH's because the Thor was
+charging over USB at 88-95 C. The arms are interleaved, so the differences
+hold.) vCPU lock waits (nv2a-lock lines) were negligible in both modes:
+pgraph_wr(fifo) 0.2-0.3 ms per 10 s. BL's tail problem did not return.
+
+**Checks:** save -> load -> save of a `test_` snapshot mid-game in pg mode
+(savevm's nv2a_lock_fifo path) works, and the game keeps rendering. Cold
+boots with the default on: Jade Empire, MGS2, Halo 2, JSRF and THPS2x all
+reach title or intro, render correctly, and nothing asserts. Halo through
+30+ benchmarks.
+
+**Cumulative:** NV2A thread 18.7 ms at BX -> ~11 ms now (slot 7, same
+scale caveats).

@@ -172,6 +172,7 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                      NV_PFIFO_CACHE1_PUSH1_CHID);
 
         if (channel_id == cur_channel_id) {
+            bool pg = pfifo_exclude_pusher(d);     /* C11 pg mode */
             switch (addr & 0xFFFF) {
             case NV_USER_DMA_PUT:
                 d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] = val;
@@ -186,6 +187,9 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                 NV2A_DPRINTF(true, "Unsupported NV_USER write: channel=%u offset=0x%04x\n", channel_id, (unsigned)(addr & 0xFFFF));
                 assert(!"Unsupported NV_USER DMA register write offset");
                 break;
+            }
+            if (pg) {
+                qemu_mutex_unlock(&d->pgraph.lock);
             }
 
             pfifo_kick(d);
