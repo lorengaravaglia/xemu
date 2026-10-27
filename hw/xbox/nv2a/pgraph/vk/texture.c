@@ -689,6 +689,29 @@ static void tex_stats_maybe_log(void)
             qatomic_set(&g_vk_pipe_key_serial,
                         !(__system_property_get("debug.xemu.pipe_key_serial",
                                                 v) > 0 && v[0] == '0'));
+
+            extern int g_vk_shbind_why_on;
+            extern uint64_t g_vk_shbind_why[SHADER_DIRTY__COUNT];
+            fprintf(stderr, "vk-shdirty: mode %d | missed %" PRIu64
+                    " | same-state rebuilds by reason:",
+                    qatomic_read(&g_shader_dirty_mode), g_shader_dirty_missed);
+            for (int i = 0; i < SHADER_DIRTY__COUNT; i++) {
+                if (g_vk_shbind_why[i]) {
+                    fprintf(stderr, " %d:%" PRIu64, i, g_vk_shbind_why[i]);
+                }
+                g_vk_shbind_why[i] = 0;
+            }
+            fprintf(stderr, "\n");
+            g_shader_dirty_missed = 0;
+            m = 1;
+            if (__system_property_get("debug.xemu.shader_dirty", v) > 0 &&
+                v[0] >= '0' && v[0] <= '2') {
+                m = v[0] - '0';
+            }
+            qatomic_set(&g_shader_dirty_mode, m);
+            g_vk_shbind_why_on =
+                __system_property_get("debug.xemu.shader_dirty_why", v) > 0 &&
+                v[0] == '1';
         }
     }
 #endif

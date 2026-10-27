@@ -618,8 +618,12 @@ static void update_shader_uniforms(PGRAPHState *pg)
 }
 
 /* Diagnostic, logged with vk-pipekey: draws, shader-state rebuilds, and
- * rebuilds that produced a different state. */
+ * rebuilds that produced a different state.  With debug.xemu.shader_dirty_why
+ * set, g_vk_shbind_why counts the reasons behind rebuilds that produced the
+ * same state (SHADER_DIRTY_* bits). */
 uint64_t g_vk_shbind_checks, g_vk_shbind_rebuilt, g_vk_shbind_changed;
+int g_vk_shbind_why_on;
+uint64_t g_vk_shbind_why[SHADER_DIRTY__COUNT];
 
 void pgraph_vk_bind_shaders(PGRAPHState *pg)
 {
@@ -630,15 +634,31 @@ void pgraph_vk_bind_shaders(PGRAPHState *pg)
     r->shader_bindings_changed = false;
 
     g_vk_shbind_checks++;
-    if (!r->shader_binding ||
-        pgraph_glsl_check_shader_state_dirty(pg, &r->shader_binding->state)) {
-        g_vk_shbind_rebuilt++;
+    int mode = qatomic_read(&g_shader_dirty_mode);
+    bool dirty = !r->shader_binding ||
+                 pgraph_glsl_check_shader_state_dirty(pg,
+                                                      &r->shader_binding->state);
+    bool verify = !dirty && mode == 2 &&
+                  pgraph_glsl_shader_state_dirty_why(
+                      pg, &r->shader_binding->state, false, false);
+    if (dirty || verify) {
+        uint32_t why = 0;
+        if (!verify && r->shader_binding && g_vk_shbind_why_on) {
+            why = pgraph_glsl_shader_state_dirty_why(
+                pg, &r->shader_binding->state, mode != 0, true);
+        }
+        g_vk_shbind_rebuilt += !verify;
         ShaderState new_state = pgraph_glsl_get_shader_state(pg);
         if (!r->shader_binding || memcmp(&r->shader_binding->state, &new_state,
                                          sizeof(ShaderState))) {
             g_vk_shbind_changed++;
+            g_shader_dirty_missed += verify;
             r->shader_binding = get_shader_binding_for_state(r, &new_state);
             r->shader_bindings_changed = true;
+        } else {
+            for (int i = 0; why; i++, why >>= 1) {
+                g_vk_shbind_why[i] += why & 1;
+            }
         }
     } else {
         nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);

@@ -4955,3 +4955,58 @@ reach title or intro, render correctly, and nothing asserts. Halo through
 
 **Cumulative:** NV2A thread 18.7 ms at BX -> ~11 ms now (slot 7, same
 scale caveats).
+
+## CJ. C12: SHADER-STATE DIRTY CHECK ON THE BITS THE STATE READS -- WASTED REBUILDS 48% -> 0, NV2A −0.1-0.2 ms (2026-10-27)
+
+CA left this: the coarse dirty check rebuilt the 2.8 KB ShaderState for
+about half of all shader binds, and half of those rebuilds produced the
+same state. The check rebuilds whenever a watched register's dirty bit is
+set, but many of those registers mix shader inputs with fixed-function
+state (CONTROL_0 holds the depth func and colour mask, SETUPRASTER culling,
+TEXFMT the mip count, TEXCTL0 the LOD clamps). Games also re-upload
+identical vertex programs, and every SET_TRANSFORM_PROGRAM word set
+`program_data_dirty`.
+
+**Where the waste was** (`debug.xemu.shader_dirty_why=1` counts the reasons
+behind same-state rebuilds; Halo Quick resume, per 10 s):
+- Masking each register to the bits the setters read removed everything
+  except TEXFMT (47k of 99k rebuilds).
+- Comparing a texture stage's bits only while the stage is enabled (the
+  setter leaves a disabled stage zeroed), and the base size only when the
+  border comes from the texture: 22k left, still all TEXFMT.
+- The setter takes only three properties from the colour format (linear,
+  X8Y24, depth). Swapping, say, a DXT texture for a swizzled ARGB one gives
+  the same shader. Comparing those: **0 left (rebuilt == changed).**
+
+**Mechanism (`debug.xemu.shader_dirty`, default 1; 0 = upstream):** the
+dirty bit is still the gate, but a set bit only counts when the bits the
+state reads differ from a snapshot of the registers taken whenever the
+state is built (`glsl/shaders.c`; masks next to `shader_regs[]` and
+`tex_shader_bits()`, to be kept in step with
+`pgraph_glsl_set_{vsh,geom,psh}_state`). `SET_TRANSFORM_PROGRAM` marks the
+program dirty only when a word changes.
+
+**Correctness, mode 2:** whenever the masked check says clean but upstream's
+would have rebuilt, rebuild anyway and count states that differ. **0 misses**
+on Halo slots 1/5/7 and the Quick resume, and on cold boots of Halo 2
+(172k rebuilds), JSRF (296k), Jade Empire (67k), THPS2x and MGS2. The
+program-word filter is outside mode 2's reach, but it is exact by
+construction: the state copies those words.
+
+**Interleaved A/B, one process, 4 rounds, order alternated, 450 frames:**
+
+| | upstream (0) | masked (1) |
+|---|---|---|
+| slot 5 rebuilds / binds per 10 s | 239k / 475k (125k real) | 118-125k (all real) |
+| slot 5 NV2A | 11.33, 11.30, 11.35, 11.23 (11.30) | 11.07, 11.08, 11.11, 11.21 (**11.12, −0.18 ms**) |
+| slot 7 NV2A | 10.89, 10.77, 10.78, 10.81 (10.81) | 10.65, 10.66, 10.88, 10.72 (**10.73, −0.08 ms**) |
+| frames > 45 ms | 0 / 1 per run | 0-2 / 1 per run |
+
+**Smaller than CA's 4-5% estimate.** Each wasted rebuild cost ~0.4 µs
+(115k fewer rebuilds per 10 s for −0.15 ms/frame). The estimate also
+counted the hash and LRU lookup on real changes, which remain. Kept on: it
+is exact (0 misses), and it makes the rebuild counters a direct measure of
+real shader-state churn. The remaining per-bind cost is ~1,200 real state
+changes per frame on slot 5, each a 2.8 KB build + hash + LRU compare. Only
+a cheaper ShaderState (e.g. not copying the vertex program into it) would
+cut that.

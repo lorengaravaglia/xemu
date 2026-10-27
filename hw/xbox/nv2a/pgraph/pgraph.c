@@ -33,6 +33,7 @@
 #include "util.h"
 #include "swizzle.h"
 #include "nv2a_vsh_emulator.h"
+#include "glsl/shaders.h"
 
 #define PG_GET_MASK(reg, mask) GET_MASK(pgraph_reg_r(pg, reg), mask)
 #define PG_SET_MASK(reg, mask, value)        \
@@ -2166,8 +2167,13 @@ DEF_METHOD_INC(NV097, SET_TRANSFORM_PROGRAM)
                                 NV_PGRAPH_CHEOPS_OFFSET_PROG_LD_PTR);
 
     assert(program_load < NV2A_MAX_TRANSFORM_PROGRAM_LENGTH);
+    /* Games re-upload the same program between draws; an unchanged word
+     * cannot change the shader state (debug.xemu.shader_dirty, glsl/shaders.c) */
+    if (!qatomic_read(&g_shader_dirty_mode) ||
+        pg->program_data[program_load][slot%4] != parameter) {
+        pg->program_data_dirty = true;
+    }
     pg->program_data[program_load][slot%4] = parameter;
-    pg->program_data_dirty = true;
 
     if (slot % 4 == 3) {
         PG_SET_MASK(NV_PGRAPH_CHEOPS_OFFSET,
