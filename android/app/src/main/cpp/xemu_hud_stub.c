@@ -47,9 +47,8 @@ void xemu_hud_set_filter_nearest(bool nearest) {
 
 // ---- Brightness ----
 // A gamma curve on the displayed picture, out = in^(100 / percent): blacks
-// and whites stay put, mid-tones lift (or drop below 100%).  The emulator
-// does not model the Xbox's own gamma ramp (OPEN-WORK C13), so games' own
-// brightness controls do nothing; this is the user's control instead.
+// and whites stay put, mid-tones lift (or drop below 100%).  The user's
+// control, applied after the game's own gamma ramp (the DAC palette below).
 static float g_gamma = 1.0f;
 
 void xemu_hud_set_brightness(int percent) {
@@ -65,6 +64,76 @@ static GLuint s_blit_vao  = 0;
 static GLint  s_blit_tex_loc  = -1;
 static GLint  s_blit_ndc_loc  = -1;
 static GLint  s_blit_gamma_loc = -1;
+static GLint  s_blit_lut_loc = -1;
+
+// ---- Xbox gamma ramp ----
+// Games set their brightness/gamma through the NV2A's VGA DAC palette (256
+// RGB entries, identity at reset; D3D SetGammaRamp).  The real DAC maps every
+// scanned-out pixel through it, so the TV sees the game's ramp.  Upstream
+// applies it in its display shader (ui/xui/gl-helpers.cc); this blit replaces
+// that path, so it does the same with a 256x1 lookup texture, refreshed when
+// the vCPU changes the palette.
+const uint8_t *nv2a_get_dac_palette(void);
+static GLuint s_lut_tex = 0;
+static uint8_t s_lut_palette[256 * 3];
+
+static bool palette_is_identity(const uint8_t *p)
+{
+    for (int i = 0; i < 256 * 3; i++) {
+        if (p[i] != i / 3) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void update_gamma_lut(void)
+{
+    uint8_t pal[256 * 3];
+    /* The vCPU writes it entry by entry; a frame may catch a ramp half
+     * written, which the next frame corrects (as upstream). */
+    memcpy(pal, nv2a_get_dac_palette(), sizeof(pal));
+    if (s_lut_tex && !memcmp(pal, s_lut_palette, sizeof(pal))) {
+        return;
+    }
+
+    uint8_t rgba[256 * 4];
+    for (int i = 0; i < 256; i++) {
+        rgba[i * 4 + 0] = pal[i * 3 + 0];
+        rgba[i * 4 + 1] = pal[i * 3 + 1];
+        rgba[i * 4 + 2] = pal[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+    }
+    glActiveTexture(GL_TEXTURE1);
+    if (!s_lut_tex) {
+        glGenTextures(1, &s_lut_tex);
+        glBindTexture(GL_TEXTURE_2D, s_lut_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 1, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, s_lut_tex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1, GL_RGBA,
+                        GL_UNSIGNED_BYTE, rgba);
+    }
+    glActiveTexture(GL_TEXTURE0);
+
+    /* Log the ramp when it settles into a new shape: identity, or a few
+     * sample points (R channel) and whether the channels differ. */
+    bool ident = palette_is_identity(pal);
+    bool grey = true;
+    for (int i = 0; i < 256 && grey; i++) {
+        grey = pal[i * 3] == pal[i * 3 + 1] && pal[i * 3] == pal[i * 3 + 2];
+    }
+    LOGI("gamma ramp: %s | R at 0/32/64/128/192/255 = %d %d %d %d %d %d%s",
+         ident ? "identity" : "set by the game", pal[0], pal[32 * 3],
+         pal[64 * 3], pal[128 * 3], pal[192 * 3], pal[255 * 3],
+         grey ? "" : " (channels differ)");
+    memcpy(s_lut_palette, pal, sizeof(pal));
+}
 
 static void check_shader_compile(GLuint shader, const char *name)
 {
@@ -121,10 +190,17 @@ static void init_blit_resources(void)
         "precision highp float;\n"
         "uniform sampler2D tex;\n"
         "uniform float u_gamma;\n"
+        "uniform sampler2D lut;\n"
         "in vec2 v_uv;\n"
         "layout(location = 0) out vec4 fragColor;\n"
+        "float dac(float c, int ch) {\n"
+        "    float x = (clamp(c, 0.0, 1.0) * 255.0 + 0.5) / 256.0;\n"
+        "    return texture(lut, vec2(x, 0.5))[ch];\n"
+        "}\n"
         "void main() {\n"
-        "    vec3 c = pow(max(texture(tex, v_uv).rgb, vec3(0.0)), vec3(u_gamma));\n"
+        "    vec3 t = texture(tex, v_uv).rgb;\n"
+        "    t = vec3(dac(t.r, 0), dac(t.g, 1), dac(t.b, 2));\n"
+        "    vec3 c = pow(max(t, vec3(0.0)), vec3(u_gamma));\n"
         "    fragColor = vec4(c, 1.0);\n"
         "}\n";
 
@@ -133,10 +209,17 @@ static void init_blit_resources(void)
         "precision highp float;\n"
         "uniform sampler2D tex;\n"
         "uniform float u_gamma;\n"
+        "uniform sampler2D lut;\n"
         "in vec2 v_uv;\n"
         "layout(location = 0) out vec4 fragColor;\n"
+        "float dac(float c, int ch) {\n"
+        "    float x = (clamp(c, 0.0, 1.0) * 255.0 + 0.5) / 256.0;\n"
+        "    return texture(lut, vec2(x, 0.5))[ch];\n"
+        "}\n"
         "void main() {\n"
-        "    vec3 c = pow(max(texture(tex, v_uv).rgb, vec3(0.0)), vec3(u_gamma));\n"
+        "    vec3 t = texture(tex, v_uv).rgb;\n"
+        "    t = vec3(dac(t.r, 0), dac(t.g, 1), dac(t.b, 2));\n"
+        "    vec3 c = pow(max(t, vec3(0.0)), vec3(u_gamma));\n"
         "    vec3 lin = mix(c / 12.92,\n"
         "                   pow((c + 0.055) / 1.055, vec3(2.4)),\n"
         "                   step(vec3(0.04045), c));\n"
@@ -172,6 +255,7 @@ static void init_blit_resources(void)
     s_blit_tex_loc  = glGetUniformLocation(s_blit_prog, "tex");
     s_blit_ndc_loc  = glGetUniformLocation(s_blit_prog, "dst_ndc");
     s_blit_gamma_loc = glGetUniformLocation(s_blit_prog, "u_gamma");
+    s_blit_lut_loc = glGetUniformLocation(s_blit_prog, "lut");
 
     glGenVertexArrays(1, &s_blit_vao);
 
@@ -299,7 +383,11 @@ void xemu_hud_render(void)
         glClear(GL_COLOR_BUFFER_BIT);
     }
 
+    update_gamma_lut();
+
     glUseProgram(s_blit_prog);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, s_lut_tex);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, s_blit_tex);
     {
@@ -310,6 +398,7 @@ void xemu_hud_render(void)
     glUniform1i(s_blit_tex_loc, 0);
     glUniform4f(s_blit_ndc_loc, x0, y0, x1, y1);
     glUniform1f(s_blit_gamma_loc, g_gamma);
+    glUniform1i(s_blit_lut_loc, 1);
 
     glBindVertexArray(s_blit_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

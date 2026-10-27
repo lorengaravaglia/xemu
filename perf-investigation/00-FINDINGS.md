@@ -5010,3 +5010,43 @@ real shader-state churn. The remaining per-bind cost is ~1,200 real state
 changes per frame on slot 5, each a 2.8 KB build + hash + LRU compare. Only
 a cheaper ShaderState (e.g. not copying the vertex program into it) would
 cut that.
+
+## CK. C13: THE XBOX GAMMA RAMP NOW REACHES THE SCREEN -- BUT HALO NEVER SETS ONE (2026-10-27)
+
+**Where the ramp lives:** the NV2A's VGA DAC palette (PRMDIO at 0x681000,
+`NV_USER_DAC_WRITE_MODE_ADDRESS` 0x3C8 / `PALETTE_DATA` 0x3C9: 256 RGB
+entries, identity at reset, saved in snapshots). Upstream already emulates
+the registers (`prmdio.c`) and applies the palette in its display shader
+(69ceec4446, `ui/xui/gl-helpers.cc`). The Android blit in
+`xemu_hud_stub.c` replaces that path and never applied it, so a game's
+ramp was stored but had no effect.
+
+**Change:** the blit uploads the palette as a 256x1 RGBA8 texture whenever
+its contents change (one 768-byte memcmp per frame). Each channel is looked
+up with linear filtering, which is exact at the 256 entries, before the
+user's Brightness curve (A14). A ramp change is logged:
+`gamma ramp: identity | set by the game ...` (tag xemu-android-hud-stub).
+
+**Verified:**
+- Path in: a temporary log in `prmdio_write` showed Jade Empire and Halo 2
+  upload full 256-entry ramps (768 data writes) at boot. Every one so far is
+  identity.
+- Path out: a temporary override of the palette (sqrt ramp; red zeroed)
+  visibly brightened Halo, and turned its purple walls blue, so the channel
+  order is right. Identity gives the same picture as before.
+
+**Which games set a non-identity ramp:** none seen yet. Cold boots to
+title/intro (Halo 2, JSRF, MGS2, THPS2x, Jade Empire), Halo's Quick resume
+and Halo 2's menus all stayed identity. **Halo CE never sets one**, so C13
+does not change Truth and Reconciliation's darkness. That remains the
+user's Brightness setting (A14). A game with an in-game brightness or gamma
+option that drives SetGammaRamp is still needed to see a game-set ramp
+end to end.
+
+**Side finding, not yet acted on:** port-era `ALOGI_PGRAPH` logs fire per
+frame/vblank in Halo, ~350 lines/s: `pcrtc: WRITE INTR_N` and
+`NV_PCRTC_START` (vCPU MMIO), `NVN_NO_OPERATION`, `NV_PGRAPH_INTR`,
+`NVN_WAIT_FOR_IDLE`, `BACK_END_WRITE_SEMAPHORE_RELEASE`. They flush the
+256 KB logcat buffer within seconds (stream `logcat -s <tag>` to a file to
+keep other lines), and each costs a syscall, some on the vCPU thread.
+Candidate for a measured cleanup.
