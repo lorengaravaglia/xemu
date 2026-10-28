@@ -5115,3 +5115,52 @@ rest are rate-limited by design: `ide_bus_set_irq` (first 200, then every
 Not A/B'd: no game with a benchmark slot streams from disc at this rate.
 At CL's ~30 µs a line it is ~4 ms/s on the vCPU in THPS2x (~0.13 ms per
 frame at 30 fps). The other logging that remains is periodic.
+
+## CN. C6 PART 1: PGO FOR THE MESON CORE -- vCPU −3%, NV2A THREAD −7% (2026-10-27)
+
+**Build:** `-fprofile-generate` on every Meson object (the CMake-compiled
+JNI/ui files are not profiled), with the profile runtime linked by CMake.
+The app never exits normally (`_exit()`, or killed), so the runtime's
+exit-time writer never runs. `pgo_dump()` in `pgraph/vk/texture.c` calls
+`__llvm_profile_write_file()` every 10 s instead, one file per pid. The
+symbols are weak, so it is a no-op in normal builds.
+
+**Workload:** Halo's Quick resume, benchmark slots 1/5/7 twice, then ~80 s
+cold boots of Halo 2, JSRF and Jade Empire. That gives 4 .profraw, merged
+into `pgo/xemu.profdata` (5.6 MB, 33,182 functions). The instrumented build
+still holds 33.5 ms frames; its NV2A thread costs ~14.5 ms instead of
+~10.5. Top block counts: tlb_reset_dirty, tlb_set_page_full,
+victim_tlb_hit, voice_process (APU), pgraph_vk_flush_draw,
+do_tb_phys_invalidate, float32_mul, helper_mulps_xmm.
+
+**Optimised build:** `-fprofile-use` plus `-Wno-profile-instr-unprofiled`,
+`-Wno-profile-instr-out-of-date` and `-Wno-backend-plugin`, in
+android_arm64.txt via `@DIRNAME@` (absolute, so Meson's configure-time
+compile checks work). The APK went from 99.6 to 84.0 MB: cold code is
+optimised for size.
+
+**Cross-build ABAB** (base, pgo, base, pgo; one session per build, slots
+1/5/7 twice per session, 450 frames; 4 runs per cell):
+
+| | base | PGO | change |
+|---|---|---|---|
+| slot 1 vCPU | 14.67 (14.60-14.77) | 14.22 (14.17-14.33) | −0.45 ms (−3.1%) |
+| slot 1 NV2A | 3.84 | 3.63 | −0.21 ms (−5.5%) |
+| slot 5 vCPU | 24.59 (24.21-24.94) | 23.88 (23.62-23.99) | −0.71 ms (−2.9%) |
+| slot 5 NV2A | 10.54 (10.47-10.62) | 9.81 (9.64-10.05) | −0.73 ms (−6.9%) |
+| slot 7 vCPU | 24.23 (24.05-24.41) | 23.65 (23.46-23.84) | −0.58 ms (−2.4%) |
+| slot 7 NV2A | 10.13 (10.07-10.23) | 9.41 (9.29-9.52) | −0.72 ms (−7.1%) |
+| frames > 45 ms (12 runs) | 5 | 4 | — |
+
+The ranges don't overlap in any cell, and temperatures matched across the
+builds (slot 7 ~90 C in both). The vCPU gain is the C helpers (softfloat,
+SSE, cputlb, tb-maint); the translated code itself is unchanged.
+
+**Reproducing:** `android/tools/core-rebuild.sh generate` ->
+`android/tools/pgo-collect.sh` -> `android/tools/core-rebuild.sh use`
+(CLAUDE.md, "Profile-guided optimisation"). The committed configuration
+gives instruction-identical code to the measured build (only data offsets
+differ). Staleness: an edited function loses its profile silently, so
+regenerate after substantial changes to hot code.
+
+**Next (C6 part 2):** ThinLTO on top.

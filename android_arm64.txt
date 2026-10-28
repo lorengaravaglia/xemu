@@ -47,6 +47,12 @@ cmake_make_program = 'ninja'
 #   (e.g. Snapdragon 888 / Cortex-X1).  The Thor is the floor (OPEN-WORK A7).
 # -mtune=cortex-x3: kalama's prime core (x4 is Snapdragon 8 Gen 3). Scheduling
 #   hint only; does not affect which instructions are legal.
-c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.6-a', '-mtune=cortex-x3']
-cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.6-a', '-mtune=cortex-x3']
+# -fprofile-use: profile-guided optimisation from pgo/xemu.profdata, collected on
+#   the Thor from Halo benchmarks and other games' boots (OPEN-WORK C6, FINDINGS
+#   CN): vCPU -3%, NV2A thread -7%.  Functions edited since the profile lose it
+#   (silently, the warnings are off) -- regenerate with android/tools/pgo-collect.sh.
+#   As with the other flags, editing this file does not reach an existing build
+#   dir: use android/tools/core-rebuild.sh (CLAUDE.md).
+c_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.6-a', '-mtune=cortex-x3', '-fprofile-use=@DIRNAME@/pgo/xemu.profdata', '-Wno-profile-instr-unprofiled', '-Wno-profile-instr-out-of-date', '-Wno-backend-plugin']
+cpp_args = ['-fPIC', '-DXBOX=1', '-mbranch-protection=none', '-fno-sanitize=shadow-call-stack', '-fno-emulated-tls', '-march=armv8.6-a', '-mtune=cortex-x3', '-fprofile-use=@DIRNAME@/pgo/xemu.profdata', '-Wno-profile-instr-unprofiled', '-Wno-profile-instr-out-of-date', '-Wno-backend-plugin']
 b_staticpic = true

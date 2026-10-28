@@ -570,6 +570,34 @@ static bool tex_reset = true;
 
 extern uint64_t g_nv2a_user_reads;
 
+#if defined(__ANDROID__) || defined(ANDROID)
+/*
+ * PGO (C6): an instrumented build (-fprofile-generate) never reaches the
+ * profile runtime's exit-time writer -- the app leaves with _exit() or is
+ * killed -- so write the counters every 10 s from here instead, one file per
+ * process (pull them with run-as, merge with llvm-profdata).  The symbols are
+ * weak, so in a normal build this does nothing.
+ */
+extern int __llvm_profile_write_file(void) __attribute__((weak));
+extern void __llvm_profile_set_filename(const char *) __attribute__((weak));
+
+static void pgo_dump(void)
+{
+    static char name[128];
+
+    if (!__llvm_profile_write_file || !__llvm_profile_set_filename) {
+        return;
+    }
+    if (!name[0]) {
+        mkdir("/data/data/com.boxxy/files/pgo", 0700);
+        snprintf(name, sizeof(name),
+                 "/data/data/com.boxxy/files/pgo/xemu-%d.profraw", getpid());
+        __llvm_profile_set_filename(name);
+    }
+    __llvm_profile_write_file();
+}
+#endif
+
 static void tex_stats_maybe_log(void)
 {
     static int64_t last_us;
@@ -633,6 +661,7 @@ static void tex_stats_maybe_log(void)
     memset(&tex_stats, 0, sizeof(tex_stats));
     last_us = now;
 #if defined(__ANDROID__) || defined(ANDROID)
+    pgo_dump();
     {
         char v[PROP_VALUE_MAX] = { 0 };
         /* Both on unless the property is explicitly "0". */

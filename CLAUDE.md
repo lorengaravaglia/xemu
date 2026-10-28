@@ -69,11 +69,28 @@ After changing `CMakeLists.txt`: use **Build → Refresh Linked C++ Projects** b
 ### Changing compiler flags for the Meson core
 
 Editing `c_args`/`cpp_args` in `android_arm64.txt` and regenerating does **not**
-change the build: Meson copied them into its coredata at setup. Use
-`meson configure build -Dc_args="[...]" -Dcpp_args="[...]"` with the NDK
-environment from `rebuild_meson.sh` exported, then recompile every `.o` and
-swap archive members in place. The exact procedure is in FINDINGS CH. Keep the
-CMake `target_compile_options` in step.
+change the build: Meson copied them into its coredata at setup. Run
+`android/tools/core-rebuild.sh` (about 10 min). It applies the cross-file's flags
+with `meson configure`, recompiles every `.o`, swaps the archive members in place
+and relinks the APK. The procedure is in FINDINGS CH. Keep the CMake
+`target_compile_options` in step.
+
+### Profile-guided optimisation (PGO)
+
+The core is built with `-fprofile-use` from `pgo/xemu.profdata` (FINDINGS CN:
+vCPU −3%, NV2A thread −7%). A function edited since the profile was taken loses
+its profile silently, because the out-of-date warnings are off. After substantial
+changes to hot code (nv2a, TCG, softfloat, the APU), regenerate the profile:
+
+```bash
+android/tools/core-rebuild.sh generate   # instrumented APK
+android/tools/pgo-collect.sh             # on the Thor: plays the workload, merges into pgo/xemu.profdata
+android/tools/core-rebuild.sh use        # optimised APK
+```
+
+Then commit the new `pgo/xemu.profdata`. `core-rebuild.sh none` builds without
+PGO for an A/B. The instrumented build writes its counters every 10 s
+(`pgo_dump` in `pgraph/vk/texture.c`), because the app never exits normally.
 
 ### Updating Meson-compiled core files (e.g. `hw/xbox/nv2a/*.c`)
 

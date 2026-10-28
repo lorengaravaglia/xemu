@@ -132,6 +132,13 @@ target_compile_options(xemu PRIVATE
     -O2
 )
 
+# PGO (FINDINGS CN): while the Meson core is instrumented
+# (android/tools/core-rebuild.sh generate leaves this marker), link the profile
+# runtime.  The CMake-compiled files themselves are not profiled.
+if(EXISTS "${XEMU_ROOT}/build/pgo-generate")
+    target_link_options(xemu PRIVATE -fprofile-generate)
+endif()
+
 # Find necessary libraries
 find_library(ANDROID_LIB android REQUIRED)
 find_library(LOG_LIB log REQUIRED)
