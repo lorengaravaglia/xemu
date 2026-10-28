@@ -5164,3 +5164,24 @@ differ). Staleness: an edited function loses its profile silently, so
 regenerate after substantial changes to hot code.
 
 **Next (C6 part 2):** ThinLTO on top.
+
+## CO. C6 PART 2: ThinLTO ABORTS AT BOOT (bql_locked) -- DROPPED (2026-10-27)
+
+ThinLTO on top of PGO (`-flto=thin` on every Meson object; the CMake link
+with `-flto=thin -O3`) built and linked fine. The library came out 0.25 MB
+smaller. The first launch aborted before the game started:
+
+    ERROR:../system/cpus.c:681:bql_lock_impl: assertion failed: (!bql_locked())
+
+`bql_locked` is a `QEMU_DEFINE_STATIC_CO_TLS` variable. QEMU keeps
+coroutine-visible thread-locals correct with `noinline` accessors plus an
+inline-asm barrier, and `include/qemu/coroutine-tls.h` itself calls this
+"fragile": the compiler can still analyse and optimise around noinline
+code. Cross-module optimisation evidently does, and a thread sees another
+thread's (or a cached) value. Making LTO safe means auditing every CO_TLS
+user and every `__thread` read in coroutine code, for an expected 1-3% on
+top of PGO. Not worth it; the LTO plumbing was not committed.
+
+If it is ever retried: LTO only the leaf hot code that has no coroutines
+or TLS (softfloat, the SSE helpers, hw/xbox/nv2a/pgraph), not the whole
+core. Mixed bitcode/native objects link fine.
