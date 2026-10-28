@@ -5090,3 +5090,28 @@ then `wait`, and use `grep -a`. Also wait a few seconds after the marker
 line before reading: adb output reaches the file in chunks. Benchmark
 summaries are on tag `xemu-android`, not `xemu-stdout`. Script:
 `scratchpad/c18/ab.sh` pattern.
+
+## CM. LOG AUDIT AFTER CL: ONE MORE PER-EVENT LOG, ATAPI COMMANDS (2026-10-27)
+
+Lines per 20 s from the emulator process, ~60 s after a cold boot (Halo:
+benchmark state), grouped by message:
+
+| game | before | top source |
+|---|---|---|
+| Halo | 192 | frameprof 1/s, 10 s stat lines -- all periodic |
+| JSRF | 78 | periodic |
+| MGS2 | 179 | `xemu-ide: atapi_cmd` ~2/s |
+| Halo 2 | 256 | `atapi_cmd` ~7/s |
+| Jade Empire | 1,267 | `atapi_cmd` ~60/s |
+| THPS2x | 2,587 | `atapi_cmd` ~130/s |
+
+`ide_atapi_cmd` (hw/ide/atapi.c) logged every ATAPI packet unconditionally,
+so disc-streaming games paid ~130 log writes a second on the vCPU. It now
+logs only with `debug.xemu.ide_log=1`, the prop that already gates the
+per-command `ide-cmd:` timing lines. THPS2x after: **128 lines/20 s**. The
+rest are rate-limited by design: `ide_bus_set_irq` (first 200, then every
+100th), `bench: SLOW FRAME` (only on a slow frame), frameprof (1/s).
+
+Not A/B'd: no game with a benchmark slot streams from disc at this rate.
+At CL's ~30 µs a line it is ~4 ms/s on the vCPU in THPS2x (~0.13 ms per
+frame at 30 fps). The other logging that remains is periodic.

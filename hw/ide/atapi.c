@@ -32,6 +32,7 @@
 #include "trace.h"
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <android/log.h>
+#include <sys/system_properties.h>
 #endif
 
 #define ATAPI_SECTOR_BITS (2 + BDRV_SECTOR_BITS)
@@ -1326,13 +1327,24 @@ void ide_atapi_cmd(IDEState *s)
 #if defined(__ANDROID__) || defined(ANDROID)
     {
         static int atapi_cmd_count = 0;
-        /* Log every ATAPI packet: opcode + first 6 bytes of the 12-byte CDB */
-        __android_log_print(ANDROID_LOG_INFO, "xemu-ide",
-            "atapi_cmd #%d op=0x%02x [%02x %02x %02x %02x %02x %02x]",
-            atapi_cmd_count++,
-            s->io_buffer[0],
-            s->io_buffer[1], s->io_buffer[2], s->io_buffer[3],
-            s->io_buffer[4], s->io_buffer[5], s->io_buffer[6]);
+        static int all_log = -1;
+        /* Every ATAPI packet (opcode + first 6 bytes of the 12-byte CDB),
+         * with debug.xemu.ide_log=1 only: disc-streaming games issue 60-130
+         * a second (FINDINGS CM).  The prop is re-read every 256 packets. */
+        if (all_log < 0 || (atapi_cmd_count & 255) == 0) {
+            char v[PROP_VALUE_MAX] = { 0 };
+            all_log = __system_property_get("debug.xemu.ide_log", v) > 0 &&
+                      v[0] == '1';
+        }
+        if (all_log) {
+            __android_log_print(ANDROID_LOG_INFO, "xemu-ide",
+                "atapi_cmd #%d op=0x%02x [%02x %02x %02x %02x %02x %02x]",
+                atapi_cmd_count,
+                s->io_buffer[0],
+                s->io_buffer[1], s->io_buffer[2], s->io_buffer[3],
+                s->io_buffer[4], s->io_buffer[5], s->io_buffer[6]);
+        }
+        atapi_cmd_count++;
     }
 #endif
 
