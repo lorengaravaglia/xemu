@@ -385,6 +385,15 @@ static void nv2a_reset(NV2AState *d)
         d->puserdac.palette[i*3+2] = i;
     }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    {
+        char v[PROP_VALUE_MAX] = { 0 };
+        qatomic_set(&g_nv2a_log,
+                    __system_property_get("debug.xemu.pgraph_log", v) > 0 &&
+                        v[0] == '1');
+    }
+#endif
+
     nv2a_unlock_fifo(d);
 }
 

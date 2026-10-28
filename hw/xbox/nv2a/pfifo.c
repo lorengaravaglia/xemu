@@ -23,10 +23,8 @@
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <android/log.h>
 #include <sys/system_properties.h>
-#define ALOGI_PFIFO(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
-#else
-#define ALOGI_PFIFO(...) ((void)0)
 #endif
+#define ALOGI_PFIFO NV2A_ALOGI
 
 typedef struct RAMHTEntry {
     uint32_t handle;

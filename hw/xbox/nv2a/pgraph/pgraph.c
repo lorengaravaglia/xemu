@@ -24,10 +24,8 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <android/log.h>
-#define ALOGI_PGRAPH(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
-#else
-#define ALOGI_PGRAPH(...) ((void)0)
 #endif
+#define ALOGI_PGRAPH NV2A_ALOGI
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-settings.h"
 #include "util.h"

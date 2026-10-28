@@ -479,5 +479,6 @@ As of April 2026, the Android port boots the Xbox BIOS, completes the boot anima
 Key tags:
 - `xemu-renderer`: `pgraph draw_end #N` — NV2A draw call count
 - `xemu-pgraph`: `FLIP_STALL`, `pgraph_gl_sync`, `pre-render` pixel samples, `draw_end` milestones
+  (the NV2A-path lines -- PCRTC/PFIFO/PGRAPH: FLIP_STALL, interrupts, NOP, semaphores -- are off unless `adb shell setprop debug.xemu.pgraph_log 1`; they cost ~0.8 ms/frame, FINDINGS CL)
 - `xemu-android-hud-stub`: `xemu_hud_render: center pixel rgba=(...)` — confirms non-black pixels reach the screen
 - `xemu-stdout`: `glo_context_create` errors (EGL context/pbuffer creation failures)

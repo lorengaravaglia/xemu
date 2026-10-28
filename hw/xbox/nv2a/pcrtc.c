@@ -22,10 +22,8 @@
 #include "nv2a_int.h"
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <android/log.h>
-#define ALOGI_PCRTC(...) ((void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph", __VA_ARGS__))
-#else
-#define ALOGI_PCRTC(...) ((void)0)
 #endif
+#define ALOGI_PCRTC NV2A_ALOGI
 
 /* Return the current linear PC of the first VCPU (for diagnostic ISR attribution) */
 static uint32_t pcrtc_get_vcpu_pc(void)

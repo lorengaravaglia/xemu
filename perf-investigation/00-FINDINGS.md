@@ -5050,3 +5050,43 @@ frame/vblank in Halo, ~350 lines/s: `pcrtc: WRITE INTR_N` and
 256 KB logcat buffer within seconds (stream `logcat -s <tag>` to a file to
 keep other lines), and each costs a syscall, some on the vCPU thread.
 Candidate for a measured cleanup.
+
+## CL. C18: PORT-ERA NV2A LOGS GATED OFF -- NV2A THREAD −0.8 ms/frame (−7%), vCPU −0.2-0.3 ms (2026-10-27)
+
+The `ALOGI_PCRTC` / `ALOGI_PFIFO` / `ALOGI_PGRAPH` macros (tag xemu-pgraph,
+from the GLES bring-up) logged on every frame or vblank in Halo: pcrtc
+INTR_0 writes and NV_PCRTC_START (vCPU MMIO), NOP, NV_PGRAPH_INTR,
+WAIT_FOR_IDLE, FLIP_*, semaphore release. A 12 s count gave **~850
+lines/s**. CK's 350/s was an undercount, because the 256 KB buffer was
+already wrapping. Each line is a formatted `__android_log_print`, i.e. a
+write to logd, and logd itself spends CPU on top.
+
+**Change:** all three macros are now `NV2A_ALOGI` (`nv2a_int.h`), which
+logs only when `g_nv2a_log` is set: `debug.xemu.pgraph_log=1`, read at
+reset and every 10 s on the pfifo thread. The arguments are not evaluated
+when it is off. Off: 0 lines in 12 s; on: 10,197.
+
+**Interleaved A/B, one process, 4 rounds, order alternated, 450 frames:**
+
+| | logs on (old) | logs off (new default) | change |
+|---|---|---|---|
+| slot 5 NV2A | 11.43, 11.58, 11.46, 11.49 | 10.69, 10.70, 10.71, 10.76 | **−0.77 ms (−6.7%)** |
+| slot 7 NV2A | 11.10, 11.23, 10.98, 11.13 | 10.26, 10.32, 10.29, 10.26 | **−0.83 ms (−7.5%)** |
+| slot 5 vCPU | 24.76, 25.13, 24.98, 25.00 | 24.74, 24.76, 24.76, 24.90 | −0.18 ms |
+| slot 7 vCPU | 24.78, 25.16, 24.69, 24.86 | 24.51, 24.57, 24.55, 24.66 | −0.30 ms |
+| frames > 45 ms | 0-1 per run | 0-1 per run | — |
+
+Every pair favours off, on both threads. ~28 lines per frame cost ~0.8 ms
+on the NV2A thread, ~30 µs a line, much more than the `fprintf` itself.
+The NV2A-thread lines include NOP and WAIT_FOR_IDLE, which sit inside the
+pg->lock hold (CI), so they also delay the next method.
+
+**Harness lesson (cost two aborted runs):** in zsh, `a logcat ... &` where
+`a` is a shell function backgrounds a subshell. `kill $!` kills the
+subshell, not adb. The old `adb logcat` processes kept writing into the
+reused capture file, which filled with NULs, and grep then treated it as
+binary and matched nothing. Run `$ADB -s $DEV logcat ... &` directly, `kill`
+then `wait`, and use `grep -a`. Also wait a few seconds after the marker
+line before reading: adb output reaches the file in chunks. Benchmark
+summaries are on tag `xemu-android`, not `xemu-stdout`. Script:
+`scratchpad/c18/ab.sh` pattern.

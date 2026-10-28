@@ -33,6 +33,7 @@ Nv2aAddrStat g_nv2a_addr_stats[32];
 __thread int64_t g_nv2a_last_wait_ns;
 
 int g_nv2a_lockfree = 1;
+int g_nv2a_log;
 
 uint64_t user_read(void *opaque, hwaddr addr, unsigned int size)
 {

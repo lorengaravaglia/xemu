@@ -641,6 +641,9 @@ static void tex_stats_maybe_log(void)
         qatomic_set(&g_nv2a_lockfree,
                     !(__system_property_get("debug.xemu.nv2a_lockfree", v) > 0 &&
                       v[0] == '0'));
+        qatomic_set(&g_nv2a_log,
+                    __system_property_get("debug.xemu.pgraph_log", v) > 0 &&
+                        v[0] == '1');
         {
             extern int g_nv2a_ubo_cmp;
             extern uint64_t g_nv2a_ubo_updates, g_nv2a_ubo_changed,

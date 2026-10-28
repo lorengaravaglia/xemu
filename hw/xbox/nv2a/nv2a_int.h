@@ -185,6 +185,24 @@ extern Nv2aLockStat g_nv2a_lock_stats[NV2A_LK__COUNT];
  */
 extern int g_nv2a_lockfree;
 
+/*
+ * The port's diagnostic logs on the NV2A paths (ALOGI_PCRTC/PFIFO/PGRAPH,
+ * tag xemu-pgraph). Off by default: several fire every frame or vblank, some
+ * on the vCPU, ~350 lines/s in Halo (FINDINGS CL). debug.xemu.pgraph_log=1
+ * turns them on; read at reset and every 10 s on the pfifo thread.
+ */
+extern int g_nv2a_log;
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <android/log.h>
+#define NV2A_ALOGI(...)                                                     \
+    (qatomic_read(&g_nv2a_log) ?                                           \
+         (void)__android_log_print(ANDROID_LOG_INFO, "xemu-pgraph",        \
+                                   __VA_ARGS__) :                          \
+         (void)0)
+#else
+#define NV2A_ALOGI(...) ((void)0)
+#endif
+
 /* Which registers the contended reads were for (pgraph_rd, pfifo_rd). */
 typedef struct Nv2aAddrStat {
     uint32_t block, addr;
