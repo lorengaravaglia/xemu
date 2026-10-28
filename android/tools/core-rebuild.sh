@@ -12,8 +12,8 @@
 # c_args at setup), so this script sets c_args/cpp_args with `meson configure`,
 # recompiles every object, swaps the members of the regular archives libsystem.a
 # and libcommon.a in place, rebuilds the slim libqemu-i386-softmmu.a, and relinks
-# (FINDINGS CH, CN).  ~10 min.  Expect 35 failed objects: 9p, vfio-user, TPM and
-# libuser's translate-all, none of which the app links.
+# (FINDINGS CH, CN).  ~10 min.  Expect 38 failed objects: 9p, vfio-user, TPM,
+# libuser's translate-all and the PTIMER unit test, none of which the app links.
 set -u
 MODE=${1:-use}
 ROOT=${0:A:h:h:h}
@@ -44,13 +44,15 @@ echo "c_args = $ARGS"
 meson configure build -Dc_args="$ARGS" -Dcpp_args="$ARGS" > $LOG 2>&1 ||
     { echo "meson configure failed (see $LOG)"; exit 1; }
 
-# CMakeLists.txt links the profile runtime while this marker exists.
+# CMakeLists.txt links the profile runtime while this marker exists. CMake reads
+# it only when it configures, so touch CMakeLists.txt to make Gradle reconfigure.
 if [[ $MODE == generate ]]; then touch build/pgo-generate; else rm -f build/pgo-generate; fi
+touch android/app/src/main/cpp/CMakeLists.txt
 
 ninja -C build -t targets all | awk -F': ' '$1 ~ /\.o$/ {print $1}' | sort -u > build/core-objs.txt
 echo "objects: $(wc -l < build/core-objs.txt)"
 xargs -n 2000 ninja -C build -k 0 < build/core-objs.txt >> $LOG 2>&1
-echo "failed objects: $(grep -c '^FAILED' $LOG) (35 expected)"
+echo "failed objects: $(grep -c '^FAILED' $LOG) (38 expected)"
 
 for lib in libsystem libcommon; do
   $B/llvm-ar t build/$lib.a | sed "s|^|build/$lib.a.p/|" | xargs $B/llvm-ar r build/$lib.a

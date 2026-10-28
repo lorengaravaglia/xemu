@@ -5185,3 +5185,39 @@ top of PGO. Not worth it; the LTO plumbing was not committed.
 If it is ever retried: LTO only the leaf hot code that has no coroutines
 or TLS (softfloat, the SSE helpers, hw/xbox/nv2a/pgraph), not the whole
 core. Mixed bitcode/native objects link fine.
+
+## CP. UPSTREAM SYNC (24 NV2A/PTIMER/APU FIXES): COST NOTHING ONCE RE-PROFILED (2026-10-27)
+
+Cherry-picked the upstream xemu commits that applied cleanly (merge-base
+2026-02-05, upstream at dc10b4cea9): NV2A fixed-function and texture
+accuracy (spotlight falloff, texgen infinite viewer, specular params,
+material colour sources, passthru clamp, Y16/R6G5B5 formats, point
+sprites only for points, X1A7 clears, colour/zeta RAM offsets, vsh R12
+input, overlapped dirty draws in 2D blits, rgba swizzles, DIRTY_MEMORY_NV2A
+on blit/download), PTIMER alarm interrupts plus the scheduling rounding
+fix, PFIFO CACHE1_DMA_CTL, the APU XGSCNT sample count, and two Vulkan
+format/scaling fixes. Snapshot NV2A vmstate goes 3 -> 4; old snapshots
+(Halo Quick resume, bench slots 1/5/7) load and render identically.
+
+Cross-build ABAB on slots 1/5/7, two builds x two rounds x two passes, all
+frames locked at 33.5 ms, no new >45 ms frames:
+
+| build | slot 5 vCPU / NV2A | slot 7 vCPU / NV2A |
+|---|---|---|
+| old (CN profile) | 23.90 / 9.70 | 23.72 / 9.29 |
+| new, old profile | 24.14 / 10.01 | 23.67 / 9.57 |
+| old (2nd run) | 24.25 / 9.80 | 23.87 / 9.34 |
+| new, re-profiled | 24.21 / 9.83 | 23.86 / 9.36 |
+
+The +3% NV2A with the old profile was profile staleness (edited pgraph,
+vsh-ff and vk functions lost their profiles), not the fixes: re-profiled,
+the new build is within 0.03 ms of the old one. Rule confirmed: re-run
+`pgo-collect.sh` after any upstream sync that touches hot code.
+
+Not taken yet: vsh fog carryover (aa54c34cae; conflicts with the CJ
+program-word filter in pgraph.c and runs one CPU vsh per draw -- measure),
+swizzled-tex/linear-surface invalidation (f7ec4e668b; conflicts with the
+BK texture-hash consumption in vk/texture.c), the Vulkan SPIR-V target
+series (needs the SPIR-V disk-cache key to include the target; "require
+format support" could reject a driver), xblc headset clean-ups, DSP JIT,
+desktop UI and CI.
