@@ -20,6 +20,7 @@
  */
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "qemu/fast-hash.h"
 #include "nv2a_vsh_emulator.h"
 #include "nv2a_vsh_disassembler.h"
 
@@ -152,14 +153,16 @@ void pgraph_reset_draw_arrays(PGRAPHState *pg)
     pg->draw_arrays_prevent_connect = false;
 }
 
+static GHashTable *carry_slices;
+
 void pgraph_vsh_carryover_invalidate_cache(PGRAPHState *pg)
 {
+    /* The slots borrow slices owned by carry_slices (see below). */
     for (int i = 0; i < ARRAY_SIZE(pg->vsh_carry_cached_programs); ++i) {
-        if (pg->vsh_carry_cached_programs[i]) {
-            nv2a_vsh_program_destroy(pg->vsh_carry_cached_programs[i]);
-            g_free(pg->vsh_carry_cached_programs[i]);
-            pg->vsh_carry_cached_programs[i] = NULL;
-        }
+        pg->vsh_carry_cached_programs[i] = NULL;
+    }
+    if (carry_slices) {
+        g_hash_table_remove_all(carry_slices);
     }
 }
 
@@ -185,13 +188,21 @@ void pgraph_vsh_carryover_reset(PGRAPHState *pg)
  * the slice reads.  The result is exact: a removed operation writes only
  * registers that nothing kept reads afterwards.
  *
+ * Halo also rewrites the program slots between draws, cycling a few programs
+ * through them -- ~3,000 re-parses a second, keyed by slot.  Slices are
+ * therefore shared by content: a slot that has been rewritten finds its
+ * program's extent from the FINAL bits, hashes the words, and only a program
+ * never seen before is parsed and sliced.
+ *
  * debug.xemu.vsh_carry: 0 skips the runs, for an A/B of their cost; 1 (the
  * default) runs the slices; 2 also runs upstream's full program and counts
  * any oFog that differs (vk-vshcarry "missed", printed every 10 s).
  */
 typedef struct VshCarrySlice {
-    Nv2aVshProgram program;     /* first: freed as a program by invalidate */
+    Nv2aVshProgram program;
     uint16_t length;            /* program slots up to the final step */
+    uint64_t hash;              /* of words */
+    uint32_t *words;            /* the program as uploaded, length * 4 */
     bool skip;                  /* never writes oFog: the value passes through */
     bool all_consts;            /* reads c[a0 + n]: copy every constant */
     uint8_t n_consts;
@@ -368,6 +379,74 @@ static void carry_run_full(PGRAPHState *pg, uint32_t program_start,
     memcpy(fog, &es.output_regs[NV2AOR_FOG_COORD * 4], sizeof(float) * 4);
 }
 
+static guint carry_slice_hash(gconstpointer key)
+{
+    return ((const VshCarrySlice *)key)->hash;
+}
+
+static gboolean carry_slice_equal(gconstpointer a, gconstpointer b)
+{
+    const VshCarrySlice *x = a, *y = b;
+    return x->hash == y->hash && x->length == y->length &&
+           !memcmp(x->words, y->words, x->length * VSH_TOKEN_SIZE * 4);
+}
+
+static void carry_slice_free(gpointer p)
+{
+    VshCarrySlice *s = p;
+    nv2a_vsh_program_destroy(&s->program);
+    g_free(s->words);
+    g_free(s);
+}
+
+/* The slice for the program at program_start, parsing it if it is new. */
+static VshCarrySlice *carry_slice_lookup(PGRAPHState *pg,
+                                         uint32_t program_start)
+{
+    uint32_t max = NV2A_MAX_TRANSFORM_PROGRAM_LENGTH - program_start;
+    uint32_t n = 0;
+    while (n < max && !(pg->program_data[program_start + n][3] & 1)) {
+        n++;
+    }
+    if (n == max) {
+        return NULL;    /* no FINAL step: the parse would fail too */
+    }
+    n++;
+
+    if (!carry_slices) {
+        carry_slices = g_hash_table_new_full(carry_slice_hash,
+                                             carry_slice_equal,
+                                             carry_slice_free, NULL);
+    }
+
+    uint32_t *words = &pg->program_data[program_start][0];
+    VshCarrySlice probe = {
+        .length = n,
+        .words = words,
+        .hash = fast_hash((const uint8_t *)words, n * VSH_TOKEN_SIZE * 4),
+    };
+    VshCarrySlice *s = g_hash_table_lookup(carry_slices, &probe);
+    if (s) {
+        return s;
+    }
+
+    s = g_new0(VshCarrySlice, 1);
+    if (nv2a_vsh_parse_program(&s->program, words, n) != NV2AVPR_SUCCESS) {
+        g_free(s);
+        return NULL;
+    }
+    slice_program(s);
+    s->hash = probe.hash;
+    s->words = g_memdup2(words, n * VSH_TOKEN_SIZE * 4);
+    if (g_hash_table_size(carry_slices) >= 4096) {
+        /* bounded: start over rather than grow without limit */
+        pgraph_vsh_carryover_invalidate_cache(pg);
+    }
+    g_hash_table_add(carry_slices, s);
+    g_vsh_carry_parses++;
+    return s;
+}
+
 static void carry_invalidate_dirty(PGRAPHState *pg)
 {
     if (pg->vsh_carry_cache_dirty) {
@@ -379,8 +458,6 @@ static void carry_invalidate_dirty(PGRAPHState *pg)
             VshCarrySlice *s =
                 (VshCarrySlice *)pg->vsh_carry_cached_programs[i];
             if (s && i + s->length > pg->vsh_carry_dirty_lo) {
-                nv2a_vsh_program_destroy(&s->program);
-                g_free(s);
                 pg->vsh_carry_cached_programs[i] = NULL;
             }
         }
@@ -414,17 +491,11 @@ void pgraph_vsh_carryover_update(PGRAPHState *pg)
     VshCarrySlice *s =
         (VshCarrySlice *)pg->vsh_carry_cached_programs[program_start];
     if (!s) {
-        s = g_new0(VshCarrySlice, 1);
-        Nv2aVshParseResult result = nv2a_vsh_parse_program(
-            &s->program, pg->program_data[program_start],
-            NV2A_MAX_TRANSFORM_PROGRAM_LENGTH - program_start);
-        if (result != NV2AVPR_SUCCESS) {
-            g_free(s);
+        s = carry_slice_lookup(pg, program_start);
+        if (!s) {
             return;
         }
-        slice_program(s);
         pg->vsh_carry_cached_programs[program_start] = &s->program;
-        g_vsh_carry_parses++;
     }
 
     float full[4];
