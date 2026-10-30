@@ -2092,7 +2092,8 @@ DEF_METHOD_INC(NV097, SET_TRANSFORM_PROGRAM)
     if (!qatomic_read(&g_shader_dirty_mode) ||
         pg->program_data[program_load][slot%4] != parameter) {
         pg->program_data_dirty = true;
-        pg->vsh_carry_cache_dirty = true;
+        pg->vsh_carry_dirty_lo = MIN(pg->vsh_carry_dirty_lo, program_load);
+        pg->vsh_carry_dirty_hi = MAX(pg->vsh_carry_dirty_hi, program_load);
     }
     pg->program_data[program_load][slot%4] = parameter;
 

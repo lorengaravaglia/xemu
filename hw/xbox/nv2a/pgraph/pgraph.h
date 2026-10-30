@@ -192,6 +192,8 @@ typedef struct PGRAPHState {
     bool program_data_dirty;
     float vsh_carry_fog[4];
     bool vsh_carry_cache_dirty;
+    /* program slots written since the last draw (empty while lo > hi) */
+    uint16_t vsh_carry_dirty_lo, vsh_carry_dirty_hi;
     Nv2aVshProgram *vsh_carry_cached_programs[NV2A_MAX_TRANSFORM_PROGRAM_LENGTH];
 
     uint32_t vsh_constants[NV2A_VERTEXSHADER_CONSTANTS][4];

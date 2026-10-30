@@ -171,15 +171,223 @@ void pgraph_vsh_carryover_reset(PGRAPHState *pg)
     pg->vsh_carry_fog[3] = 1.0f;
     pgraph_vsh_carryover_invalidate_cache(pg);
     pg->vsh_carry_cache_dirty = false;
+    pg->vsh_carry_dirty_lo = UINT16_MAX;
+    pg->vsh_carry_dirty_hi = 0;
 }
 
 /*
- * debug.xemu.vsh_carry=0 skips the per-draw CPU run (the fog value then stays
- * at its last result), for an in-process A/B of its cost.  The counters are
- * printed and reset every 10 s with the other vk- lines (vk/texture.c).
+ * Android port: the carryover runs on the NV2A thread for every draw, ~1,600
+ * per frame in Halo, and as upstream wrote it each run cleared and copied the
+ * whole 4 KB register file and executed the whole program for the one value
+ * it keeps, oFog -- +1.2 ms per frame (FINDINGS CQ).  Programs have no
+ * branches, so each cached program is sliced once, when parsed, down to the
+ * operations whose results reach oFog, and a run copies in only the constants
+ * the slice reads.  The result is exact: a removed operation writes only
+ * registers that nothing kept reads afterwards.
+ *
+ * debug.xemu.vsh_carry: 0 skips the runs, for an A/B of their cost; 1 (the
+ * default) runs the slices; 2 also runs upstream's full program and counts
+ * any oFog that differs (vk-vshcarry "missed", printed every 10 s).
  */
+typedef struct VshCarrySlice {
+    Nv2aVshProgram program;     /* first: freed as a program by invalidate */
+    uint16_t length;            /* program slots up to the final step */
+    bool skip;                  /* never writes oFog: the value passes through */
+    bool all_consts;            /* reads c[a0 + n]: copy every constant */
+    uint8_t n_consts;
+    uint8_t consts[NV2A_VERTEXSHADER_CONSTANTS];
+} VshCarrySlice;
+
 int g_vsh_carry = 1;
-uint64_t g_vsh_carry_runs, g_vsh_carry_parses;
+uint64_t g_vsh_carry_runs, g_vsh_carry_parses, g_vsh_carry_skips,
+    g_vsh_carry_missed;
+
+typedef struct SliceLiveness {
+    bool out[13];
+    uint32_t temps;
+    bool a0;
+    bool ctx_relative;
+    bool ctx[NV2A_VERTEXSHADER_CONSTANTS];
+} SliceLiveness;
+
+static bool slice_op_needed(const SliceLiveness *l, const Nv2aVshOperation *op)
+{
+    if (op->opcode == NV2AOP_NOP) {
+        return false;
+    }
+    for (int i = 0; i < 2; i++) {
+        const Nv2aVshOutput *o = &op->outputs[i];
+        switch (o->type) {
+        case NV2ART_OUTPUT:
+            if (o->index < 13 && l->out[o->index]) {
+                return true;
+            }
+            break;
+        case NV2ART_TEMPORARY:
+            if (l->temps & (1u << o->index)) {
+                return true;
+            }
+            break;
+        case NV2ART_ADDRESS:
+            if (l->a0) {
+                return true;
+            }
+            break;
+        case NV2ART_CONTEXT:
+            if (l->ctx_relative ||
+                (o->index < NV2A_VERTEXSHADER_CONSTANTS && l->ctx[o->index])) {
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return false;
+}
+
+static void slice_add_inputs(SliceLiveness *l, const Nv2aVshOperation *op,
+                             int n_inputs)
+{
+    for (int i = 0; i < n_inputs; i++) {
+        const Nv2aVshInput *in = &op->inputs[i];
+        if (in->type == NV2ART_NONE) {
+            break;
+        }
+        if (in->type == NV2ART_TEMPORARY) {
+            if (in->index == 12) {
+                l->out[NV2AOR_POS] = true;   /* r12 reads oPos */
+            } else {
+                l->temps |= 1u << in->index;
+            }
+        } else if (in->type == NV2ART_CONTEXT) {
+            if (in->is_relative) {
+                l->a0 = true;
+                l->ctx_relative = true;
+            } else if (in->index < NV2A_VERTEXSHADER_CONSTANTS) {
+                l->ctx[in->index] = true;
+            }
+        }
+    }
+}
+
+/* Slice a parsed program in place to the operations that reach oFog. */
+static void slice_program(VshCarrySlice *s)
+{
+    Nv2aVshStep *steps = s->program.steps;
+    int n = 0;
+    while (!steps[n].is_final) {
+        n++;
+    }
+    n++;
+    s->length = n;
+
+    /*
+     * Backwards, with no kills: a register is live if any kept operation
+     * after this point reads it.  That over-approximates (partial write
+     * masks need no special case) and only ever keeps more.  Both operations
+     * of a step are judged before either's inputs are added, since a step
+     * reads its inputs before it writes.
+     */
+    SliceLiveness l = { 0 };
+    l.out[NV2AOR_FOG_COORD] = true;
+    for (int i = n - 1; i >= 0; i--) {
+        bool mac = slice_op_needed(&l, &steps[i].mac);
+        bool ilu = slice_op_needed(&l, &steps[i].ilu);
+        if (mac) {
+            slice_add_inputs(&l, &steps[i].mac, 3);
+        } else {
+            steps[i].mac.opcode = NV2AOP_NOP;
+        }
+        if (ilu) {
+            slice_add_inputs(&l, &steps[i].ilu, 1);
+        } else {
+            steps[i].ilu.opcode = NV2AOP_NOP;
+        }
+    }
+
+    int kept = 0;
+    for (int i = 0; i < n; i++) {
+        if (steps[i].mac.opcode != NV2AOP_NOP ||
+            steps[i].ilu.opcode != NV2AOP_NOP) {
+            steps[kept] = steps[i];
+            steps[kept].is_final = false;
+            kept++;
+        }
+    }
+    s->skip = !kept;
+    if (kept) {
+        steps[kept - 1].is_final = true;
+    }
+
+    s->all_consts = l.ctx_relative;
+    s->n_consts = 0;
+    for (int i = 0; i < NV2A_VERTEXSHADER_CONSTANTS && !s->all_consts; i++) {
+        if (l.ctx[i]) {
+            s->consts[s->n_consts++] = i;
+        }
+    }
+}
+
+static void carry_init_state(PGRAPHState *pg, Nv2aVshCPUFullExecutionState *es)
+{
+    memset(es->temp_regs, 0, sizeof(es->temp_regs));
+    memset(es->address_reg, 0, sizeof(es->address_reg));
+    for (int i = 0; i < ARRAY_SIZE(pg->vertex_attributes); ++i) {
+        memcpy(&es->input_regs[i * 4], pg->vertex_attributes[i].inline_value,
+               sizeof(float) * 4);
+    }
+    for (int i = 0; i < ARRAY_SIZE(es->output_regs) / 4; ++i) {
+        es->output_regs[i * 4 + 0] = 0.0f;
+        es->output_regs[i * 4 + 1] = 0.0f;
+        es->output_regs[i * 4 + 2] = 0.0f;
+        es->output_regs[i * 4 + 3] = 1.0f;
+    }
+    memcpy(&es->output_regs[NV2AOR_FOG_COORD * 4], pg->vsh_carry_fog,
+           sizeof(pg->vsh_carry_fog));
+}
+
+/* Upstream's run of the whole program, for debug.xemu.vsh_carry=2. */
+static void carry_run_full(PGRAPHState *pg, uint32_t program_start,
+                           float fog[4])
+{
+    Nv2aVshProgram program;
+    if (nv2a_vsh_parse_program(&program, pg->program_data[program_start],
+                               NV2A_MAX_TRANSFORM_PROGRAM_LENGTH -
+                                   program_start) != NV2AVPR_SUCCESS) {
+        memcpy(fog, pg->vsh_carry_fog, sizeof(pg->vsh_carry_fog));
+        return;
+    }
+    Nv2aVshCPUFullExecutionState es;
+    Nv2aVshExecutionState state =
+        nv2a_vsh_emu_initialize_full_execution_state(&es);
+    carry_init_state(pg, &es);
+    memcpy(es.context_regs, pg->vsh_constants, sizeof(es.context_regs));
+    nv2a_vsh_emu_execute(&state, &program);
+    nv2a_vsh_program_destroy(&program);
+    memcpy(fog, &es.output_regs[NV2AOR_FOG_COORD * 4], sizeof(float) * 4);
+}
+
+static void carry_invalidate_dirty(PGRAPHState *pg)
+{
+    if (pg->vsh_carry_cache_dirty) {
+        pgraph_vsh_carryover_invalidate_cache(pg);
+        pg->vsh_carry_cache_dirty = false;
+    } else if (pg->vsh_carry_dirty_lo <= pg->vsh_carry_dirty_hi) {
+        /* Drop only the programs that span a rewritten slot. */
+        for (int i = 0; i <= pg->vsh_carry_dirty_hi; i++) {
+            VshCarrySlice *s =
+                (VshCarrySlice *)pg->vsh_carry_cached_programs[i];
+            if (s && i + s->length > pg->vsh_carry_dirty_lo) {
+                nv2a_vsh_program_destroy(&s->program);
+                g_free(s);
+                pg->vsh_carry_cached_programs[i] = NULL;
+            }
+        }
+    }
+    pg->vsh_carry_dirty_lo = UINT16_MAX;
+    pg->vsh_carry_dirty_hi = 0;
+}
 
 void pgraph_vsh_carryover_update(PGRAPHState *pg)
 {
@@ -188,14 +396,12 @@ void pgraph_vsh_carryover_update(PGRAPHState *pg)
         return;
     }
 
-    if (pg->vsh_carry_cache_dirty) {
-        pgraph_vsh_carryover_invalidate_cache(pg);
-        pg->vsh_carry_cache_dirty = false;
-    }
+    carry_invalidate_dirty(pg);
 
+    int mode = qatomic_read(&g_vsh_carry);
     bool is_vertex_program = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CSV0_D),
                                       NV_PGRAPH_CSV0_D_MODE) == 2;
-    if (!is_vertex_program || !qatomic_read(&g_vsh_carry)) {
+    if (!is_vertex_program || !mode) {
         return;
     }
 
@@ -205,49 +411,59 @@ void pgraph_vsh_carryover_update(PGRAPHState *pg)
         return;
     }
 
-    if (!pg->vsh_carry_cached_programs[program_start]) {
-        Nv2aVshProgram *program = g_new0(Nv2aVshProgram, 1);
+    VshCarrySlice *s =
+        (VshCarrySlice *)pg->vsh_carry_cached_programs[program_start];
+    if (!s) {
+        s = g_new0(VshCarrySlice, 1);
         Nv2aVshParseResult result = nv2a_vsh_parse_program(
-            program, pg->program_data[program_start],
+            &s->program, pg->program_data[program_start],
             NV2A_MAX_TRANSFORM_PROGRAM_LENGTH - program_start);
         if (result != NV2AVPR_SUCCESS) {
-            g_free(program);
+            g_free(s);
             return;
         }
-        pg->vsh_carry_cached_programs[program_start] = program;
+        slice_program(s);
+        pg->vsh_carry_cached_programs[program_start] = &s->program;
         g_vsh_carry_parses++;
     }
-    g_vsh_carry_runs++;
 
-    Nv2aVshProgram *program = pg->vsh_carry_cached_programs[program_start];
-
-    Nv2aVshCPUFullExecutionState execution_state;
-    Nv2aVshExecutionState state =
-        nv2a_vsh_emu_initialize_full_execution_state(&execution_state);
-
-    for (int i = 0; i < ARRAY_SIZE(pg->vertex_attributes); ++i) {
-        memcpy(&execution_state.input_regs[i * 4],
-               pg->vertex_attributes[i].inline_value, sizeof(float) * 4);
+    float full[4];
+    if (mode == 2) {
+        carry_run_full(pg, program_start, full);
     }
 
-    for (int i = 0; i < ARRAY_SIZE(execution_state.output_regs) / 4; ++i) {
-        execution_state.output_regs[i * 4 + 0] = 0.0f;
-        execution_state.output_regs[i * 4 + 1] = 0.0f;
-        execution_state.output_regs[i * 4 + 2] = 0.0f;
-        execution_state.output_regs[i * 4 + 3] = 1.0f;
+    if (s->skip) {
+        g_vsh_carry_skips++;
+    } else {
+        g_vsh_carry_runs++;
+        Nv2aVshCPUFullExecutionState es;
+        Nv2aVshExecutionState state = {
+            .input_regs = es.input_regs,
+            .output_regs = es.output_regs,
+            .temp_regs = es.temp_regs,
+            .context_regs = es.context_regs,
+            .address_reg = es.address_reg,
+        };
+        carry_init_state(pg, &es);
+
+        QEMU_BUILD_BUG_MSG(sizeof(es.context_regs) != sizeof(pg->vsh_constants),
+                           "context_regs and vsh_constants size mismatch");
+        if (s->all_consts) {
+            memcpy(es.context_regs, pg->vsh_constants, sizeof(es.context_regs));
+        } else {
+            for (int i = 0; i < s->n_consts; i++) {
+                memcpy(&es.context_regs[s->consts[i] * 4],
+                       pg->vsh_constants[s->consts[i]], sizeof(float) * 4);
+            }
+        }
+
+        nv2a_vsh_emu_execute(&state, &s->program);
+
+        memcpy(pg->vsh_carry_fog, &es.output_regs[NV2AOR_FOG_COORD * 4],
+               sizeof(pg->vsh_carry_fog));
     }
-    memcpy(&execution_state.output_regs[NV2AOR_FOG_COORD * 4],
-           pg->vsh_carry_fog, sizeof(pg->vsh_carry_fog));
 
-    QEMU_BUILD_BUG_MSG(sizeof(execution_state.context_regs) !=
-                           sizeof(pg->vsh_constants),
-                       "context_regs and vsh_constants size mismatch");
-    memcpy(execution_state.context_regs, pg->vsh_constants,
-           sizeof(execution_state.context_regs));
-
-    nv2a_vsh_emu_execute(&state, program);
-
-    memcpy(pg->vsh_carry_fog,
-           &execution_state.output_regs[NV2AOR_FOG_COORD * 4],
-           sizeof(pg->vsh_carry_fog));
+    if (mode == 2 && memcmp(full, pg->vsh_carry_fog, sizeof(full))) {
+        g_vsh_carry_missed++;
+    }
 }

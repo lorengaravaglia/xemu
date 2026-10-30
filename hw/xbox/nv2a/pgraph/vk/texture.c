@@ -746,14 +746,20 @@ static void tex_stats_maybe_log(void)
                 v[0] == '1';
 
             extern int g_vsh_carry;
-            extern uint64_t g_vsh_carry_runs, g_vsh_carry_parses;
+            extern uint64_t g_vsh_carry_runs, g_vsh_carry_parses,
+                g_vsh_carry_skips, g_vsh_carry_missed;
             fprintf(stderr, "vk-vshcarry: mode %d | runs %" PRIu64
-                    " parses %" PRIu64 "\n", qatomic_read(&g_vsh_carry),
-                    g_vsh_carry_runs, g_vsh_carry_parses);
+                    " skips %" PRIu64 " parses %" PRIu64 " missed %" PRIu64
+                    "\n", qatomic_read(&g_vsh_carry), g_vsh_carry_runs,
+                    g_vsh_carry_skips, g_vsh_carry_parses, g_vsh_carry_missed);
             g_vsh_carry_runs = g_vsh_carry_parses = 0;
-            qatomic_set(&g_vsh_carry,
-                        !(__system_property_get("debug.xemu.vsh_carry", v) > 0 &&
-                          v[0] == '0'));
+            g_vsh_carry_skips = g_vsh_carry_missed = 0;
+            m = 1;
+            if (__system_property_get("debug.xemu.vsh_carry", v) > 0 &&
+                v[0] >= '0' && v[0] <= '2') {
+                m = v[0] - '0';
+            }
+            qatomic_set(&g_vsh_carry, m);
         }
     }
 #endif
