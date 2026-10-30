@@ -5221,3 +5221,54 @@ BK texture-hash consumption in vk/texture.c), the Vulkan SPIR-V target
 series (needs the SPIR-V disk-cache key to include the target; "require
 format support" could reject a driver), xblc headset clean-ups, DSP JIT,
 desktop UI and CI.
+
+## CQ. UPSTREAM SYNC PART 2: TEXTURE INVALIDATION, FOG CARRYOVER (SLICED), VULKAN TARGET (2026-10-29)
+
+The three items CP left out, now merged.
+
+**f7ec4e668b (swizzled texture cleared through a linear surface, Tron 2.0).**
+Hand-merged with the BK incremental page hash: a binding last filled from a
+surface (`draw_time != 0`) that is bound as plain memory forces a full rehash
+and an upload, then consumes the dirty range as usual. Rare transition; no
+hot-path cost.
+
+**aa54c34cae (vsh fog carryover, Blade 2).** Upstream runs the whole vertex
+program on the CPU for every draw to keep one value, oFog, clearing and
+copying the whole 4 KB register file each time. Halo: ~1,600 runs per frame,
+~3,000 re-parses a second (it cycles programs through the same slots).
+In-process A/B, 4 rounds, `debug.xemu.vsh_carry` on vs off, NV2A thread:
+
+| version | slot 5 | slot 7 |
+|---|---|---|
+| upstream | +1.10 ms (10.20 -> 11.31) | +1.10 ms (9.76 -> 10.86) |
+| per-slot oFog slices | +0.28 ms | +0.25 ms |
+| slices shared by program content | +0.21 ms | +0.12 ms |
+
+Slicing (vertex.c): programs have no branches, so each is reduced once to the
+operations that reach oFog (backwards over temps, A0, r12/oPos, constant
+writes; no kills, so it only keeps more). Most of Halo's programs never write
+oFog and are skipped outright (~400k of ~460k per 10 s on slot 1); a run
+copies only the constants the slice reads. Content sharing: a rewritten slot
+finds its extent from the FINAL bits and hashes its words; parses fall from
+~25,000 to <30 per 10 s.
+
+Exactness: `debug.xemu.vsh_carry=2` also runs upstream's full program and
+counts differing oFog values: 0 over ~3.5 M comparisons on slots 1/5/7, with
+the full program changing oFog ~58,000 times per 10 s (so agreement is not
+trivial). Probe proven by fault injection: skipping every 7th sliced run gave
+~8,000 misses per 10 s.
+
+**Vulkan SPIR-V target series (c4d2ee2665, a6195c4142, 8e4e58fdba, d23f202ede,
+bf817de2b0).** The NDK headers are 1.3.275 (no VK_API_VERSION_1_4), so the
+1.4 cap compiles out and the negotiated target stays 1.3 on both the Adreno
+740 (512.676.53) and Turnip 26.3.0-R3: shaders compile exactly as before.
+The SPIR-V disk cache now keys files by target for anything but 1.3
+(`<hash>-vk14.spv`), so a driver switch can never load another target's
+modules; existing caches keep their names. The new format check in device
+selection passes on both drivers.
+
+**Totals.** Re-profiled PGO, then cross-build ABAB against the CP build,
+slots 1/5/7, two rounds x two passes: NV2A +0.01 / +0.09 / +0.11 ms, vCPU
+-0.12 / -0.22 / -0.10 ms (noise), frames locked at 33.5 ms, slow frames 4 vs
+6. Upstream is now fully synced to dc10b4cea9 except xblc, DSP JIT, desktop
+UI and CI.
