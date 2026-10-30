@@ -744,6 +744,16 @@ static void tex_stats_maybe_log(void)
             g_vk_shbind_why_on =
                 __system_property_get("debug.xemu.shader_dirty_why", v) > 0 &&
                 v[0] == '1';
+
+            extern int g_vsh_carry;
+            extern uint64_t g_vsh_carry_runs, g_vsh_carry_parses;
+            fprintf(stderr, "vk-vshcarry: mode %d | runs %" PRIu64
+                    " parses %" PRIu64 "\n", qatomic_read(&g_vsh_carry),
+                    g_vsh_carry_runs, g_vsh_carry_parses);
+            g_vsh_carry_runs = g_vsh_carry_parses = 0;
+            qatomic_set(&g_vsh_carry,
+                        !(__system_property_get("debug.xemu.vsh_carry", v) > 0 &&
+                          v[0] == '0'));
         }
     }
 #endif

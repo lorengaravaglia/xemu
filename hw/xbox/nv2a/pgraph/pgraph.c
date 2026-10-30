@@ -384,6 +384,7 @@ void pgraph_init(NV2AState *d)
     }
 
     pgraph_clear_dirty_reg_map(pg);
+    pgraph_vsh_carryover_reset(pg);
 }
 
 void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
@@ -500,6 +501,8 @@ void pgraph_init_thread(NV2AState *d)
 void pgraph_destroy(PGRAPHState *pg)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
+
+    pgraph_vsh_carryover_invalidate_cache(pg);
 
     if (pg->renderer->ops.finalize) {
        pg->renderer->ops.finalize(d);
@@ -2084,10 +2087,12 @@ DEF_METHOD_INC(NV097, SET_TRANSFORM_PROGRAM)
 
     assert(program_load < NV2A_MAX_TRANSFORM_PROGRAM_LENGTH);
     /* Games re-upload the same program between draws; an unchanged word
-     * cannot change the shader state (debug.xemu.shader_dirty, glsl/shaders.c) */
+     * cannot change the shader state (debug.xemu.shader_dirty, glsl/shaders.c)
+     * or the program the fog carryover runs (vertex.c) */
     if (!qatomic_read(&g_shader_dirty_mode) ||
         pg->program_data[program_load][slot%4] != parameter) {
         pg->program_data_dirty = true;
+        pg->vsh_carry_cache_dirty = true;
     }
     pg->program_data[program_load][slot%4] = parameter;
 
