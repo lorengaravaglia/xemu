@@ -5,11 +5,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.GridView
@@ -154,6 +156,27 @@ fun GameLibraryScreen(
     LaunchedEffect(focusedKey, centreKey, games.size) {
         (focusedKey ?: centreKey ?: games.firstOrNull()?.uri?.toString())
             ?.let { libraryViewModel.select(android.net.Uri.parse(it)) }
+    }
+    /* Focus scrolls a card only until its box touches the edge, which leaves
+     * the highlighted card's lift and border cut off at either end of the
+     * row.  Once that scroll settles, finish it with a margin. */
+    val focusMargin = with(androidx.compose.ui.platform.LocalDensity.current) { 16.dp.toPx() }
+    LaunchedEffect(focusedKey) {
+        val key = focusedKey ?: return@LaunchedEffect
+        androidx.compose.runtime.snapshotFlow { gridState.isScrollInProgress }
+            .first { !it }
+        val info = gridState.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.key == key } ?: return@LaunchedEffect
+        val start = item.offset.x.toFloat()
+        val end = start + item.size.width
+        val delta = when {
+            start < info.viewportStartOffset + focusMargin ->
+                start - (info.viewportStartOffset + focusMargin)
+            end > info.viewportEndOffset - focusMargin ->
+                end - (info.viewportEndOffset - focusMargin)
+            else -> 0f
+        }
+        if (delta != 0f) gridState.animateScrollBy(delta)
     }
 
     val activity = context as? androidx.activity.ComponentActivity
