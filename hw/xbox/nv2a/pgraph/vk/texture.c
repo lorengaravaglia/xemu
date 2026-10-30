@@ -1512,11 +1512,19 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     void *texture_data = (char*)d->vram_ptr + texture_vram_offset;
     void *palette_data = (char*)d->vram_ptr + texture_palette_vram_offset;
 
+    /*
+     * A cached image last filled from a render surface no longer matches RAM
+     * once the texture is read as plain memory again (Tron 2.0 clears a
+     * swizzled texture through a linear surface, upstream f7ec4e668b).  The
+     * page hashes describe RAM, not the image, so rehash it all and upload.
+     */
+    bool from_surface = binding_found && !surface_to_texture && snode->draw_time;
+
     uint64_t content_hash = 0;
-    if (!surface_to_texture && possibly_dirty) {
+    if (!surface_to_texture && (possibly_dirty || from_surface)) {
         content_hash = texture_content_hash(snode, texture_vram_offset,
                                             texture_data, texture_length,
-                                            !binding_found);
+                                            !binding_found || from_surface);
         if (is_indexed) {
             /* the palette is small; hash it whole */
             content_hash ^= fast_hash(palette_data, texture_palette_data_size);
@@ -1525,7 +1533,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (binding_found) {
         if (surface_to_texture) {
-            // FIXME: Add draw time tracking
             if (surface->draw_time != snode->draw_time) {
                 copy_surface_to_texture(pg, surface, snode);
             }
@@ -1539,9 +1546,10 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                     tex_stats.unchanged++;
                 }
             }
-            if (possibly_dirty && content_hash != snode->hash) {
+            if (from_surface || (possibly_dirty && content_hash != snode->hash)) {
                 upload_texture_image(pg, texture_idx, snode);
                 snode->hash = content_hash;
+                snode->draw_time = 0;
             }
             /*
              * The dirty range has now been hashed, so consume it (opt-in,
@@ -1553,7 +1561,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
              * New writes are not lost: they set fresh dirty bits, which the
              * next check_texture_possibly_dirty() turns into a new range.
              */
-            if (possibly_dirty && tex_reset) {
+            if ((possibly_dirty || from_surface) && tex_reset) {
                 snode->possibly_dirty = false;
                 snode->dirty_start = ~(hwaddr)0;
                 snode->dirty_end = 0;
@@ -1824,6 +1832,9 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->allocation = VK_NULL_HANDLE;
     snode->image_view = VK_NULL_HANDLE;
     snode->sampler = VK_NULL_HANDLE;
+    snode->draw_time = 0;
+    snode->hash = 0;
+    snode->possibly_dirty = false;
     snode->page_hashes = NULL;
     snode->n_page_hashes = 0;
     snode->dirty_start = ~(hwaddr)0;
